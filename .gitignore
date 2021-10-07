@@ -2,4 +2,5 @@
 env
 .npz
 *.npz
+wandb/
 models
