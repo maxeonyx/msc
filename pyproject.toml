@@ -17,6 +17,7 @@ Pillow = "^8.4.0"
 tensorflow-datasets = "^4.4.0"
 graphviz = "^0.17"
 pydot = "^1.4.2"
+tensorflow-probability = "^0.14.1"
 
 [tool.poetry.dev-dependencies]
 
