@@ -158,10 +158,11 @@ def multi_head_attention(embd_dim, n_heads):
     return call
     
 def pointwise_feedforward_layer(hidden_dim, out_dim):
-    dense1 = layers.Dense(hidden_dim, activation='relu')
+    dense1 = layers.Dense(hidden_dim)
     dense2 = layers.Dense(out_dim)
     def call(x):
         x = dense1(x)
+        x = tf.nn.gelu(x)
         x = dense2(x)
         return x
     return call

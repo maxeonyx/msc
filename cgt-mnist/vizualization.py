@@ -59,10 +59,32 @@ class Viz:
             seq = tf.scatter_nd(idxs_nd, seq, [batch_size, img_length])
 
         if do_unquantize:
-            seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float16)
+            seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
         seq = tf.cast(seq, float).numpy()
 
         return self.np_showSeq(seq, size, max_images, cmap)
+
+    def showSeqExpectedVal(self, seq, probs, idxs, size, max_images=3, cmap='gray', unshuffle=False):
+        """ Show one or more images encoded as sequence. (tensorflow version)
+
+            seq: tensor of sequences which encode the image. Either a single sequence or multiple sequences.
+            size: the image size. e.g. (28, 28) for `mnist` images.
+            max_images: the maximum number of images to display.
+        """
+        batch_size = idxs.shape[0]
+        seq_length = idxs.shape[1]
+        img_length = size[0]*size[1]
+        
+        # do_unquantize for samples first
+        seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
+        
+        centroids = tf.reshape(self.centroids, [1, 1, -1])
+        expected_col = tf.tensordot(probs, centroids, axes=([2], [2]))
+        expected_col = tf.squeeze(expected_col, axis=-1)
+        
+        seq = tf.concat([seq, expected_col], axis=1)
+        seq = tf.squeeze(seq)
+        return self.showSeq(seq, idxs, size, max_images, cmap, unshuffle=unshuffle, do_unquantize=False)
 
     def compare_quantized_and_unquantized(self, dataset_test_original):
         

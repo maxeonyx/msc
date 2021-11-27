@@ -91,13 +91,12 @@ def const_batch_size(batch_size):
     return call
 
 def learning_rate_schedule(config, return_all=False):
-    total_steps = config['n_epochs'] * config['steps_per_epoch']
     s = {
         'constant': Constant(config['max_lr']),
-        'exponential': Exponential(total_steps, config['max_lr'], config['min_lr']),
-        'warmup_exponential': WarmupExponential(total_steps, config['lr_warmup_steps'], config['max_lr'], config['min_lr']),
+        'exponential': Exponential(config.n_steps, config['max_lr'], config['min_lr']),
+        'warmup_exponential': WarmupExponential(config.n_steps, config['lr_warmup_steps'], config['max_lr'], config['min_lr']),
         # 'warmup_inv_square': WarmupInvSquare(config['model']['embd_dim'], config['lr_warmup_steps']),
-        'warmup_linear': WarmupLinear(total_steps, config['max_lr'], config['lr_warmup_steps']),
+        'warmup_linear': WarmupLinear(config.n_steps, config['max_lr'], config['lr_warmup_steps']),
     }
     if return_all:
         return s
@@ -107,9 +106,8 @@ def learning_rate_schedule(config, return_all=False):
         return s[config['lr_schedule']]
 
 def batch_size_schedule(config, return_all=False):
-    total_steps = config['n_epochs'] * config['steps_per_epoch']
     s = {
-        'exponential': exponential_batch_size(total_steps, config['start_accum_steps'], config['end_accum_steps']),
+        'exponential': exponential_batch_size(config.n_steps, config['start_accum_steps'], config['end_accum_steps']),
         'constant': const_batch_size(config['start_accum_steps']),
         'dynamic': None,
     }
@@ -121,13 +119,12 @@ def batch_size_schedule(config, return_all=False):
         return s[config['batch_size_schedule']]
 
 def show_schedules(config):
-    total_steps = config['n_epochs'] * config['steps_per_epoch']
     lr_schedules = learning_rate_schedule(config, return_all=True)
     batch_size_schedules = batch_size_schedule(config, return_all=True)
     
     fig, axes = plt.subplots(len(lr_schedules), 1, figsize=(20,4*len(lr_schedules)))
     fig.suptitle("Learning Rate Schedules")
-    x = tf.range(0, total_steps, 10, dtype=tf.float32)
+    x = tf.range(0, config.n_steps, 10, dtype=tf.float32)
     for ax, (name, lr_schedule) in zip(axes, lr_schedules.items()):
         ax.set_title(name)
         ax.plot(x, lr_schedule(x))

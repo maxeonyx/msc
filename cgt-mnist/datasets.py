@@ -13,7 +13,7 @@ import tensorflow_probability as tfp
 from dotmap import DotMap
 
 def normalize_image(image, label):
-    return tf.cast(image, dtype=tf.float16) / 255.0, label
+    return tf.cast(image, dtype=tf.float32) / 255.0, label
 
 def find_centroids(ds_train, num_clusters, batch_size):
     kmeans = MiniBatchKMeans(n_clusters=num_clusters, random_state=0, batch_size=batch_size, verbose=True)
@@ -29,7 +29,7 @@ def find_centroids(ds_train, num_clusters, batch_size):
             clusters_status.update(''.join('{:<10.3f}'.format(x[0]) for x in np.sort(kmeans.cluster_centers_, axis=0)))
 
         centroids = kmeans.cluster_centers_
-        centroids = tf.convert_to_tensor(np.sort(centroids, axis=0), dtype=tf.float16)
+        centroids = tf.convert_to_tensor(np.sort(centroids, axis=0), dtype=tf.float32)
         return centroids
 
 def mnist_gamma_distribution():
@@ -92,9 +92,14 @@ class Datasets:
         return sequence, label
 
     def unquantize(self, x):
-        x_one_hot = tf.cast(tf.one_hot(x, depth=len(self.centroids)), dtype=tf.float16)  # (seq, num_centroids)
+        x_one_hot = tf.cast(tf.one_hot(x, depth=len(self.centroids)), dtype=tf.float32)  # (seq, num_centroids)
         return tf.linalg.matmul(x_one_hot,self.centroids)  # (seq, num_features)
 
+    def expected_col(self, probs):
+        centroids = tf.reshape(self.centroids, [1, 1, -1])
+        expected_col = tf.tensordot(probs, centroids, axes=([2], [2]))
+        expected_col = tf.squeeze(expected_col, axis=-1)
+        return expected_col
     
     def shuffle_and_add_indices(self, sequence, label):
 
@@ -112,7 +117,10 @@ class Datasets:
         n = tf.cast(tf.math.round(self.dist.sample(sample_shape=[])), tf.int32)
         n = tf.clip_by_value(n, 1, self.config['seq_length'] - 1)
         
-        return batch_sequences, batch_idxs, tf.repeat(n, self.config.num_devices)
+        if self.config.batch_size_schedule == 'dynamic':
+            return batch_sequences, batch_idxs, n
+        else:
+            return batch_sequences, batch_idxs, tf.repeat(n, self.config.num_devices)
 
     def add_indices(self, sequence, label):
 
@@ -129,20 +137,39 @@ class Datasets:
     
     def random_split_shuffled(self):
         
-        dataset_train = (
+        dataset_train_shuf = (
             self.ds_train_orig
             .map(normalize_image)
             .map(flatten)
             .map(self.quantize)
             .map(self.shuffle_and_add_indices)
             .cache()
+        )
+        dataset_train_noshuf = (
+            self.ds_train_orig
+            .map(normalize_image)
+            .map(flatten)
+            .map(self.quantize)
+            .map(self.add_indices)
+            .cache()
+        )
+        
+        dataset_train = (
+            dataset_train_shuf
             .repeat()
             .shuffle(self.config['dataset']['buffer_size'])
-            .batch(self.config['global_batch_size'], drop_remainder=True)
-            # split input and target according to gamma distribution shown above
-            .map(self.add_n_from_distribution)
-            .prefetch(tf.data.experimental.AUTOTUNE)
         )
+            
+        if self.config.batch_size_schedule == 'dynamic':
+            dataset_train = dataset_train.batch(self.config.minibatch_size)
+            dataset_train = dataset_train.map(self.add_n_from_distribution)
+            dataset_train = dataset_train.batch(self.config.end_accum_steps * self.config.num_devices)
+        else:
+            dataset_train = dataset_train.batch(self.config.global_batch_size)
+            dataset_train = dataset_train.map(self.add_n_from_distribution)
+        
+        dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
+            
         
         dataset_test = (
             self.ds_test_orig
@@ -151,6 +178,8 @@ class Datasets:
             .map(self.quantize)
             .map(self.add_indices)
             .cache()
+            .repeat()
+            .shuffle(self.config['dataset']['buffer_size'])
             .batch(self.config['test_minibatch_size'], drop_remainder=True)
             .prefetch(tf.data.experimental.AUTOTUNE)
         )
@@ -161,6 +190,8 @@ class Datasets:
             .map(self.quantize)
             .map(self.shuffle_and_add_indices)
             .cache()
+            .repeat()
+            .shuffle(self.config['dataset']['buffer_size'])
             .batch(self.config['test_minibatch_size'], drop_remainder=True)
             .prefetch(tf.data.experimental.AUTOTUNE)
         )
