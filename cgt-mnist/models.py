@@ -157,12 +157,21 @@ def multi_head_attention(embd_dim, n_heads):
         return output, attention_weights
     return call
     
-def pointwise_feedforward_layer(hidden_dim, out_dim):
-    dense1 = layers.Dense(hidden_dim)
+def pointwise_feedforward_layer(m, hidden_dim, out_dim, n_hidden_layers=1):
+    hidden_layers = [layers.Dense(hidden_dim) for _ in range(n_hidden_layers)]
     dense2 = layers.Dense(out_dim)
+    
+    if m.activation == 'relu':
+        activation = tf.nn.relu
+    elif m.activation == 'swish':
+        activation = tf.nn.silu
+    elif m.activation == 'gelu':
+        activation = tf.nn.gelu
+    
     def call(x):
-        x = dense1(x)
-        x = tf.nn.gelu(x)
+        for layer in hidden_layers:
+            x = layer(x)
+            x = activation(x)
         x = dense2(x)
         return x
     return call
@@ -170,7 +179,7 @@ def pointwise_feedforward_layer(hidden_dim, out_dim):
 
 def transformer_layer(m):
     mha = multi_head_attention(m.embd_dim, m.n_heads)
-    ffl = pointwise_feedforward_layer(m.ffl_dim, m.embd_dim)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
     dropout1 = layers.Dropout(m.dropout_rate)
@@ -190,7 +199,7 @@ def transformer_layer(m):
     
 def transformer_3sep_layer(m):
     mha = multi_head_attention(m.embd_dim, m.n_heads)
-    ffl = pointwise_feedforward_layer(m.ffl_dim, m.embd_dim)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
     dropout1 = layers.Dropout(m.dropout_rate)
@@ -212,10 +221,10 @@ def transformer_3sep_layer(m):
 def anp_architecture_no_global_latent(m):
     enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
     dec_layer = transformer_3sep_layer(m)
-    x_encoder = pointwise_feedforward_layer(m.ffl_dim, m.embd_dim)
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     final_dropout = layers.Dropout(m.dropout_rate)
     final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m.ffl_dim, m.n_colors)
+    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
     def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
         inp_x = x_encoder(inp_x)
         tar_x = x_encoder(tar_x)
@@ -232,10 +241,10 @@ def anp_architecture(m):
     enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
     enc_b_layers = [transformer_layer(m) for _ in range(m.n_enc_b_layers)]
     dec_layer = transformer_3sep_layer(m)
-    x_encoder = pointwise_feedforward_layer(m.ffl_dim, m.embd_dim)
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     final_dropout = layers.Dropout(m.dropout_rate)
     final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m.ffl_dim, m.n_colors)
+    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
     def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
         inp_x = x_encoder(inp_x)
         tar_x = x_encoder(tar_x)

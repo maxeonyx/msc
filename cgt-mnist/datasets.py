@@ -104,62 +104,47 @@ class Datasets:
     def shuffle_and_add_indices(self, sequence, label):
 
         idxs = tf.range(self.config['seq_length'], dtype=tf.int32)
-        idxs = tf.random.shuffle(idxs)
+        shuf_idxs = tf.random.shuffle(idxs)
 
-        sequence = tf.gather(sequence, idxs)
+        shuf_sequence = tf.gather(sequence, shuf_idxs)
 
-        return sequence, idxs, label
+        return sequence, idxs, shuf_sequence, shuf_idxs, label
+    
+    def add_noise(self, sequence, idxs, shuf_sequence, shuf_idxs, label):
+        
+        n_noise = int(self.config.noise_fraction * self.config.seq_length)
+        noise = tf.random.uniform([n_noise], minval=0, maxval=self.config.n_colors, dtype=tf.int32)
+        rand_idxs = tf.random.shuffle(idxs)
+        rand_idxs = rand_idxs[:n_noise, None]
+        shuf_sequence_noise = tf.tensor_scatter_nd_update(shuf_sequence, rand_idxs, noise)
+        
+        return sequence, idxs, shuf_sequence, shuf_idxs, shuf_sequence_noise, label
 
-
-    def add_n_from_distribution(self, batch_sequences, batch_idxs, batch_labels):
-        bs = tf.shape(batch_sequences)[0]
+    def add_n_from_distribution(self, sequence, idxs, shuf_sequence, shuf_idxs, shuf_seq_noise, label):
+        bs = tf.shape(sequence)[0]
         # sample single integer between 0 and 783 from given distribution
         n = tf.cast(tf.math.round(self.dist.sample(sample_shape=[])), tf.int32)
         n = tf.clip_by_value(n, 1, self.config['seq_length'] - 1)
         
         if self.config.batch_size_schedule == 'dynamic':
-            return batch_sequences, batch_idxs, n
+            return sequence, idxs, shuf_sequence, shuf_idxs, shuf_seq_noise, n
         else:
-            return batch_sequences, batch_idxs, tf.repeat(n, self.config.num_devices)
-
-    def add_indices(self, sequence, label):
-
-        idxs = tf.range(self.config['seq_length'], dtype=tf.int32)
-
-        return sequence, idxs, label
-
-    def make_datasets(self, kind):
-        
-        if kind == 'random_split_shuffled':
-            return self.random_split_shuffled()
-        else:
-            assert False, f'Dataset type "{kind}" isnt valid'
+            return sequence, idxs, shuf_sequence, shuf_idxs, shuf_seq_noise, tf.repeat(n, self.config.num_devices)
     
-    def random_split_shuffled(self):
-        
-        dataset_train_shuf = (
-            self.ds_train_orig
-            .map(normalize_image)
-            .map(flatten)
-            .map(self.quantize)
-            .map(self.shuffle_and_add_indices)
-            .cache()
-        )
-        dataset_train_noshuf = (
-            self.ds_train_orig
-            .map(normalize_image)
-            .map(flatten)
-            .map(self.quantize)
-            .map(self.add_indices)
-            .cache()
-        )
+    def make_datasets(self):
         
         dataset_train = (
-            dataset_train_shuf
+            self.ds_train_orig
+            .map(normalize_image)
+            .map(flatten)
+            .map(self.quantize)
+            .cache()
             .repeat()
             .shuffle(self.config['dataset']['buffer_size'])
+            .map(self.shuffle_and_add_indices)
+            .map(self.add_noise)
         )
-            
+        
         if self.config.batch_size_schedule == 'dynamic':
             dataset_train = dataset_train.batch(self.config.minibatch_size)
             dataset_train = dataset_train.map(self.add_n_from_distribution)
@@ -176,18 +161,6 @@ class Datasets:
             .map(normalize_image)
             .map(flatten)
             .map(self.quantize)
-            .map(self.add_indices)
-            .cache()
-            .repeat()
-            .shuffle(self.config['dataset']['buffer_size'])
-            .batch(self.config['test_minibatch_size'], drop_remainder=True)
-            .prefetch(tf.data.experimental.AUTOTUNE)
-        )
-        dataset_test_shuffled = (
-            self.ds_test_orig
-            .map(normalize_image)
-            .map(flatten)
-            .map(self.quantize)
             .map(self.shuffle_and_add_indices)
             .cache()
             .repeat()
@@ -196,4 +169,4 @@ class Datasets:
             .prefetch(tf.data.experimental.AUTOTUNE)
         )
 
-        return dataset_train, dataset_test, dataset_test_shuffled
+        return dataset_train, dataset_test
