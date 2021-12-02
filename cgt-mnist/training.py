@@ -205,40 +205,64 @@ class TrainingLoop():
         
         info_bar.update(f'Loss: {loss:.5g}, Loss ({window_size} step avg.): {running_mean:.5g}, Test Loss (shuf): {test_loss_shuf:.5g}, Test Loss (seq): {test_loss_seq:.5g}, #R*BS*GA: {num_replicas:>3}*{minibatch_size}*{self.accum_steps:<5}')
         
-    def test_loss(self, n, shuffled, manager=None):
+    def test_loss(self, manager=None):
+        
+        random_n     = [1, 2, 4, 8, 12, 16, 32, 64, 128, 256] # each has ~2x random pixels than prev (except addition of 12)
+        sequential_n = [1, *[n*28 for n in range(4,13)]] # each has an extra row of interesting pixels
+        assert len(random_n) == len(sequential_n)
+        
+        total_steps = 0
+        for shuffled, n_seq in [(True, random_n), (False, sequential_n)]:
+            # autoregressive completion takes 784-n steps for 
+            total_steps += sum(n_batches * self.config.seq_length - n for n in n_seq)
+        
+        if manager is None:
+            manager = enlighten.get_manager()
+        evaluate_counter = manager.counter(total=total_steps, desc="Evaluating", unit='steps', leave=False)
         
         loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
             
         n_batches = self.config.test_size // self.config.test_minibatch_size
         
-        if manager is None:
-            manager = enlighten.get_manager()
-        evaluate_counter = manager.counter(total=n_batches, desc="Evaluating", unit='pixels', leave=False)
-        
-        losses = None
-        for i in evaluate_counter(range(n_batches)):
-            colors, idxs, colors_shuf, idxs_shuf, _ = next(self.ds_test)
-            
-            if shuffled:
-                colors, idxs = colors_shuf, idxs_shuf
-            
-            inp_colors = colors[:, :n]
-            inp_idxs = idxs[:, :n]
-            tar_idxs = idxs[:, n:]
-            
-            tar_colors = colors[:, n:]
-            pred_logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
-            
-            loss = loss_function(tar_colors, pred_logits)
-            if losses is None:
-                losses = loss
-            else:
-                losses = tf.concat([losses, loss], axis=0)
+        random_losses = None
+        sequen_losses = None
+        for shuffled, n_seq in [(True, random_n), (False, sequential_n)]:
+            for n in n_seq:
+                expectd_losses = None
+                autoreg_losses = None
+                for batch_i in range(n_batches):
+                    colors, idxs, colors_shuf, idxs_shuf, _ = next(self.ds_test)
+
+                    if shuffled:
+                        colors, idxs = colors_shuf, idxs_shuf
+
+                    inp_colors = colors[:, :n]
+                    tar_colors = colors[:, n:]
+                    inp_idxs = idxs[:, :n]
+                    tar_idxs = idxs[:, n:]
+                    
+                    samples = None
+                    for pix_i in range(n, self.config.seq_length):
+                        pred_logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
+
+                        if pix_i == 0:
+                            loss = loss_function(tar_colors, pred_logits)
+                            if expectd_losses is None:
+                                expectd_losses = loss
+                            else:
+                                expectd_losses = tf.concat([expectd_losses, loss], axis=0)
+                        
+                        this_samples = tf.random.categorical(pred_logits[:, 0], 1, dtype=tf.int32)
+                        if samples is None:
+                            this_samples = samples
+                        else:
+                            samples = tf.concat([samples, this_samples], axis=-1)
+                    
+                    loss = loss_function(tar_colors, pred_logits)
         
         evaluate_counter.close()
         
         return tf.reduce_mean(losses)
-            
             
     def evaluate(self, inp_colors, all_idxs, manager=None):
         n = inp_colors.shape[-1]
@@ -247,7 +271,7 @@ class TrainingLoop():
 
         if manager is None:
             manager = enlighten.get_manager()
-        evaluate_counter = manager.counter(total=n, desc="Evaluating", unit='steps', leave=False)
+        evaluate_counter = manager.counter(total=n_total-n, desc="Evaluating", unit='steps', leave=False)
         
         for i in evaluate_counter(range(n, n_total)):
 
@@ -277,10 +301,13 @@ class TrainingLoop():
     
     def evaluate_varying(self, all_colors, all_idxs, n_fn, manager=None):
         batch_size = all_colors.shape[0]
+        seq_length = all_colors.shape[1]
         
         if manager is None:
             manager = enlighten.get_manager()
         evaluate_counter = manager.counter(total=batch_size, desc="Evaluating", unit='steps', leave=False)
+        
+        bg_all = None
         
         all_expected_col = None
         for i in evaluate_counter(range(batch_size)):
@@ -288,6 +315,13 @@ class TrainingLoop():
             inp_idxs = all_idxs[:1, :n]
             inp_colors = all_colors[:1, :n]
             tar_idxs = all_idxs[:1, n:]
+            
+            unq_inp = self.viz.unquantize(inp_colors)
+            bg_input = self.viz.scatter_on_bg(unq_inp, inp_idxs, output_length=seq_length)
+            if bg_all is None:
+                bg_all = bg_input
+            else:
+                bg_all = tf.concat([bg_all, bg_input], axis=0)
 
             logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
             
@@ -301,7 +335,7 @@ class TrainingLoop():
             all_expected_col = expected_col if all_expected_col is None else tf.concat([all_expected_col, expected_col], axis=0)
 
         evaluate_counter.close()
-        return all_expected_col
+        return all_expected_col, bg_all
 
     def process_batch(self, return_figs=False, show_input=True, show_output=True, manager=None):
         all_colors = self.test_colors
@@ -321,14 +355,32 @@ class TrainingLoop():
             fig2 = self.viz.showSeq(expected_col,           all_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
             repeated_col = tf.tile(all_colors[5:6], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[5:6], [batch_size, 1])
-            varying_n = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 2**i + 10, manager=manager)
+            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 2**i + 10, manager=manager)
+            if show_input:
+                self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
             fig3 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
             repeated_col = tf.tile(all_colors[0:1], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[0:1], [batch_size, 1])
-            varying_n = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 70*i, manager=manager)
+            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 70*i, manager=manager)
+            if show_input:
+                self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
             fig4 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
             if return_figs:
                 return fig1, fig2, fig3, fig4
+    
+    def many_autoregressive(self):
+        all_colors = self.test_colors
+        all_idxs = self.test_idxs
+        batch_size = all_colors.shape[0]
+        image_width, image_height = self.config['image_width'], self.config['image_height']
+        for n in [15*i + 1 for i in range(5,10)]:
+            inp_colors = all_colors[:, :n]
+            inp_idxs = all_idxs[:, :n]
+            autoregressive_samples, _ = self.evaluate(inp_colors, all_idxs)
+            print("n =", n)
+            self.viz.showSeq(inp_colors, inp_idxs, (image_width, image_height), batch_size, unshuffle=True)
+            self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True)
+        
 
     def train(self):
         self.process_batch(show_output=False)
