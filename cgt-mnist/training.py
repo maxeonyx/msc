@@ -207,12 +207,9 @@ class TrainingLoop():
         
     def test_loss(self, manager=None):
         
-        random_n     = [1, 2, 4, 8, 12, 16, 32, 64, 128, 256] # each has ~2x random pixels than prev (except addition of 12)
-        sequential_n = [1, *[n*28 for n in range(4,13)]] # each has an extra row of interesting pixels
-        assert len(random_n) == len(sequential_n)
-        
+        n_batches = self.config.test_size // self.config.test_minibatch_size
         total_steps = 0
-        for shuffled, n_seq in [(True, random_n), (False, sequential_n)]:
+        for shuffled, n_seq in [(True, self.config.test_n_shuf), (False, self.config.test_n_seq)]:
             # autoregressive completion takes 784-n steps for 
             total_steps += sum(n_batches * self.config.seq_length - n for n in n_seq)
         
@@ -221,15 +218,10 @@ class TrainingLoop():
         evaluate_counter = manager.counter(total=total_steps, desc="Evaluating", unit='steps', leave=False)
         
         loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
-            
-        n_batches = self.config.test_size // self.config.test_minibatch_size
         
-        random_losses = None
-        sequen_losses = None
-        for shuffled, n_seq in [(True, random_n), (False, sequential_n)]:
-            for n in n_seq:
-                expectd_losses = None
-                autoreg_losses = None
+        losses = {}
+        for shuffled, typ, n_seq in [(True, "shuf", self.config.test_n_shuf), (False, "seq", self.config.test_n_seq)]:
+            for i, n in enumerate(n_seq):
                 for batch_i in range(n_batches):
                     colors, idxs, colors_shuf, idxs_shuf, _ = next(self.ds_test)
 
@@ -242,27 +234,39 @@ class TrainingLoop():
                     tar_idxs = idxs[:, n:]
                     
                     samples = None
-                    for pix_i in range(n, self.config.seq_length):
+                    for pix_i in range(self.config.seq_length - n):
                         pred_logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
 
                         if pix_i == 0:
                             loss = loss_function(tar_colors, pred_logits)
-                            if expectd_losses is None:
-                                expectd_losses = loss
+                            name = f"loss_{typ}_{n}"
+                            if batch_i == 0:
+                                losses[name] = loss
                             else:
-                                expectd_losses = tf.concat([expectd_losses, loss], axis=0)
+                                losses[name] = tf.concat([losses[name], loss], axis=0)
                         
                         this_samples = tf.random.categorical(pred_logits[:, 0], 1, dtype=tf.int32)
+                        this_samples = tf.one_hot(this_samples, depth=self.config.n_colors)
                         if samples is None:
-                            this_samples = samples
+                            samples = this_samples
                         else:
-                            samples = tf.concat([samples, this_samples], axis=-1)
+                            samples = tf.concat([samples, this_samples], axis=1)
+                        
+                        evaluate_counter.update()
                     
-                    loss = loss_function(tar_colors, pred_logits)
+                    loss = loss_function(tar_colors, samples)
+                    name = f"loss_autoreg_{typ}_{n}"
+                    if batch_i == 0:
+                        losses[name] = loss
+                    else:
+                        losses[name] = tf.concat([losses[name], loss], axis=0)
         
         evaluate_counter.close()
         
-        return tf.reduce_mean(losses)
+        for name in losses:
+            losses[name] = tf.reduce_mean(losses[name])
+        
+        return losses
             
     def evaluate(self, inp_colors, all_idxs, manager=None):
         n = inp_colors.shape[-1]
@@ -451,7 +455,6 @@ class TrainingLoop():
             wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
                     
         if self.step_index > 0 and self.step_index % self.config.test_interval == 0:
-            self.test_loss_shuf = self.test_loss(self.config.seq_length//2, shuffled=True, manager=manager)
-            self.test_loss_seq = self.test_loss(self.config.seq_length//2, shuffled=False, manager=manager)
+            losses = self.test_loss(manager=manager)
             
-            wandb.log({'test_log_loss_shuffled': tf.math.log(self.test_loss_shuf), 'test_log_loss_sequential': tf.math.log(self.test_loss_seq)}, step=self.step_index)
+            wandb.log(losses, step=self.step_index)
