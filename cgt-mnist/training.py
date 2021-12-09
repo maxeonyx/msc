@@ -372,12 +372,14 @@ class TrainingLoop():
             if return_figs:
                 return fig1, fig2, fig3, fig4
     
-    def many_autoregressive(self):
+    def many_autoregressive(self, n_seq=None):
         all_colors = self.test_colors
         all_idxs = self.test_idxs
         batch_size = all_colors.shape[0]
         image_width, image_height = self.config['image_width'], self.config['image_height']
-        for n in [15*i + 1 for i in range(5,10)]:
+        if n_seq is None:
+            n_seq = [15*i + 1 for i in range(5,10)]
+        for n in n_seq:
             inp_colors = all_colors[:, :n]
             inp_idxs = all_idxs[:, :n]
             autoregressive_samples, _ = self.evaluate(inp_colors, all_idxs)
