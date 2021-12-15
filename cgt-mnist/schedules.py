@@ -105,11 +105,9 @@ def learning_rate_schedule(config, return_all=False):
             return s['constant']
         return s[config['lr_schedule']]
 
-def batch_size_schedule(config, return_all=False):
+def batch_size_schedule(config, name, params, return_all=False):
     s = {
-        'exponential': exponential_batch_size(config.n_steps, config['start_accum_steps'], config['end_accum_steps']),
-        'constant': const_batch_size(config['start_accum_steps']),
-        'dynamic': None,
+        'exponential': exponential_batch_size(config.n_steps, *params)
     }
     if return_all:
         return s

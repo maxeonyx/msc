@@ -409,17 +409,21 @@ class TrainingLoop():
         
         loss=0
         
-        if self.config['batch_size_schedule'] is None:
+        if self.config.grad_accum_steps == 1:
             loss = self.train_step_distributed()
             self.accum_steps = 1
         else:
-            if self.config['batch_size_schedule'] == 'dynamic':
+            if type(self.config.grad_accum_steps) is int:
+                self.accum_steps = self.config.grad_accum_steps
+            elif self.config.grad_accum_steps == 'dynamic':
                 # dynamic batch size
                 # increase batch size whenever the 200-step average loss goes up
                 # only start doing it after the 20th step, because the training starts of very unstable
                 if self.step_index > 20 and self.running_mean > self.prev_running_mean and self.accum_steps < self.config['end_accum_steps']:
-                    self.accum_steps = min(max(int(self.accum_steps * 1.5), self.accum_steps+1), self.config.end_accum_steps)
+                    self.accum_steps = min(max(int(self.accum_steps * 1.5), self.accum_steps+1), self.config.end_accum_steps):
             else:
+                schedule_name, *params = self.config.grad_accum_steps
+                schedules.batch_size_schedule(config, schedule_name, params)
                 self.accum_steps = self.batch_size_schedule(self.step_index)
             self.update_infobar(info_bar, loss)
             loss = self.train_step_distributed_accum(self.accum_steps)

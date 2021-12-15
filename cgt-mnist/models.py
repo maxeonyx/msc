@@ -12,6 +12,25 @@ import enlighten
 import tensorflow_probability as tfp
 from dotmap import DotMap
 
+def model_name(hostname, config):
+    
+    spec = []
+    
+    if config.dataset.name != 'mnist':
+        spec.append(config.dataset.name)
+        
+    if config.dataset.rescale is not None:
+        spec.append(f"{config.dataset.rescale[0]}x{config.dataset.rescale[1]}")
+        
+    # batch size triple
+    if type(config.grad_accum_steps) is int:
+        accum_steps = '1'
+    else:
+        accum_steps = 'dyn'
+    spec.append(f"bs{config.num_devices}x{accum_steps}x{config.minibatch_size}")
+    
+    return f"{hostname}{spec}"
+
 
 def create_look_backward_equal_mask(size_q, size_k):
     mask = 1 - tf.linalg.band_part(tf.ones((size_q, size_k)), -1, 0)
