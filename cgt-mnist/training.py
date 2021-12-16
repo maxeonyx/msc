@@ -13,6 +13,7 @@ import tensorflow_probability as tfp
 from dotmap import DotMap        
 import wandb
 
+import schedules
 import models
 
 def wandb_init(config, model_name, resume):
@@ -60,15 +61,7 @@ def training_functions(config, model, optimizer, ds_train):
             x_tar = colors_tar[:, :]
             i_inp = idxs[:, :]
             i_tar = idxs[:, :]
-            
-#             if config.add_noise:
-#                 tf.shape(x_inp)
-#                 amount_of_noise = int(config.noise_fraction * tf.shape(x_inp)[1])
-                
-#                 idxs = tf.random.shuffle(i_inp)[:amount_of_noise]
-#                 random_colors = tf.random.uniform(
-#                 x_inp = tf.tensor_scatter_nd_update(x_inp, noise, 
-#                 # tf.tesnor_scatter_nd_update
+
             loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
             accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
             accum_loss += tf.reduce_mean(loss)
@@ -91,33 +84,33 @@ def training_functions(config, model, optimizer, ds_train):
         accum_loss /= float_steps
         return accum_loss, accum_gradients
     
-    @tf.function
-    def train_step_query_all(inputs):
-        colors, idxs, n = inputs
-        n = tf.squeeze(n)
-        x_inp = colors[:, :n]
-        x_tar = colors[:, n:]
-        i_inp = idxs[:, :n]
-        i_tar = idxs[:, n:]
-        inp_seq_len = tf.shape(i_inp)[-1]
-        tar_seq_len = tf.shape(i_tar)[-1]
-        enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
-        dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
-        with tf.GradientTape() as tape:
-            x_out = model([x_inp, i_inp, i_tar, enc_a_mask, dec_mask], training=True)
-            loss = loss_function(x_tar, x_out)
-            gradients = tape.gradient(loss, weights)
-        return loss, gradients
+    # @tf.function
+    # def train_step_query_all(inputs):
+    #     colors, idxs, n = inputs
+    #     n = tf.squeeze(n)
+    #     x_inp = colors[:, :n]
+    #     x_tar = colors[:, n:]
+    #     i_inp = idxs[:, :n]
+    #     i_tar = idxs[:, n:]
+    #     inp_seq_len = tf.shape(i_inp)[-1]
+    #     tar_seq_len = tf.shape(i_tar)[-1]
+    #     enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
+    #     dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
+    #     with tf.GradientTape() as tape:
+    #         x_out = model([x_inp, i_inp, i_tar, enc_a_mask, dec_mask], training=True)
+    #         loss = loss_function(x_tar, x_out)
+    #         gradients = tape.gradient(loss, weights)
+    #     return loss, gradients
     
     @tf.function
-    def train_step_grad_accum(batch, minibatch_size, accum_steps):
+    def train_step_grad_accum(batch, accum_steps):
         float_steps = tf.cast(accum_steps, tf.float32)
         accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
         accum_loss = tf.constant(0, tf.float32)
         for step in tf.range(accum_steps):
-            colors, idxs, n = batch
-            inputs = colors[step], idxs[step], n[step]
-            loss, gradients = train_step_inner(inputs)
+            colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = batch
+            inputs = colors[step], idxs[step], colors_shuf[step], idxs_shuf[step], shuffled_colors_noise[step], n[step]
+            loss, gradients = train_step_combination(inputs)
             accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
             accum_loss += tf.reduce_mean(loss)
         # uncomment to divide gradient. without dividing, learning rate implicitly changes
@@ -139,7 +132,7 @@ def training_functions(config, model, optimizer, ds_train):
     def eval_step(inp_colors, inp_idxs, tar_idxs):
         inp_seq_len = tf.shape(inp_idxs)[-1]
         tar_seq_len = tf.shape(tar_idxs)[-1]
-        enc_a_mask = models.get_mask(models.MASK_BACKWARD_EQUAL, inp_seq_len, inp_seq_len)
+        enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
         dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
         return model([inp_colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], training=False)
     
@@ -148,20 +141,20 @@ def training_functions(config, model, optimizer, ds_train):
         inputs = next(ds_train_iter)
         strategy = tf.distribute.get_strategy()
         per_replica_losses = strategy.run(train_step_normal, args=(inputs,))
-        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / config['num_devices'])
+        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / float(config.num_devices))
     
     @tf.function
     def train_step_distributed_accum(accum_steps):
         inputs = next(ds_train_iter)
         strategy = tf.distribute.get_strategy()
-        per_replica_losses = strategy.run(train_step_grad_accum, args=(inputs, config['minibatch_size'], accum_steps))
-        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (config['num_devices'] * accum_steps))
+        per_replica_losses = strategy.run(train_step_grad_accum, args=(inputs, accum_steps))
+        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (float(config.num_devices) * float(accum_steps)))
     
     return train_step_grad_accum, train_step_normal, train_step_distributed, train_step_distributed_accum, eval_step
 
 class TrainingLoop():
     
-    def __init__(self, config, viz, model, optimizer, ds, ds_train, ds_test, batch_size_schedule, model_name):
+    def __init__(self, config, viz, model, optimizer, ds, ds_train, ds_test, model_name):
         
         self.config = config
         self.viz = viz
@@ -183,8 +176,6 @@ class TrainingLoop():
         self.running_mean = 0.
         self.test_loss_shuf = 0.
         self.test_loss_seq = 0.
-        
-        self.batch_size_schedule = batch_size_schedule
         
         self.train_step_grad_accum, self.train_step_normal, self.train_step_distributed, self.train_step_distributed_accum, self.eval_step = training_functions(config, model, optimizer, ds_train)
         
@@ -210,8 +201,11 @@ class TrainingLoop():
         n_batches = self.config.test_size // self.config.test_minibatch_size
         total_steps = 0
         for shuffled, n_seq in [(True, self.config.test_n_shuf), (False, self.config.test_n_seq)]:
-            # autoregressive completion takes 784-n steps for 
-            total_steps += sum(n_batches * self.config.seq_length - n for n in n_seq)
+            if self.config.test_autoregressive:
+                # autoregressive completion takes 784-n steps for
+                total_steps += sum(n_batches * self.config.dataset.seq_length - n for n in n_seq)
+            else:
+                total_steps += n_batches * len(n_seq)
         
         if manager is None:
             manager = enlighten.get_manager()
@@ -234,7 +228,7 @@ class TrainingLoop():
                     tar_idxs = idxs[:, n:]
                     
                     samples = None
-                    for pix_i in range(self.config.seq_length - n):
+                    for pix_i in range(self.config.dataset.seq_length - n):
                         pred_logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
 
                         if pix_i == 0:
@@ -245,14 +239,20 @@ class TrainingLoop():
                             else:
                                 losses[name] = tf.concat([losses[name], loss], axis=0)
                         
+                        evaluate_counter.update()
+                        if not self.config.test_autoregressive:
+                            break
+                        
                         this_samples = tf.random.categorical(pred_logits[:, 0], 1, dtype=tf.int32)
-                        this_samples = tf.one_hot(this_samples, depth=self.config.n_colors)
+                        this_samples = tf.one_hot(this_samples, depth=self.config.dataset.n_colors)
                         if samples is None:
                             samples = this_samples
                         else:
                             samples = tf.concat([samples, this_samples], axis=1)
                         
-                        evaluate_counter.update()
+                    
+                    if not self.config.test_autoregressive:
+                        continue
                     
                     loss = loss_function(tar_colors, samples)
                     name = f"loss_autoreg_{typ}_{n}"
@@ -349,26 +349,26 @@ class TrainingLoop():
         
         half_colors = all_colors[:, :n]
         half_idxs = all_idxs[:, :n]
-        image_width, image_height = self.config['image_width'], self.config['image_height']
+        image_height, image_width = self.config.dataset.image_size
         if show_input:
             self.viz.showSeq(half_colors, half_idxs, (image_width, image_height), batch_size, unshuffle=True)
             self.viz.showSeq(all_colors, all_idxs, (image_width, image_height), batch_size, unshuffle=True)
         if show_output:
             autoregressive_samples, expected_col = self.evaluate(half_colors, all_idxs, manager=manager)
-            fig1 = self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True)
-            fig2 = self.viz.showSeq(expected_col,           all_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
+            fig1 = self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True, return_fig=True)
+            fig2 = self.viz.showSeq(expected_col,           all_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
             repeated_col = tf.tile(all_colors[5:6], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[5:6], [batch_size, 1])
-            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 2**i + 10, manager=manager)
+            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
             if show_input:
                 self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
-            fig3 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
+            fig3 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
             repeated_col = tf.tile(all_colors[0:1], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[0:1], [batch_size, 1])
-            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: 70*i, manager=manager)
+            varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
             if show_input:
                 self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
-            fig4 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False)
+            fig4 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
             if return_figs:
                 return fig1, fig2, fig3, fig4
     
@@ -376,7 +376,7 @@ class TrainingLoop():
         all_colors = self.test_colors
         all_idxs = self.test_idxs
         batch_size = all_colors.shape[0]
-        image_width, image_height = self.config['image_width'], self.config['image_height']
+        image_height, image_width = self.config.dataset.image_size
         if n_seq is None:
             n_seq = [15*i + 1 for i in range(5,10)]
         for n in n_seq:
@@ -389,7 +389,6 @@ class TrainingLoop():
         
 
     def train(self):
-        self.process_batch(show_output=False)
         with enlighten.get_manager() as manager:
             status_bar = manager.status_bar(f"Training model '{self.model_name}'", justify=enlighten.Justify.CENTER)
             info_bar = manager.status_bar('Loss: ??????, Learning Rate: ???????, Batch Size: ???*?????')
@@ -407,9 +406,9 @@ class TrainingLoop():
         minibatch_size = self.config['minibatch_size']
         window_size = self.config['loss_window_size']
         
-        loss=0
+        loss=0.
         
-        if self.config.grad_accum_steps == 1:
+        if self.config.grad_accum_steps is None or self.config.grad_accum_steps == 1:
             loss = self.train_step_distributed()
             self.accum_steps = 1
         else:
@@ -419,12 +418,12 @@ class TrainingLoop():
                 # dynamic batch size
                 # increase batch size whenever the 200-step average loss goes up
                 # only start doing it after the 20th step, because the training starts of very unstable
-                if self.step_index > 20 and self.running_mean > self.prev_running_mean and self.accum_steps < self.config['end_accum_steps']:
-                    self.accum_steps = min(max(int(self.accum_steps * 1.5), self.accum_steps+1), self.config.end_accum_steps):
+                if self.step_index > 20 and self.running_mean > self.prev_running_mean and self.accum_steps < self.config.max_accum_steps:
+                    self.accum_steps = min(max(int(self.accum_steps * 1.5), self.accum_steps+1), self.config.max_accum_steps)
             else:
                 schedule_name, *params = self.config.grad_accum_steps
-                schedules.batch_size_schedule(config, schedule_name, params)
-                self.accum_steps = self.batch_size_schedule(self.step_index)
+                bs_sched = schedules.batch_size_schedule(self.config, schedule_name, params)
+                self.accum_steps = bs_sched(self.step_index)
             self.update_infobar(info_bar, loss)
             loss = self.train_step_distributed_accum(self.accum_steps)
         
@@ -451,7 +450,7 @@ class TrainingLoop():
             self.last_eval_loss = self.running_mean
             self.last_eval_step = self.step_index
             print(f"Step {self.step_index}, Loss (last minibatch): {loss}, Loss ({window_size} step avg.): {self.last_eval_loss}")
-            fig1, fig2, fig3, fig4 = self.process_batch(return_figs=True, show_input=False, manager=manager)
+            fig1, fig2, fig3, fig4 = self.process_batch(return_figs=True, show_input=(self.step_index == 0), manager=manager)
             if self.config['use_wandb']:
                 self.last_log_index = self.step_index
                 wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.optimizer._decayed_lr(tf.float32), 'viz_autoregressive': wandb.Image(fig1), 'viz_expected': wandb.Image(fig2), 'viz_varying': wandb.Image(fig3), 'viz_varying_sequential': wandb.Image(fig4)}, step=self.step_index)

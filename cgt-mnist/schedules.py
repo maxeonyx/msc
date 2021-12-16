@@ -112,9 +112,7 @@ def batch_size_schedule(config, name, params, return_all=False):
     if return_all:
         return s
     else:
-        if config['batch_size_schedule'] is None:
-            return s['constant']
-        return s[config['batch_size_schedule']]
+        return s[name]
 
 def show_schedules(config):
     lr_schedules = learning_rate_schedule(config, return_all=True)

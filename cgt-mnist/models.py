@@ -16,20 +16,25 @@ def model_name(hostname, config):
     
     spec = []
     
-    if config.dataset.name != 'mnist':
+    if config.ds != 'mnist':
         spec.append(config.dataset.name)
         
     if config.dataset.rescale is not None:
-        spec.append(f"{config.dataset.rescale[0]}x{config.dataset.rescale[1]}")
+        spec.append(f'{config.dataset.rescale[0]}x{config.dataset.rescale[1]}')
+    
+    if config.dataset.n_colors != 4:
+        spec.append(f'n{config.dataset.n_colors}')
         
     # batch size triple
-    if type(config.grad_accum_steps) is int:
+    if config.grad_accum_steps is None:
         accum_steps = '1'
+    elif type(config.grad_accum_steps) is int:
+        accum_steps = str(config.grad_accum_steps)
     else:
-        accum_steps = 'dyn'
-    spec.append(f"bs{config.num_devices}x{accum_steps}x{config.minibatch_size}")
+        accum_steps = 'DYN'
+    spec.append(f'bs{config.num_devices}x{accum_steps}x{config.minibatch_size}')
     
-    return f"{hostname}{spec}"
+    return f"{hostname}-{'-'.join(spec)}"
 
 
 def create_look_backward_equal_mask(size_q, size_k):

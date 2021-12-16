@@ -36,28 +36,33 @@ def mnist_gamma_distribution():
     alpha, beta = 1.2, 0.007
     gamma = tfp.distributions.Gamma(concentration=alpha, rate=beta)
     return gamma, f"Gamma (alpha={alpha}, beta={beta})"
+
+def gamma_distribution_7x7():
+    alpha, beta = 1.5, 0.1
+    gamma = tfp.distributions.Gamma(concentration=alpha, rate=beta)
+    return gamma, f"Gamma (alpha={alpha}, beta={beta})"
     
 def plot_distribution(config, dist, name):
 
     def plot_cdf():
-        x = tf.range(config['seq_length'], dtype=tf.float32)
+        x = tf.range(config.dataset.seq_length, dtype=tf.float32)
         cdf = dist.cdf(x)
         fig, ax = plt.subplots()
-        ax.plot(tf.range(config['seq_length']), cdf)
+        ax.plot(tf.range(config.dataset.seq_length), cdf)
         ax.set_title(f"{name} CDF, distribution of examples by number of pixels.")
 
 
     def plot_pdf():
-        x = tf.range(config['seq_length'], dtype=tf.float32)
+        x = tf.range(config.dataset.seq_length, dtype=tf.float32)
         pdf = dist.prob(x)
         fig, ax = plt.subplots()
-        ax.plot(tf.range(config['seq_length']), pdf)
+        ax.plot(tf.range(config.dataset.seq_length), pdf)
         ax.set_title(f"{name} PDF, distribution of examples by number of pixels.")
 
 
     def test_sample():
 
-        return tf.cast(tf.math.minimum(tf.math.round(dist.sample(sample_shape=[100])), config['seq_length'] - 1), tf.int32)
+        return tf.cast(tf.math.minimum(tf.math.round(dist.sample(sample_shape=[100])), config.dataset.seq_length - 1), tf.int32)
 
     plot_pdf()
     plot_cdf()
@@ -103,7 +108,7 @@ class Datasets:
     
     def shuffle_and_add_indices(self, sequence, label):
 
-        idxs = tf.range(self.config['seq_length'], dtype=tf.int32)
+        idxs = tf.range(self.config.dataset.seq_length, dtype=tf.int32)
         shuf_idxs = tf.random.shuffle(idxs)
 
         shuf_sequence = tf.gather(sequence, shuf_idxs)
@@ -112,8 +117,8 @@ class Datasets:
     
     def add_noise(self, sequence, idxs, shuf_sequence, shuf_idxs, label):
         
-        n_noise = int(self.config.noise_fraction * self.config.seq_length)
-        noise = tf.random.uniform([n_noise], minval=0, maxval=self.config.n_colors, dtype=tf.int32)
+        n_noise = int(self.config.noise_fraction * self.config.dataset.seq_length)
+        noise = tf.random.uniform([n_noise], minval=0, maxval=self.config.dataset.n_colors, dtype=tf.int32)
         rand_idxs = tf.random.shuffle(idxs)
         rand_idxs = rand_idxs[:n_noise, None]
         shuf_sequence_noise = tf.tensor_scatter_nd_update(shuf_sequence, rand_idxs, noise)
@@ -124,48 +129,74 @@ class Datasets:
         bs = tf.shape(sequence)[0]
         # sample single integer between 0 and 783 from given distribution
         n = tf.cast(tf.math.round(self.dist.sample(sample_shape=[])), tf.int32)
-        n = tf.clip_by_value(n, 1, self.config['seq_length'] - 1)
+        n = tf.clip_by_value(n, 1, self.config.dataset.seq_length - 1)
         
-        if self.config.batch_size_schedule == 'dynamic':
+        if self.config.grad_accum_steps is not None:
             return sequence, idxs, shuf_sequence, shuf_idxs, shuf_seq_noise, n
         else:
             return sequence, idxs, shuf_sequence, shuf_idxs, shuf_seq_noise, tf.repeat(n, self.config.num_devices)
+
+    def rescale(self, image, label):
+        image = tf.image.resize(image, self.config.dataset.rescale)
+        return image, label
+        
     
-    def make_datasets(self):
+    def make_datasets(self, for_statistics=False):
+        
+        dataset_train = self.ds_train_orig.map(normalize_image)
+        dataset_test = self.ds_test_orig.map(normalize_image)
+
+        if self.config.dataset.rescale:
+            dataset_train = dataset_train.map(self.rescale)
+            dataset_test = dataset_test.map(self.rescale)
+            self.config.dataset.image_size = self.config.dataset.rescale
+        self.config.dataset.seq_length = self.config.dataset.image_size[0] * self.config.dataset.image_size[1]
         
         dataset_train = (
-            self.ds_train_orig
-            .map(normalize_image)
+            dataset_train
             .map(flatten)
             .map(self.quantize)
             .cache()
+        )
+        
+        dataset_test = (
+            dataset_test
+            .map(flatten)
+            .map(self.quantize)
+            .map(self.shuffle_and_add_indices)
+            .cache()   
+        )
+        
+        if for_statistics:
+            train = next(iter(dataset_train.batch(60000)))
+            test = next(iter(dataset_test.batch(10000)))
+            return train, test
+        
+        dataset_train = (
+            dataset_train
             .repeat()
-            .shuffle(self.config['dataset']['buffer_size'])
+            .shuffle(self.config.dataset.buffer_size)
             .map(self.shuffle_and_add_indices)
             .map(self.add_noise)
         )
         
-        if self.config.batch_size_schedule == 'dynamic':
-            dataset_train = dataset_train.batch(self.config.minibatch_size)
-            dataset_train = dataset_train.map(self.add_n_from_distribution)
-            dataset_train = dataset_train.batch(self.config.end_accum_steps * self.config.num_devices)
-        else:
+        if self.config.grad_accum_steps is None or self.config.grad_accum_steps == 1:
             dataset_train = dataset_train.batch(self.config.global_batch_size)
             dataset_train = dataset_train.map(self.add_n_from_distribution)
-        
-        dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
+            print("Not using gradient accumulation")
+        else:
+            dataset_train = dataset_train.batch(self.config.minibatch_size)
+            dataset_train = dataset_train.map(self.add_n_from_distribution)
+            dataset_train = dataset_train.batch(self.config.max_accum_steps * self.config.num_devices)
+            print("Using gradient accumulation")
             
+        dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
         
         dataset_test = (
-            self.ds_test_orig
-            .map(normalize_image)
-            .map(flatten)
-            .map(self.quantize)
-            .map(self.shuffle_and_add_indices)
-            .cache()
+            dataset_test
             .repeat()
-            .shuffle(self.config['dataset']['buffer_size'])
-            .batch(self.config['test_minibatch_size'], drop_remainder=True)
+            .shuffle(self.config.dataset.buffer_size)
+            .batch(self.config.test_minibatch_size, drop_remainder=True)
             .prefetch(tf.data.experimental.AUTOTUNE)
         )
 

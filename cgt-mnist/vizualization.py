@@ -22,7 +22,7 @@ class Viz:
         self.ds = ds
         self.centroids = centroids
 
-    def np_showSeq(self, seq, size, max_images=3, cmap=None):
+    def np_showSeq(self, seq, size, max_images=3, cmap=None, return_fig=False):
         """ Show one or more images encoded as sequence. (numpy version)
 
             seq: numpy array of sequences which encode the image. Either a single sequence or multiple sequences.
@@ -41,7 +41,8 @@ class Viz:
             ax.set_axis_off()
             plt.imshow(img[i], cmap=cmap)
         plt.show()
-        return fig
+        if return_fig:
+            return fig
     
     def unquantize(self, seq):
         seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
@@ -64,28 +65,27 @@ class Viz:
         
         return seq
 
-    def showSeq(self, seq, idxs, size, max_images=3, cmap='gray', unshuffle=False, do_unquantize=True):
+    def showSeq(self, seq, idxs, size, max_images=3, cmap='gray', unshuffle=False, do_unquantize=True, return_fig=False):
         """ Show one or more images encoded as sequence. (tensorflow version)
 
             seq: tensor of sequences which encode the image. Either a single sequence or multiple sequences.
             size: the image size. e.g. (28, 28) for `mnist` images.
             max_images: the maximum number of images to display.
         """
-        print("seq shape:", seq.shape)
         batch_size = idxs.shape[0]
         seq_length = idxs.shape[1]
-        img_length = size[0]*size[1]
+        height, width = size
+        img_length = height*width
         if do_unquantize:
             seq = self.unquantize(seq)
         else:
             seq = tf.cast(seq, tf.float32)
-        print("seq shape:", seq.shape)
         if unshuffle:
             seq = self.scatter_on_bg(seq, idxs, img_length)
 
-        return self.np_showSeq(seq, size, max_images, cmap)
+        return self.np_showSeq(seq, size, max_images, cmap, return_fig=return_fig)
 
-    def showSeqExpectedVal(self, seq, probs, idxs, size, max_images=3, cmap='gray', unshuffle=False):
+    def showSeqExpectedVal(self, seq, probs, idxs, size, max_images=3, cmap='gray', unshuffle=False, return_fig=False):
         """ Show one or more images encoded as sequence. (tensorflow version)
 
             seq: tensor of sequences which encode the image. Either a single sequence or multiple sequences.
@@ -94,7 +94,8 @@ class Viz:
         """
         batch_size = idxs.shape[0]
         seq_length = idxs.shape[1]
-        img_length = size[0]*size[1]
+        height, width = size
+        img_length = height*width
         
         # do_unquantize for samples first
         seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
@@ -105,7 +106,7 @@ class Viz:
         
         seq = tf.concat([seq, expected_col], axis=1)
         seq = tf.squeeze(seq)
-        return self.showSeq(seq, idxs, size, max_images, cmap, unshuffle=unshuffle, do_unquantize=False)
+        return self.showSeq(seq, idxs, size, max_images, cmap, unshuffle=unshuffle, do_unquantize=False, return_fig=return_fig)
 
     def compare_quantized_and_unquantized(self, dataset_test_original):
         
@@ -129,10 +130,10 @@ class Viz:
         
         print("quantized:")
         ex, ex_idxs, _ = next(iter(ds_test_quantized))
-        self.showSeq(ex, ex_idxs, (self.config['image_width'], self.config['image_height']), NUM_SAMPLES, unshuffle=False)
+        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False)
         print("unquantized:")
         ex, ex_idxs, _ = next(iter(ds_test))
-        self.showSeq(ex, ex_idxs, (self.config['image_width'], self.config['image_height']), NUM_SAMPLES, unshuffle=False, do_unquantize=False) # don't unquantize because it's not quantized
+        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False, do_unquantize=False) # don't unquantize because it's not quantized
     
     def compare_shuffled_and_unshuffled(self, dataset_test_original):
         
@@ -148,7 +149,7 @@ class Viz:
         )
         print("shuffled:")
         ex, ex_idxs, _ = next(iter(ds_test_shuffled))
-        self.showSeq(ex, ex_idxs, (self.config['image_width'], self.config['image_height']), NUM_SAMPLES, unshuffle=False)
+        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False)
         print("unshuffled:")
         ex, ex_idxs, _ = next(iter(ds_test_shuffled))
-        self.showSeq(ex, ex_idxs, (self.config['image_width'], self.config['image_height']), NUM_SAMPLES, unshuffle=True)
+        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=True)
