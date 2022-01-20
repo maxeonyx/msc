@@ -104,6 +104,7 @@ class Datasets:
         centroids = tf.reshape(self.centroids, [1, 1, -1])
         expected_col = tf.tensordot(probs, centroids, axes=([2], [2]))
         expected_col = tf.squeeze(expected_col, axis=-1)
+        expected_col = tf.squeeze(expected_col, axis=-1)
         return expected_col
     
     def shuffle_and_add_indices(self, sequence, label):
@@ -152,6 +153,13 @@ class Datasets:
             self.config.dataset.image_size = self.config.dataset.rescale
         self.config.dataset.seq_length = self.config.dataset.image_size[0] * self.config.dataset.image_size[1]
         
+        dataset_test = (
+            dataset_test
+            .map(flatten)
+            .map(self.quantize)
+            .cache()   
+        )
+        
         dataset_train = (
             dataset_train
             .map(flatten)
@@ -159,18 +167,19 @@ class Datasets:
             .cache()
         )
         
-        dataset_test = (
-            dataset_test
-            .map(flatten)
-            .map(self.quantize)
-            .map(self.shuffle_and_add_indices)
-            .cache()   
-        )
-        
         if for_statistics:
             train = next(iter(dataset_train.batch(60000)))
             test = next(iter(dataset_test.batch(10000)))
             return train, test
+        
+        dataset_test = (
+            dataset_test
+            .repeat()
+            .map(self.shuffle_and_add_indices)
+            .shuffle(self.config.dataset.buffer_size)
+            .batch(self.config.test_minibatch_size, drop_remainder=True)
+            .prefetch(tf.data.experimental.AUTOTUNE)
+        )
         
         dataset_train = (
             dataset_train
@@ -191,13 +200,5 @@ class Datasets:
             print("Using gradient accumulation")
             
         dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
-        
-        dataset_test = (
-            dataset_test
-            .repeat()
-            .shuffle(self.config.dataset.buffer_size)
-            .batch(self.config.test_minibatch_size, drop_remainder=True)
-            .prefetch(tf.data.experimental.AUTOTUNE)
-        )
 
         return dataset_train, dataset_test

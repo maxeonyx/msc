@@ -269,6 +269,7 @@ class TrainingLoop():
         return losses
             
     def evaluate(self, inp_colors, all_idxs, manager=None):
+        """Autoregressively sample a batch of images, each seeded with `inp_colors`"""
         n = inp_colors.shape[-1]
         n_total = all_idxs.shape[-1]
         autoregressive_samples = inp_colors
@@ -303,7 +304,9 @@ class TrainingLoop():
         evaluate_counter.close()
         return autoregressive_samples, expected_col
     
-    def evaluate_varying(self, all_colors, all_idxs, n_fn, manager=None):
+    def evaluate_varying(self, all_colors, all_idxs, n_fn, entropy=False, manager=None):
+        """Autoregressively sample a bunch of images, each starting with n
+           (produced by n_fn) real pixels"""
         batch_size = all_colors.shape[0]
         seq_length = all_colors.shape[1]
         
@@ -318,6 +321,7 @@ class TrainingLoop():
             n = min(max(1, int(n_fn(i))), all_colors.shape[1] - 1)
             inp_idxs = all_idxs[:1, :n]
             inp_colors = all_colors[:1, :n]
+            
             tar_idxs = all_idxs[:1, n:]
             
             unq_inp = self.viz.unquantize(inp_colors)
@@ -329,10 +333,13 @@ class TrainingLoop():
 
             logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
             
-            # softmax along color dimension
-            probabilities = tf.nn.softmax(logits, axis=2)
-            
-            expected_col = self.ds.expected_col(probabilities)
+            if entropy:
+                expected_col = entropy_of_logits(logits)
+            else:
+                # softmax along color dimension
+                probabilities = tf.nn.softmax(logits, axis=2)
+                expected_col = self.ds.expected_col(probabilities)
+                
             expected_col = tf.concat([self.ds.unquantize(inp_colors), expected_col], axis=1)
             expected_col = tf.squeeze(expected_col)
             expected_col = tf.expand_dims(expected_col, 0)
@@ -360,9 +367,11 @@ class TrainingLoop():
             repeated_col = tf.tile(all_colors[5:6], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[5:6], [batch_size, 1])
             varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
+            e_varying_n, e_varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), entropy=True, manager=manager)
             if show_input:
                 self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
             fig3 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
+            fig3 = self.viz.showSeq(e_varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
             repeated_col = tf.tile(all_colors[0:1], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[0:1], [batch_size, 1])
             varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
