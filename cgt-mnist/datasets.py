@@ -15,14 +15,17 @@ from dotmap import DotMap
 def normalize_image(image, label):
     return tf.cast(image, dtype=tf.float32) / 255.0, label
 
-def find_centroids(ds_train, num_clusters, batch_size):
+def find_centroids(config, ds_train):
+    num_clusters = config.n_colors
+    n_color_dims = config.n_color_dims
+    batch_size = config.kmeans_batch_size
     kmeans = MiniBatchKMeans(n_clusters=num_clusters, random_state=0, batch_size=batch_size, verbose=True)
     ds_batched = ds_train.map(normalize_image).batch(batch_size)
     with enlighten.get_manager() as manager:
         title = manager.status_bar(f"K-Means clustering to make {num_clusters}-color MNIST Dataset", justify=enlighten.Justify.CENTER)
         clusters_names = manager.status_bar(''.join('{:<10}'.format(f"cen. {i}") for i in range(num_clusters)))
         clusters_status = manager.status_bar(''.join('{:<10}'.format('??????') for _ in range(num_clusters)))
-        pbar = manager.counter(total=60000//batch_size, desc='Discretize to 8 colors', unit='minibatches')
+        pbar = manager.counter(total=60000//kmeans_batch_size, desc='Discretize to 8 colors', unit='minibatches')
         for img, _ in pbar(iter(ds_batched)):
             pixels = img.numpy().reshape(-1, 1)
             kmeans.partial_fit(pixels)
@@ -30,6 +33,7 @@ def find_centroids(ds_train, num_clusters, batch_size):
 
         centroids = kmeans.cluster_centers_
         centroids = tf.convert_to_tensor(np.sort(centroids, axis=0), dtype=tf.float32)
+        centroids = tf.reshape(centroids, [num_clusters, n_color_dims])
         return centroids
 
 def mnist_gamma_distribution():
@@ -69,12 +73,19 @@ def plot_distribution(config, dist, name):
     print("Example integers sampled from gamma distribution.")
     print(test_sample())
 
-def squared_euclidean_distance(a, b):
-    b = tf.transpose(b)        
-    a2 = tf.math.reduce_sum(tf.math.square(a), axis=1, keepdims=True)
-    b2 = tf.math.reduce_sum(tf.math.square(b), axis=0, keepdims=True)
-    ab = tf.linalg.matmul(a, b)
-    return a2 - 2 * ab + b2
+def squared_distance(a, b):
+    """
+    given two tensors a and b, return the distance between the final dim of a and each b
+    
+    input shape a [..., A, D]
+    input shape b [B, D]
+    
+    output shape [..., A, B]
+    
+    """
+    a = tf.expand_dims(a, -2)
+    b = tf.expand_dims(b, 0)
+    return tf.math.reduce_sum(tf.math.squared_difference(a, b), axis=-1)
 
 def flatten(image, label):
     shape = tf.shape(image) # (height, width, color)
@@ -86,26 +97,28 @@ class Datasets:
     def __init__(self, config, ds_train_orig, ds_test_orig, centroids, distribution):
         
         self.centroids = centroids
+        print("centroids.shape", centroids.shape)
         self.config = config
         self.dist = distribution
         self.ds_train_orig = ds_train_orig
         self.ds_test_orig = ds_test_orig
     
     def quantize(self, sequence, label):
-        d = squared_euclidean_distance(sequence, self.centroids) # (height * width, centroids)
+        d = squared_euclidean_distance(sequence, self.centroids) # (height * width, n_centroids)
         sequence = tf.math.argmin(d, axis=1, output_type=tf.int32)  # (height * width)
         return sequence, label
 
     def unquantize(self, x):
         x_one_hot = tf.cast(tf.one_hot(x, depth=len(self.centroids)), dtype=tf.float32)  # (seq, num_centroids)
-        return tf.linalg.matmul(x_one_hot,self.centroids)  # (seq, num_features)
+        y = tf.linalg.matmul(x_one_hot,self.centroids)  # (seq, num_features)
+        print("unquantize output shape", y.shape)
+        return y
 
     def expected_col(self, probs):
         centroids = tf.reshape(self.centroids, [1, 1, -1])
-        expected_col = tf.tensordot(probs, centroids, axes=([2], [2]))
-        expected_col = tf.squeeze(expected_col, axis=-1)
-        expected_col = tf.squeeze(expected_col, axis=-1)
-        return expected_col
+        expected_color = tf.tensordot(probs, centroids, axes=([2], [2]))
+        print("expected_col output shape", expected_color.shape)
+        return expected_color
     
     def shuffle_and_add_indices(self, sequence, label):
 

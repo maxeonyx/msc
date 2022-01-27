@@ -19,165 +19,8 @@ import models
 def wandb_init(config, model_name, resume):
     if config['use_wandb']:
         wandb.init(project='dist-mnist', entity='maxeonyx', name=model_name, config=config, resume=resume)
-
-def training_functions(config, model, optimizer, ds_train):
-    
-    loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
-    weights = model.trainable_weights
-    
-    ds_train_iter = iter(ds_train)
-    
-    @tf.function
-    def train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type):
-        inp_seq_len = tf.shape(i_inp)[-1]
-        tar_seq_len = tf.shape(i_tar)[-1]
-        enc_mask = models.get_mask(enc_mask_type, inp_seq_len, inp_seq_len)
-        dec_mask = models.get_mask(dec_mask_type, inp_seq_len, tar_seq_len)
-        with tf.GradientTape() as tape:
-            x_out = model([x_inp, i_inp, i_tar, enc_mask, dec_mask], training=True)
-            loss = loss_function(x_tar, x_out)
-            gradients = tape.gradient(loss, weights)
-        return loss, gradients
         
-    @tf.function
-    def train_step_combination(inputs):
-        colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = inputs
-        idxs = idxs_shuf
-        colors_tar = colors_shuf
-        colors_inp = colors_shuf
-        if config.add_noise:
-            colors_inp = shuffled_colors_noise
-        n = tf.squeeze(n)
-        
-        float_steps = tf.constant(0, tf.float32)
-        accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
-        accum_loss = tf.constant(0, tf.float32)
-        
-        if config.training_mode == 'query_next' or config.training_mode == 'combination':
-            float_steps += 1.0
-            enc_mask_type = models.MASK_BACKWARD_EQUAL
-            dec_mask_type = models.MASK_BACKWARD
-            x_inp = colors_inp[:, :]
-            x_tar = colors_tar[:, :]
-            i_inp = idxs[:, :]
-            i_tar = idxs[:, :]
-
-            loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
-            accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
-            accum_loss += tf.reduce_mean(loss)
-        
-        if config.training_mode == 'query_all' or config.training_mode == 'combination':
-            float_steps += 1.0
-            enc_mask_type = models.MASK_NONE
-            dec_mask_type = models.MASK_NONE
-            x_inp = colors_inp[:, :n]
-            x_tar = colors_tar[:, n:]
-            i_inp = idxs[:, :n]
-            i_tar = idxs[:, n:]
-            loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
-            accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
-            accum_loss += tf.reduce_mean(loss)
-            
-        # uncomment to divide gradient.
-        # without dividing, learning rate implicitly changes if batch size changes
-        accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
-        accum_loss /= float_steps
-        return accum_loss, accum_gradients
-    
-    # @tf.function
-    # def train_step_query_all(inputs):
-    #     colors, idxs, n = inputs
-    #     n = tf.squeeze(n)
-    #     x_inp = colors[:, :n]
-    #     x_tar = colors[:, n:]
-    #     i_inp = idxs[:, :n]
-    #     i_tar = idxs[:, n:]
-    #     inp_seq_len = tf.shape(i_inp)[-1]
-    #     tar_seq_len = tf.shape(i_tar)[-1]
-    #     enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
-    #     dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
-    #     with tf.GradientTape() as tape:
-    #         x_out = model([x_inp, i_inp, i_tar, enc_a_mask, dec_mask], training=True)
-    #         loss = loss_function(x_tar, x_out)
-    #         gradients = tape.gradient(loss, weights)
-    #     return loss, gradients
-    
-    @tf.function
-    def train_step_grad_accum(batch, accum_steps):
-        float_steps = tf.cast(accum_steps, tf.float32)
-        accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
-        accum_loss = tf.constant(0, tf.float32)
-        for step in tf.range(accum_steps):
-            colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = batch
-            inputs = colors[step], idxs[step], colors_shuf[step], idxs_shuf[step], shuffled_colors_noise[step], n[step]
-            loss, gradients = train_step_combination(inputs)
-            accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
-            accum_loss += tf.reduce_mean(loss)
-        # uncomment to divide gradient. without dividing, learning rate implicitly changes
-        accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
-        optimizer.apply_gradients(zip(accum_gradients, weights))
-        return accum_loss
-    
-    @tf.function
-    def train_step_normal(inputs):
-        loss, gradients = train_step_combination(inputs)
-        optimizer.apply_gradients(zip(gradients, weights))
-        return loss
-
-    @tf.function(input_signature=[
-        tf.TensorSpec(shape=(None, None), dtype=tf.int32),
-        tf.TensorSpec(shape=(None, None), dtype=tf.int32),
-        tf.TensorSpec(shape=(None, None), dtype=tf.int32),
-    ])
-    def eval_step(inp_colors, inp_idxs, tar_idxs):
-        inp_seq_len = tf.shape(inp_idxs)[-1]
-        tar_seq_len = tf.shape(tar_idxs)[-1]
-        enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
-        dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
-        return model([inp_colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], training=False)
-    
-    @tf.function
-    def train_step_distributed():
-        inputs = next(ds_train_iter)
-        strategy = tf.distribute.get_strategy()
-        per_replica_losses = strategy.run(train_step_normal, args=(inputs,))
-        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / float(config.num_devices))
-    
-    @tf.function
-    def train_step_distributed_accum(accum_steps):
-        inputs = next(ds_train_iter)
-        strategy = tf.distribute.get_strategy()
-        per_replica_losses = strategy.run(train_step_grad_accum, args=(inputs, accum_steps))
-        return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (float(config.num_devices) * float(accum_steps)))
-    
-    return train_step_grad_accum, train_step_normal, train_step_distributed, train_step_distributed_accum, eval_step
-
-class TrainingLoop():
-    
-    def __init__(self, config, viz, model, optimizer, ds, ds_train, ds_test, model_name):
-        
-        self.config = config
-        self.viz = viz
-        self.ds = ds
-        self.optimizer = optimizer
-        
-        self.model_name = model_name
-        
-        self.ds_test = iter(ds_test)
-        
-        self.new_test_batch()
-        
-        self.step_index = 0
-        self.last_eval_loss = None
-        self.loss_history = np.zeros([config.n_steps])
-        self.last_eval_step = 0
-        self.last_log_index = 0
-        self.accum_steps = config.start_accum_steps
-        self.running_mean = 0.
-        self.test_loss_shuf = 0.
-        self.test_loss_seq = 0.
-        
-        self.train_step_grad_accum, self.train_step_normal, self.train_step_distributed, self.train_step_distributed_accum, self.eval_step = training_functions(config, model, optimizer, ds_train)
+class Evaluator():
         
     def new_test_batch(self):
         unshuffled_colors, unshuffled_idxs, shuffled_colors, shuffled_idxs, _ = next(self.ds_test)
@@ -185,18 +28,142 @@ class TrainingLoop():
         self.test_colors = tf.concat([unshuffled_colors[:5], shuffled_colors[:5]], axis=0)
         self.test_idxs = tf.concat([unshuffled_idxs[:5], shuffled_idxs[:5]], axis=0)
     
-    def update_infobar(self, info_bar, loss):
-        window_size = self.config['loss_window_size']
-        num_replicas = self.config['num_devices']
-        minibatch_size = self.config.minibatch_size
-        loss = tf.math.log(loss)
-        running_mean = tf.math.log(self.running_mean)
-        test_loss_shuf = tf.math.log(self.test_loss_shuf)
-        test_loss_seq = tf.math.log(self.test_loss_seq)
+    def __init__(self, config, model, optimizer, viz, ds, ds_train, ds_test):
         
-        info_bar.update(f'Loss: {loss:.5g}, Loss ({window_size} step avg.): {running_mean:.5g}, Test Loss (shuf): {test_loss_shuf:.5g}, Test Loss (seq): {test_loss_seq:.5g}, #R*BS*GA: {num_replicas:>3}*{minibatch_size}*{self.accum_steps:<5}')
+        self.config = config
+        self.model = model
+        self.optimizer = optimizer
+        ds_train = iter(ds_train)
+        self.viz = viz
+        self.ds = ds
+        self.ds_train = ds_train
+        ds_test = iter(ds_test)
+        self.ds_test = ds_test
         
+        self.new_test_batch()
+
+        loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
+        weights = model.trainable_weights
+    
+        @tf.function
+        def train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type):
+            inp_seq_len = tf.shape(i_inp)[-1]
+            tar_seq_len = tf.shape(i_tar)[-1]
+            enc_mask = models.get_mask(enc_mask_type, inp_seq_len, inp_seq_len)
+            dec_mask = models.get_mask(dec_mask_type, inp_seq_len, tar_seq_len)
+            with tf.GradientTape() as tape:
+                x_out = model([x_inp, i_inp, i_tar, enc_mask, dec_mask], training=True)
+                loss = loss_function(x_tar, x_out)
+                gradients = tape.gradient(loss, weights)
+            return loss, gradients
+
+        @tf.function
+        def train_step_combination(inputs):
+            colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = inputs
+            idxs = idxs_shuf
+            colors_tar = colors_shuf
+            colors_inp = colors_shuf
+            if config.add_noise:
+                colors_inp = shuffled_colors_noise
+            n = tf.squeeze(n)
+
+            float_steps = tf.constant(0, tf.float32)
+            accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
+            accum_loss = tf.constant(0, tf.float32)
+
+            if config.training_mode == 'query_next' or config.training_mode == 'combination':
+                float_steps += 1.0
+                enc_mask_type = models.MASK_BACKWARD_EQUAL
+                dec_mask_type = models.MASK_BACKWARD
+                x_inp = colors_inp[:, :]
+                x_tar = colors_tar[:, :]
+                i_inp = idxs[:, :]
+                i_tar = idxs[:, :]
+
+                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+                accum_loss += tf.reduce_mean(loss)
+
+            if config.training_mode == 'query_all' or config.training_mode == 'combination':
+                float_steps += 1.0
+                enc_mask_type = models.MASK_NONE
+                dec_mask_type = models.MASK_NONE
+                x_inp = colors_inp[:, :n]
+                x_tar = colors_tar[:, n:]
+                i_inp = idxs[:, :n]
+                i_tar = idxs[:, n:]
+                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+                accum_loss += tf.reduce_mean(loss)
+
+            # without dividing, learning rate implicitly changes if batch size changes
+            accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
+            accum_loss /= float_steps
+            return accum_loss, accum_gradients
+
+
+        @tf.function
+        def train_step_grad_accum(batch, accum_steps):
+            float_steps = tf.cast(accum_steps, tf.float32)
+            accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
+            accum_loss = tf.constant(0, tf.float32)
+            for step in tf.range(accum_steps):
+                colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = batch
+                inputs = colors[step], idxs[step], colors_shuf[step], idxs_shuf[step], shuffled_colors_noise[step], n[step]
+                loss, gradients = train_step_combination(inputs)
+                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+                accum_loss += tf.reduce_mean(loss)
+            # without dividing, learning rate implicitly changes if batch size changes
+            accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
+            optimizer.apply_gradients(zip(accum_gradients, weights))
+            return accum_loss
+
+        @tf.function
+        def train_step_normal(inputs):
+            loss, gradients = train_step_combination(inputs)
+            optimizer.apply_gradients(zip(gradients, weights))
+            return loss
+
+        @tf.function(input_signature=[
+            tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+            tf.TensorSpec(shape=(None, None), dtype=tf.int32),
+        ])
+        def eval_step(inp_colors, inp_idxs, tar_idxs):
+            inp_seq_len = tf.shape(inp_idxs)[-1]
+            tar_seq_len = tf.shape(tar_idxs)[-1]
+            enc_a_mask = models.get_mask(models.MASK_NONE, inp_seq_len, inp_seq_len)
+            dec_mask = models.get_mask(models.MASK_NONE, inp_seq_len, tar_seq_len)
+            return model([inp_colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], training=False)
+
+        @tf.function
+        def train_step_distributed():
+            inputs = next(ds_train)
+            strategy = tf.distribute.get_strategy()
+            per_replica_losses = strategy.run(train_step_normal, args=(inputs,))
+            return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / float(config.num_devices))
+
+        @tf.function
+        def train_step_distributed_accum(accum_steps):
+            inputs = next(ds_train)
+            strategy = tf.distribute.get_strategy()
+            per_replica_losses = strategy.run(train_step_grad_accum, args=(inputs, accum_steps))
+            return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (float(config.num_devices) * float(accum_steps)))
+        
+        self.train_step_normal = train_step_normal
+        self.train_step_grad_accum = train_step_grad_accum
+        self.train_step_distributed = train_step_distributed
+        self.train_step_distributed_accum = train_step_distributed_accum
+        self.eval_step = eval_step
+    
+    
+    
     def test_loss(self, manager=None):
+        """
+        Calculate the average loss across a variety evaluation modes on the test data.
+        - Order eg. shuffled & sequential
+        - # of Conditioning pixels e.g. [1, 8, 16, 32]
+        """
         
         n_batches = self.config.test_size // self.config.test_minibatch_size
         total_steps = 0
@@ -276,30 +243,32 @@ class TrainingLoop():
 
         if manager is None:
             manager = enlighten.get_manager()
-        evaluate_counter = manager.counter(total=n_total-n, desc="Evaluating", unit='steps', leave=False)
+        evaluate_counter = manager.counter(total=n_total-n+1, desc="Evaluating", unit='steps', leave=False)
         
-        for i in evaluate_counter(range(n, n_total)):
-
-            inp_idxs = all_idxs[:, :i]
-            tar_idxs = all_idxs[:, i:]
-
-            logits = self.eval_step(autoregressive_samples, inp_idxs, tar_idxs)
-            
-            # first time through
-            if i == n:
-                # softmax along color dimension
-                probabilities = tf.nn.softmax(logits, axis=2)
-            
-            # shape: (batch_size, tar_seq_length, n_colors)
-            colors = logits
-            
-            # apply softmax on the logits and sample from the distribution
-            samples = tf.random.categorical(logits[:, 0], 1, dtype=tf.int32)
-            autoregressive_samples = tf.concat([autoregressive_samples, samples], axis=-1)
+        # compute the expected color across all unknown pixels
+        inp_idxs = all_idxs[:, :n]
+        tar_idxs = all_idxs[:, n:] # target is all unknown pixels
+        logits = self.eval_step(autoregressive_samples, inp_idxs, tar_idxs)
+        probabilities = tf.nn.softmax(logits, axis=2)
 
         expected_col = self.ds.expected_col(probabilities)
         expected_col = tf.concat([self.ds.unquantize(inp_colors), expected_col], axis=1)
         expected_col = tf.squeeze(expected_col)
+        
+        evaluate_counter.update()
+        
+        for i in range(n, n_total):
+
+            inp_idxs = all_idxs[:, :i]
+            tar_idxs = all_idxs[:, i:i+1] # target is first unknown pixel only
+
+            logits = self.eval_step(autoregressive_samples, inp_idxs, tar_idxs)
+            
+            # applies softmax on the logits and sample from the distribution
+            samples = tf.random.categorical(logits[:, 0], 1, dtype=tf.int32)
+            autoregressive_samples = tf.concat([autoregressive_samples, samples], axis=-1)
+            
+            evaluate_counter.update()
             
         evaluate_counter.close()
         return autoregressive_samples, expected_col
@@ -395,6 +364,46 @@ class TrainingLoop():
             print("n =", n)
             self.viz.showSeq(inp_colors, inp_idxs, (image_width, image_height), batch_size, unshuffle=True)
             self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True)
+
+class TrainingLoop():
+    
+    def __init__(self, config, viz, model, optimizer, model_name):
+        
+        self.config = config
+        self.viz = viz
+        self.ds = ds
+        self.optimizer = optimizer
+        
+        self.model_name = model_name
+        
+        self.ds_test = iter(ds_test)
+        
+        self.new_test_batch()
+        
+        self.step_index = 0
+        self.last_eval_loss = None
+        self.loss_history = np.zeros([config.n_steps])
+        self.last_eval_step = 0
+        self.last_log_index = 0
+        self.accum_steps = config.start_accum_steps
+        self.running_mean = 0.
+        self.test_loss_shuf = 0.
+        self.test_loss_seq = 0.
+        
+        self.train_step_grad_accum, self.train_step_normal, self.train_step_distributed, self.train_step_distributed_accum, self.eval_step = training_functions(config, model, optimizer, ds_train)
+    
+    def update_infobar(self, info_bar, loss):
+        window_size = self.config['loss_window_size']
+        num_replicas = self.config['num_devices']
+        minibatch_size = self.config.minibatch_size
+        loss = tf.math.log(loss)
+        running_mean = tf.math.log(self.running_mean)
+        test_loss_shuf = tf.math.log(self.test_loss_shuf)
+        test_loss_seq = tf.math.log(self.test_loss_seq)
+        
+        info_bar.update(f'Loss: {loss:.5g}, Loss ({window_size} step avg.): {running_mean:.5g}, Test Loss (shuf): {test_loss_shuf:.5g}, Test Loss (seq): {test_loss_seq:.5g}, #R*BS*GA: {num_replicas:>3}*{minibatch_size}*{self.accum_steps:<5}')
+        
+
         
 
     def train(self):
