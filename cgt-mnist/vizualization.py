@@ -32,8 +32,6 @@ class Viz:
         batch = seq.shape[0]
         num_show_img = min(max_images, seq.shape[0])
         img = np.reshape(seq, (batch, *size, -1))
-        if img.shape[-1] == 1:
-            img = np.squeeze(img, axis=-1)    
 
         fig=plt.figure(figsize=(3*num_show_img, 3))
         for i in range(num_show_img):
@@ -44,22 +42,20 @@ class Viz:
         if return_fig:
             return fig
     
-    def unquantize(self, seq):
-        seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
-        return tf.squeeze(seq, axis=-1)
-    
     def scatter_on_bg(self, seq, idxs, output_length):
         batch_size = idxs.shape[0]
         seq_length = idxs.shape[1]
+        n_color_dims = 3
                       
         color = tf.constant(self.config.bg_color or [1., 0., 1.])
         bg = tf.tile(color[None, None, :], [batch_size, output_length, 1])
-
-        # convert seq to grayscale rgb
-        seq = tf.tile(seq[:, :, None], [1, 1, 3])
-
-        batch_idxs = tf.tile(tf.expand_dims(tf.range(batch_size), -1), [1, seq_length])
-        idxs_nd = tf.concat([tf.expand_dims(batch_idxs, -1), tf.expand_dims(idxs, -1)], axis=-1)
+        
+        batch_idxs = tf.range(batch_size)
+        color_idxs = tf.range(n_color_dims)
+        batch_idxs = tf.tile(batch_idxs[:, None, None], [1, seq_length, n_color_dims])
+        color_idxs = tf.tile(color_idxs[None, None, :], [batch_size, seq_length, 1])
+        idxs = tf.tile(idxs[:, :, None], [1, 1, n_color_dims])
+        idxs_nd = tf.stack([batch_idxs, idxs, color_idxs], axis=-1)
 
         seq = tf.tensor_scatter_nd_update(bg, idxs_nd, seq)
         
@@ -76,37 +72,17 @@ class Viz:
         seq_length = idxs.shape[1]
         height, width = size
         img_length = height*width
+        
+        # unquantize to rgb
         if do_unquantize:
-            seq = self.unquantize(seq)
-        else:
-            seq = tf.cast(seq, tf.float32)
+            seq = self.ds.unquantize(seq, to="rgb")
+        elif seq.shape[-1] == 1:
+            seq = self.ds.to_grayscale_rgb(seq)
+        
         if unshuffle:
             seq = self.scatter_on_bg(seq, idxs, img_length)
 
         return self.np_showSeq(seq, size, max_images, cmap, return_fig=return_fig)
-
-    def showSeqExpectedVal(self, seq, probs, idxs, size, max_images=3, cmap='gray', unshuffle=False, return_fig=False):
-        """ Show one or more images encoded as sequence. (tensorflow version)
-
-            seq: tensor of sequences which encode the image. Either a single sequence or multiple sequences.
-            size: the image size. e.g. (28, 28) for `mnist` images.
-            max_images: the maximum number of images to display.
-        """
-        batch_size = idxs.shape[0]
-        seq_length = idxs.shape[1]
-        height, width = size
-        img_length = height*width
-        
-        # do_unquantize for samples first
-        seq = tf.map_fn(fn=self.ds.unquantize, elems=seq, fn_output_signature=tf.float32)
-        
-        centroids = tf.reshape(self.centroids, [1, 1, -1])
-        expected_col = tf.tensordot(probs, centroids, axes=([2], [2]))
-        expected_col = tf.squeeze(expected_col, axis=-1)
-        
-        seq = tf.concat([seq, expected_col], axis=1)
-        seq = tf.squeeze(seq)
-        return self.showSeq(seq, idxs, size, max_images, cmap, unshuffle=unshuffle, do_unquantize=False, return_fig=return_fig)
 
     def compare_quantized_and_unquantized(self, dataset_test_original):
         

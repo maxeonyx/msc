@@ -16,8 +16,8 @@ def normalize_image(image, label):
     return tf.cast(image, dtype=tf.float32) / 255.0, label
 
 def find_centroids(config, ds_train):
-    num_clusters = config.n_colors
-    n_color_dims = config.n_color_dims
+    num_clusters = config.dataset.n_colors
+    n_color_dims = config.dataset.n_color_dims
     batch_size = config.kmeans_batch_size
     kmeans = MiniBatchKMeans(n_clusters=num_clusters, random_state=0, batch_size=batch_size, verbose=True)
     ds_batched = ds_train.map(normalize_image).batch(batch_size)
@@ -25,7 +25,7 @@ def find_centroids(config, ds_train):
         title = manager.status_bar(f"K-Means clustering to make {num_clusters}-color MNIST Dataset", justify=enlighten.Justify.CENTER)
         clusters_names = manager.status_bar(''.join('{:<10}'.format(f"cen. {i}") for i in range(num_clusters)))
         clusters_status = manager.status_bar(''.join('{:<10}'.format('??????') for _ in range(num_clusters)))
-        pbar = manager.counter(total=60000//kmeans_batch_size, desc='Discretize to 8 colors', unit='minibatches')
+        pbar = manager.counter(total=60000//batch_size, desc='Discretize to 8 colors', unit='minibatches')
         for img, _ in pbar(iter(ds_batched)):
             pixels = img.numpy().reshape(-1, 1)
             kmeans.partial_fit(pixels)
@@ -104,20 +104,47 @@ class Datasets:
         self.ds_test_orig = ds_test_orig
     
     def quantize(self, sequence, label):
-        d = squared_euclidean_distance(sequence, self.centroids) # (height * width, n_centroids)
+        d = squared_distance(sequence, self.centroids) # (height * width, n_centroids)
         sequence = tf.math.argmin(d, axis=1, output_type=tf.int32)  # (height * width)
         return sequence, label
 
-    def unquantize(self, x):
+    def unquantize(self, x, to="same"):
         x_one_hot = tf.cast(tf.one_hot(x, depth=len(self.centroids)), dtype=tf.float32)  # (seq, num_centroids)
-        y = tf.linalg.matmul(x_one_hot,self.centroids)  # (seq, num_features)
-        print("unquantize output shape", y.shape)
+        if to == "rgb":
+            if self.centroids.shape[-1] == 1:
+                centroids = tf.tile(self.centroids, [1, 3])
+            elif self.centroids.shape[-1] == 3:
+                centroids = self.centroids
+            else:
+                assert False, "color_dims is not 1 or 3, can't use to='rgb'"
+        else:
+            centroids = self.centroids
+        y = tf.linalg.matmul(x_one_hot,centroids)  # (seq, num_features, n_color_dims)
         return y
+    
+    def to_grayscale_rgb(self, seq):
+        assert seq.shape[-1] == 1, "to_grayscale() only works if the final dim is length 1"
+        
+        # turn the final dim from [1] to [3] by filling the color value to r, g, and b
+        seq = tf.tile(seq, [1, 1, 3])
+        return seq
 
     def expected_col(self, probs):
-        centroids = tf.reshape(self.centroids, [1, 1, -1])
-        expected_color = tf.tensordot(probs, centroids, axes=([2], [2]))
-        print("expected_col output shape", expected_color.shape)
+        # shape: (batch, seq, n_colors)
+        
+        probs = tf.expand_dims(probs, axis=-1)
+        # shape: (batch, seq, n_colors, n_color_dim=1)
+        
+        # add batch and sequence dim to centroids
+        centroids = tf.expand_dims(tf.expand_dims(self.centroids, axis=0), axis=0)
+        # shape: (batch=1, seq=1, n_colors, n_color_dim)
+        
+        # this does linear interpolation between colors
+        expected_color = probs * centroids
+        # shape: (batch=1, seq=1, n_colors, n_color_dim)
+        expected_color = tf.reduce_sum(expected_color, axis=[-2])
+        # shape: (batch=1, seq=1, n_color_dim)
+        
         return expected_color
     
     def shuffle_and_add_indices(self, sequence, label):

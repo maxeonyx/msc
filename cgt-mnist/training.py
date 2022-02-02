@@ -16,6 +16,34 @@ import wandb
 import schedules
 import models
 
+def log2(x):
+    numerator = tf.math.log(x)
+    denominator = tf.math.log(tf.constant(2, dtype=numerator.dtype))
+    return numerator / denominator
+
+def entropy_of_probabilities(probabilities, do_print=False):
+    if do_print:
+        print("p(x) =", probabilities)
+    log_probabilities = log2(probabilities)
+    if do_print:
+        print("log p(x) =", log_probabilities)
+    entropies = -1 * tf.reduce_sum(probabilities*log_probabilities, axis=-1)
+    entropies = tf.expand_dims(entropies, axis=-1)
+    
+    entropies = entropies / log2(tf.cast(probabilities.shape[-1], tf.float32))
+    
+    if do_print:
+        print("H(X) =", entropies)
+    return entropies
+
+def entropy_of_logits(logits, do_print=False):
+    if do_print:
+        print("logits =", logits)
+    
+    probabilities = tf.nn.softmax(logits, axis=-1)
+    
+    return entropy_of_probabilities(probabilities, do_print)
+
 def wandb_init(config, model_name, resume):
     if config['use_wandb']:
         wandb.init(project='dist-mnist', entity='maxeonyx', name=model_name, config=config, resume=resume)
@@ -71,10 +99,10 @@ class Evaluator():
             accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
             accum_loss = tf.constant(0, tf.float32)
 
-            if config.training_mode == 'query_next' or config.training_mode == 'combination':
+            if config.training_mode == 'query_next' or config.training_mode == 'full_combination':
                 float_steps += 1.0
                 enc_mask_type = models.MASK_BACKWARD_EQUAL
-                dec_mask_type = models.MASK_BACKWARD
+                dec_mask_type = models.MASK_BACKWARD_EQUAL
                 x_inp = colors_inp[:, :]
                 x_tar = colors_tar[:, :]
                 i_inp = idxs[:, :]
@@ -84,7 +112,7 @@ class Evaluator():
                 accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
                 accum_loss += tf.reduce_mean(loss)
 
-            if config.training_mode == 'query_all' or config.training_mode == 'combination':
+            if config.training_mode == 'query_unknown':
                 float_steps += 1.0
                 enc_mask_type = models.MASK_NONE
                 dec_mask_type = models.MASK_NONE
@@ -92,6 +120,18 @@ class Evaluator():
                 x_tar = colors_tar[:, n:]
                 i_inp = idxs[:, :n]
                 i_tar = idxs[:, n:]
+                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+                accum_loss += tf.reduce_mean(loss)
+
+            if config.training_mode == 'query_all' or config.training_mode == 'full_combination':
+                float_steps += 1.0
+                enc_mask_type = models.MASK_NONE
+                dec_mask_type = models.MASK_NONE
+                x_inp = colors_inp[:, :n]
+                x_tar = colors_tar[:, :]
+                i_inp = idxs[:, :n]
+                i_tar = idxs[:, :]
                 loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
                 accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
                 accum_loss += tf.reduce_mean(loss)
@@ -252,8 +292,7 @@ class Evaluator():
         probabilities = tf.nn.softmax(logits, axis=2)
 
         expected_col = self.ds.expected_col(probabilities)
-        expected_col = tf.concat([self.ds.unquantize(inp_colors), expected_col], axis=1)
-        expected_col = tf.squeeze(expected_col)
+        expected_col = tf.concat([self.ds.unquantize(inp_colors, to="grayscale"), expected_col], axis=1)
         
         evaluate_counter.update()
         
@@ -273,7 +312,7 @@ class Evaluator():
         evaluate_counter.close()
         return autoregressive_samples, expected_col
     
-    def evaluate_varying(self, all_colors, all_idxs, n_fn, entropy=False, manager=None):
+    def evaluate_varying(self, all_colors, all_idxs, n_fn, manager=None):
         """Autoregressively sample a bunch of images, each starting with n
            (produced by n_fn) real pixels"""
         batch_size = all_colors.shape[0]
@@ -292,30 +331,53 @@ class Evaluator():
             inp_colors = all_colors[:1, :n]
             
             tar_idxs = all_idxs[:1, n:]
-            
-            unq_inp = self.viz.unquantize(inp_colors)
-            bg_input = self.viz.scatter_on_bg(unq_inp, inp_idxs, output_length=seq_length)
+
+            logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
+            unq_inp = self.ds.unquantize(inp_colors)
+            unq_inp_rgb = self.ds.to_grayscale_rgb(unq_inp)
+            bg_input = self.viz.scatter_on_bg(unq_inp_rgb, inp_idxs, output_length=seq_length)
             if bg_all is None:
                 bg_all = bg_input
             else:
                 bg_all = tf.concat([bg_all, bg_input], axis=0)
 
-            logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
-            
-            if entropy:
-                expected_col = entropy_of_logits(logits)
-            else:
-                # softmax along color dimension
-                probabilities = tf.nn.softmax(logits, axis=2)
-                expected_col = self.ds.expected_col(probabilities)
+            # softmax along color dimension
+            probabilities = tf.nn.softmax(logits, axis=-1)
+            expected_col = self.ds.expected_col(probabilities)
                 
-            expected_col = tf.concat([self.ds.unquantize(inp_colors), expected_col], axis=1)
-            expected_col = tf.squeeze(expected_col)
-            expected_col = tf.expand_dims(expected_col, 0)
+            expected_col = tf.concat([unq_inp, expected_col], axis=-2)
+            
             all_expected_col = expected_col if all_expected_col is None else tf.concat([all_expected_col, expected_col], axis=0)
 
         evaluate_counter.close()
         return all_expected_col, bg_all
+    
+    def evaluate_varying_entropy(self, all_colors, all_idxs, n_fn, manager=None):
+        """Sample a bunch of images, each starting with n
+           (produced by n_fn) real pixels. Show the entropy over all outputs, including the inputs."""
+        batch_size = all_colors.shape[0]
+        seq_length = all_colors.shape[1]
+        
+        if manager is None:
+            manager = enlighten.get_manager()
+        evaluate_counter = manager.counter(total=batch_size, desc="Evaluating", unit='steps', leave=False)
+        
+        all_entropies = None
+        for i in evaluate_counter(range(batch_size)):
+            n = min(max(1, int(n_fn(i))), all_colors.shape[1] - 1)
+            inp_idxs = all_idxs[:1, :n]
+            inp_colors = all_colors[:1, :n]
+            
+            tar_idxs = all_idxs[:1, :]
+
+            logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
+            
+            entropies = entropy_of_logits(logits)
+                
+            all_entropies = entropies if all_entropies is None else tf.concat([all_entropies, entropies], axis=0)
+
+        evaluate_counter.close()
+        return all_entropies
 
     def process_batch(self, return_figs=False, show_input=True, show_output=True, manager=None):
         all_colors = self.test_colors
@@ -326,29 +388,32 @@ class Evaluator():
         half_colors = all_colors[:, :n]
         half_idxs = all_idxs[:, :n]
         image_height, image_width = self.config.dataset.image_size
+        figs = []
         if show_input:
             self.viz.showSeq(half_colors, half_idxs, (image_width, image_height), batch_size, unshuffle=True)
             self.viz.showSeq(all_colors, all_idxs, (image_width, image_height), batch_size, unshuffle=True)
         if show_output:
             autoregressive_samples, expected_col = self.evaluate(half_colors, all_idxs, manager=manager)
-            fig1 = self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True, return_fig=True)
-            fig2 = self.viz.showSeq(expected_col,           all_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
+            figs.append(self.viz.showSeq(autoregressive_samples, all_idxs, (image_width, image_height), batch_size, unshuffle=True, return_fig=True))
+            figs.append(self.viz.showSeq(expected_col,           all_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True))
             repeated_col = tf.tile(all_colors[5:6], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[5:6], [batch_size, 1])
             varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
-            e_varying_n, e_varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), entropy=True, manager=manager)
+            e_varying_n = self.evaluate_varying_entropy(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
             if show_input:
                 self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
-            fig3 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
-            fig3 = self.viz.showSeq(e_varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
+            figs.append(self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True))
+            figs.append(self.viz.showSeq(e_varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True))
             repeated_col = tf.tile(all_colors[0:1], [batch_size, 1])
             repeated_idxs = tf.tile(all_idxs[0:1], [batch_size, 1])
             varying_n, varying_in = self.evaluate_varying(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
+            e_varying_n = self.evaluate_varying_entropy(repeated_col, repeated_idxs, n_fn=lambda i: self.config.dataset.seq_length//(batch_size+1)*(i+1), manager=manager)
             if show_input:
                 self.viz.showSeq(varying_in,                repeated_idxs, (image_width, image_height), batch_size, unshuffle=False, do_unquantize=False)
-            fig4 = self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True)
+            figs.append(self.viz.showSeq(varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True))
+            figs.append(self.viz.showSeq(e_varying_n,              repeated_idxs, (image_width, image_height), batch_size, unshuffle=True, do_unquantize=False, return_fig=True))
             if return_figs:
-                return fig1, fig2, fig3, fig4
+                return figs
     
     def many_autoregressive(self, n_seq=None):
         all_colors = self.test_colors
@@ -367,18 +432,14 @@ class Evaluator():
 
 class TrainingLoop():
     
-    def __init__(self, config, viz, model, optimizer, model_name):
+    def __init__(self, config, evaler, model_name):
         
         self.config = config
-        self.viz = viz
-        self.ds = ds
-        self.optimizer = optimizer
+        self.evaler = evaler
         
         self.model_name = model_name
         
-        self.ds_test = iter(ds_test)
-        
-        self.new_test_batch()
+        wandb_init(config, model_name, resume=False)
         
         self.step_index = 0
         self.last_eval_loss = None
@@ -389,8 +450,6 @@ class TrainingLoop():
         self.running_mean = 0.
         self.test_loss_shuf = 0.
         self.test_loss_seq = 0.
-        
-        self.train_step_grad_accum, self.train_step_normal, self.train_step_distributed, self.train_step_distributed_accum, self.eval_step = training_functions(config, model, optimizer, ds_train)
     
     def update_infobar(self, info_bar, loss):
         window_size = self.config['loss_window_size']
@@ -403,10 +462,9 @@ class TrainingLoop():
         
         info_bar.update(f'Loss: {loss:.5g}, Loss ({window_size} step avg.): {running_mean:.5g}, Test Loss (shuf): {test_loss_shuf:.5g}, Test Loss (seq): {test_loss_seq:.5g}, #R*BS*GA: {num_replicas:>3}*{minibatch_size}*{self.accum_steps:<5}')
         
-
         
-
     def train(self):
+        
         with enlighten.get_manager() as manager:
             status_bar = manager.status_bar(f"Training model '{self.model_name}'", justify=enlighten.Justify.CENTER)
             info_bar = manager.status_bar('Loss: ??????, Learning Rate: ???????, Batch Size: ???*?????')
@@ -427,7 +485,7 @@ class TrainingLoop():
         loss=0.
         
         if self.config.grad_accum_steps is None or self.config.grad_accum_steps == 1:
-            loss = self.train_step_distributed()
+            loss = self.evaler.train_step_distributed()
             self.accum_steps = 1
         else:
             if type(self.config.grad_accum_steps) is int:
@@ -443,7 +501,7 @@ class TrainingLoop():
                 bs_sched = schedules.batch_size_schedule(self.config, schedule_name, params)
                 self.accum_steps = bs_sched(self.step_index)
             self.update_infobar(info_bar, loss)
-            loss = self.train_step_distributed_accum(self.accum_steps)
+            loss = self.evaler.train_step_distributed_accum(self.accum_steps)
         
         self.loss_history[self.step_index] = loss
         if self.step_index > 0:
@@ -468,16 +526,25 @@ class TrainingLoop():
             self.last_eval_loss = self.running_mean
             self.last_eval_step = self.step_index
             print(f"Step {self.step_index}, Loss (last minibatch): {loss}, Loss ({window_size} step avg.): {self.last_eval_loss}")
-            fig1, fig2, fig3, fig4 = self.process_batch(return_figs=True, show_input=(self.step_index == 0), manager=manager)
+            fig1, fig2, fig3, fig4, fig5, fig6 = self.evaler.process_batch(return_figs=True, show_input=(self.step_index == 0), manager=manager)
             if self.config['use_wandb']:
                 self.last_log_index = self.step_index
-                wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.optimizer._decayed_lr(tf.float32), 'viz_autoregressive': wandb.Image(fig1), 'viz_expected': wandb.Image(fig2), 'viz_varying': wandb.Image(fig3), 'viz_varying_sequential': wandb.Image(fig4)}, step=self.step_index)
+                wandb.log({
+                    'log_loss': tf.math.log(loss),
+                    'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32),
+                    'viz_autoregressive': wandb.Image(fig1),
+                    'viz_expected': wandb.Image(fig2),
+                    'viz_varying': wandb.Image(fig3),
+                    'viz_varying_entropy': wandb.Image(fig4),
+                    'viz_varying_sequential': wandb.Image(fig5),
+                    'viz_varying_sequential_entropy': wandb.Image(fig6),
+                }, step=self.step_index)
                     
         if self.config['use_wandb'] and self.step_index > 0 and self.step_index > self.last_log_index + self.config['wandb_log_interval']:
             self.last_log_index = self.step_index
-            wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
+            wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
                     
         if self.step_index > 0 and self.step_index % self.config.test_interval == 0:
-            losses = self.test_loss(manager=manager)
+            losses = self.evaler.test_loss(manager=manager)
             
             wandb.log(losses, step=self.step_index)

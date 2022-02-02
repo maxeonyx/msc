@@ -20,10 +20,13 @@ def model_name(hostname, config):
         spec.append(config.dataset.name)
         
     if config.dataset.rescale is not None:
-        spec.append(f'{config.dataset.rescale[0]}x{config.dataset.rescale[1]}')
+        spec.append(f'{config.dataset.image_size[0]}x{config.dataset.image_size[1]}')
     
     if config.dataset.n_colors != 4:
         spec.append(f'n{config.dataset.n_colors}')
+    
+    if config.noise_fraction != 0:
+        spec.append(f'noise{config.noise_fraction}')
         
     # batch size triple
     if config.grad_accum_steps is None:
