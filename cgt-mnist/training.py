@@ -102,7 +102,7 @@ class Evaluator():
             if config.training_mode == 'query_next' or config.training_mode == 'full_combination':
                 float_steps += 1.0
                 enc_mask_type = models.MASK_BACKWARD_EQUAL
-                dec_mask_type = models.MASK_BACKWARD_EQUAL
+                dec_mask_type = models.MASK_BACKWARD
                 x_inp = colors_inp[:, :]
                 x_tar = colors_tar[:, :]
                 i_inp = idxs[:, :]
@@ -448,19 +448,44 @@ class TrainingLoop():
         self.last_log_index = 0
         self.accum_steps = config.start_accum_steps
         self.running_mean = 0.
-        self.test_loss_shuf = 0.
-        self.test_loss_seq = 0.
+        self.test_losses = {}
     
     def update_infobar(self, info_bar, loss):
+        
+        def format_loss(l):
+            l_str = f"{l:.5g}"
+            l_format = f"{l_str + ',': <8}"
+            return l_format
+        
+        info_bar_text = ""
+        
+        loss_format = format_loss(loss)
+        info_bar_text += f"Loss: {loss_format} "
+        
         window_size = self.config['loss_window_size']
+        running_mean_format = format_loss(self.running_mean)
+        info_bar_text += f"Loss (mean) ({window_size} steps): {running_mean_format} "
+        
+        log_loss_format = format_loss(tf.math.log(self.running_mean))
+        info_bar_text += f"Log Loss (mean): {log_loss_format: <9} "
+        
+        shuf_key = f'loss_shuf_{self.config.test_n_shuf[0]}'
+        if shuf_key in self.test_losses:
+            test_loss_shuf = format_loss(self.test_losses[shuf_key])
+            info_bar_text += f"Test Loss (shuf): {test_loss_shuf} "
+        
+        seq_key = f'loss_seq_{self.config.test_n_seq[0]}'
+        if seq_key in self.test_losses:
+            test_loss_seq = format_loss(self.test_losses[seq_key])
+            info_bar_text += f"Test Loss (seq): {test_loss_seq} "
+        
         num_replicas = self.config['num_devices']
         minibatch_size = self.config.minibatch_size
-        loss = tf.math.log(loss)
-        running_mean = tf.math.log(self.running_mean)
-        test_loss_shuf = tf.math.log(self.test_loss_shuf)
-        test_loss_seq = tf.math.log(self.test_loss_seq)
+        accum_steps = self.accum_steps
+        batch_size_text = f"{num_replicas}*{minibatch_size}*{accum_steps}"
+        info_bar_text += f"Batch Size: {batch_size_text} (Devices*Minibatch*GradAccum)"
         
-        info_bar.update(f'Loss: {loss:.5g}, Loss ({window_size} step avg.): {running_mean:.5g}, Test Loss (shuf): {test_loss_shuf:.5g}, Test Loss (seq): {test_loss_seq:.5g}, #R*BS*GA: {num_replicas:>3}*{minibatch_size}*{self.accum_steps:<5}')
+        info_bar.update(info_bar_text)
         
         
     def train(self):
@@ -542,9 +567,11 @@ class TrainingLoop():
                     
         if self.config['use_wandb'] and self.step_index > 0 and self.step_index > self.last_log_index + self.config['wandb_log_interval']:
             self.last_log_index = self.step_index
-            wandb.log({'log_loss': tf.math.log(loss), 'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
+            wandb_interval_mean_loss = np.mean(self.loss_history[max(0, self.step_index-self.config['wandb_log_interval']) : self.step_index+1])
+            wandb.log({'log_loss_mean': tf.math.log(wandb_interval_mean_loss), 'loss_mean': wandb_interval_mean_loss, 'loss': loss, 'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
                     
         if self.step_index > 0 and self.step_index % self.config.test_interval == 0:
             losses = self.evaler.test_loss(manager=manager)
+            self.test_losses = losses
             
             wandb.log(losses, step=self.step_index)

@@ -49,6 +49,10 @@ class Constant(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __call__(self, step):
         return tf.ones_like(step)*self.rate
 
+class Warmup(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, total_steps, warmup_steps, end_lr):
+        
+    
 class WarmupExponential(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, total_steps, warmup_steps, peak_lr, final_lr):
         super(WarmupExponential, self).__init__()
@@ -91,19 +95,26 @@ def const_batch_size(batch_size):
     return call
 
 def learning_rate_schedule(config, return_all=False):
+    
+    if config.lr_schedule is None:
+        return Constant(0.0004)
+    
+    sched, start_lr, *params = config.lr_schedule
+    
     s = {
-        'constant': Constant(config['max_lr']),
-        'exponential': Exponential(config.n_steps, config['max_lr'], config['min_lr']),
-        'warmup_exponential': WarmupExponential(config.n_steps, config['lr_warmup_steps'], config['max_lr'], config['min_lr']),
-        # 'warmup_inv_square': WarmupInvSquare(config['model']['embd_dim'], config['lr_warmup_steps']),
-        'warmup_linear': WarmupLinear(config.n_steps, config['max_lr'], config['lr_warmup_steps']),
+        'constant': Constant(max_lr),
+        'exponential': Exponential(config.n_steps, start_lr, *params),
+        'linear': Linear(config.n_steps, start_lr, *params),
     }
+    
     if return_all:
         return s
-    else:
-        if config['lr_schedule'] is None:
-            return s['constant']
-        return s[config['lr_schedule']]
+    
+    schedule = s[sched]
+    
+    if config.lr_warmup is not None:
+        warmup_steps = config.lr_warmup
+        schedule = Warmup(warmup_steps, start_lr
 
 def batch_size_schedule(config, name, params, return_all=False):
     s = {
