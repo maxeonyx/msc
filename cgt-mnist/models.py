@@ -165,48 +165,99 @@ def scaled_dot_product_attention(k, q, v, mask):
     
     return output, attention_weights
 
-# # position-content disentagled attention from DeBERTa
-# # https://arxiv.org/abs/2006.03654
-# def deberta_attention(m):
-#     wk_content = layers.Dense(embd_dim)
-#     wq_content = layers.Dense(embd_dim)
-#     wv_content = layers.Dense(embd_dim)
-#     wk_position = layers.Dense(embd_dim)
-#     wq_position = layers.Dense(embd_dim)
-#     dense = layers.Dense(embd_dim)
+# position-content disentagled attention from DeBERTa
+# https://arxiv.org/abs/2006.03654
+def deberta_attention(m):
+    embd_dim, n_heads = m.embd_dim, m.n_heads
+    wk_content = layers.Dense(embd_dim)
+    wq_content = layers.Dense(embd_dim)
+    wv_content = layers.Dense(embd_dim)
+    wk_position = layers.Dense(embd_dim)
+    wq_position = layers.Dense(embd_dim)
+    dense = layers.Dense(embd_dim)
     
-#     assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
-#     head_width = embd_dim//n_heads
+    assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
+    head_width = embd_dim//n_heads
     
-#     def split_heads(x, batch_size):
-#         # reshape from (batch_size, seq_length, embd_dim) to (batch_size, num_heads, seq_len, head_width)
-#         x = tf.reshape(x, (batch_size, -1, n_heads, head_width))
-#         return tf.transpose(x, perm=[0, 2, 1, 3])
+    def split_heads(x, batch_size):
+        # reshape from (batch_size, seq_length, embd_dim) to (batch_size, num_heads, seq_len, head_width)
+        x = tf.reshape(x, (batch_size, -1, n_heads, head_width))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
     
-#     def mha(k, q, v, mask):
-#         batch_size = tf.shape(k)[0]
+    def mha_deberta(k, q, v, pos_kq=None, mask=None):
+        if pos_kq:
+            pos_k, pos_q = pos_kq
+        batch_size = tf.shape(k)[0]
         
-#         k = wk(k)
-#         q = wk(q)
-#         v = wk(v)
-#         # shape: (batch_size, seq_len_*, embd_dim)
+        k = wk_content(k)
+        q = wq_content(q)
+        v = wv_content(v)
+        if pos_kq:
+            pos_k = wk_position(pos_k)
+            pos_q = wq_position(pos_q)
+        # shape: (batch_size, seq_len_*, embd_dim)
         
-#         k = split_heads(k, batch_size)
-#         q = split_heads(q, batch_size)
-#         v = split_heads(v, batch_size)
-#         # shape: (batch_size, num_heads, seq_len_*, head_width)
+        # split attention heads
+        k = split_heads(k, batch_size)
+        q = split_heads(q, batch_size)
+        v = split_heads(v, batch_size)
+        if pos_kq:
+            pos_k = split_heads(pos_k, batch_size)
+            pos_q = split_heads(pos_q, batch_size)
+        # shape: (batch_size, num_heads, seq_len_*, head_width)
         
-#         scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
-#         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
-#         # (batch_size, seq_len, num_heads, depth)
-#         concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
-#         output = dense(concat_attention)
-#         return output, attention_weights
+        #scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
+        ####
+        
+        batch_size = tf.shape(k)[0]
+        seq_len_kv = tf.shape(k)[-2]
+        kq_dim = tf.shape(k)[-1]
+        seq_len_q = tf.shape(q)[-2]
+        v_dim = tf.shape(v)[-1]
+
+        ### Content/Content
+        scale = 1.
+        attention_logits = tf.matmul(q, k, transpose_b=True)
+        if pos_kq:
+            ### Content/Position
+            scale += 1.
+            attention_logits += tf.matmul(q, pos_k, transpose_b=True)
+            
+            ### Position/Content
+            scale += 1.
+            attention_logits += tf.matmul(pos_q, k, transpose_b=True)
+            # shape: (batch_size, n_heads, seq_len_q, seq_len_kv)
+
+        dk = tf.cast(kq_dim, tf.float32)
+        scaled_attention_logits = attention_logits / tf.math.sqrt(scale * dk)
+
+        scaled_attention_logits += mask * -1e9 # batch dim broadcast
+
+        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1) # sums to 1 along last axis
+        # shape: (batch_size, seq_len_q, seq_len_kv)
+
+        scaled_attention = tf.matmul(attention_weights, v)
+        # shape: (batch_size, seq_len_q, v_dim)
+        
+        # recombine heads
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        # (batch_size, seq_len, num_heads, depth)
+        concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
+        # (batch_size, seq_len, embd_dim)
+        
+        
+        output = concat_attention
+        # output = dense(concat_attention)
+        
+        return output, attention_weights
     
-#     def call_self_attn(x, pos):
+    def call_self_attn(x, pos_x, mask):
+        return mha_deberta(k=x, q=x, v=x, pos_kq=(pos_x, pos_x), mask=mask)
         
+    def call_cross_attn(keyval, query, pos_key, pos_query, mask):
+        return mha_deberta(k=keyval, q=query, v=keyval, pos_kq=(pos_key, pos_query), mask=mask)
     
-#     return call
+    return call_cross_attn
 
 def multi_head_attention(embd_dim, n_heads):
     
@@ -240,7 +291,7 @@ def multi_head_attention(embd_dim, n_heads):
         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
         # (batch_size, seq_len, num_heads, depth)
         concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
-        output = dense(concat_attention)
+        # output = dense(concat_attention)
         return output, attention_weights
     return call
     
@@ -253,6 +304,27 @@ def pointwise_feedforward_layer(m, hidden_dim, out_dim, n_hidden_layers=1):
             x = layer(x)
             x = m.activation_fn(x)
         x = dense2(x)
+        return x
+    return call
+
+
+def deberta_layer(m):
+    mha = deberta_attention(m)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    layernorm1 = layers.LayerNormalization(epsilon=1e-6)
+    layernorm2 = layers.LayerNormalization(epsilon=1e-6)
+    dropout1 = layers.Dropout(m.dropout_rate)
+    dropout2 = layers.Dropout(m.dropout_rate)
+    def call(keyval, query, pos_key, pos_query, mask):
+        x = query
+        out1 = layernorm1(dropout1(keyval)) # prenorm
+        attn_out, attn_weights = mha(keyval=out1, query=x, pos_key=pos_key, pos_query=pos_query, mask=mask)
+        x += attn_out
+
+        out2 = layernorm2(dropout2(x)) # prenorm
+        ffl_out = ffl(out2)
+        x += ffl_out
+
         return x
     return call
 
@@ -315,6 +387,42 @@ def anp_architecture_no_global_latent(m):
         outs = final_layer(tar_y)
         return outs
     return call
+
+    
+# deberta / anp
+def deberta_anp_architecture(m):
+    enc_a_layers = [deberta_layer(m) for _ in range(m.n_enc_a_layers)]
+    enc_b_layers = [deberta_layer(m) for _ in range(m.n_enc_b_layers)]
+    dec_layer = deberta_layer(m)
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    # final_dropout = layers.Dropout(m.dropout_rate)
+    # final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
+    # final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
+    def call(inp, inp_x, tar_x, enc_mask, dec_mask):
+        # inp_x = x_encoder(inp_x)
+        enc_a_z = inp
+        for enc_layer in enc_a_layers:
+            enc_a_z += enc_layer(keyval=enc_a_z, query=enc_a_z, pos_query=inp_x, pos_key=inp_x, mask=enc_mask)
+        enc_b_z = inp
+        for enc_layer in enc_b_layers:
+            enc_b_z += enc_layer(keyval=enc_b_z, query=enc_b_z, pos_query=inp_x, pos_key=inp_x, mask=enc_mask)
+        
+        tar_z = x_encoder(tar_x)
+        tar_z = dec_layer(keyval=enc_a_z, query=tar_z, pos_query=tar_x, pos_key=inp_x, mask=dec_mask)
+        # tar_z = final_layer_norm(final_dropout(tar_z))
+        
+        global_latent = tf.reduce_mean(enc_b_z, axis=1) # mean along sequence dim
+        global_latent = tf.expand_dims(global_latent, 1) # add middle dim back for broadcasting
+        global_latent *= tf.ones_like(tar_z)
+        
+        tar_z = tf.concat([tar_z, global_latent], axis=2) # concat along embd dim
+        
+        # decoder here
+        tar_y = decoder(tar_z)
+        
+        return tar_y
+    return call
     
 # attentive neural process
 def anp_architecture(m):
@@ -332,10 +440,10 @@ def anp_architecture(m):
         for enc_layer in enc_a_layers:
             enc_inp_a += enc_layer(enc_inp_a, enc_inp_a, mask=enc_a_mask)
         enc_inp_b = inp_xy
-        for enc_layer in enc_a_layers:
+        for enc_layer in enc_b_layers:
             enc_inp_b += enc_layer(enc_inp_b, enc_inp_b, mask=enc_a_mask)
             
-        tar_z = dec_layer(key=inp_x, query=tar_x, val=inp_xy, mask=dec_mask)
+        tar_z = dec_layer(key=enc_inp_a, query=tar_x, val=enc_inp_a, mask=dec_mask)
         tar_z = final_layer_norm(final_dropout(tar_z))
         
         global_latent = tf.reduce_mean(enc_inp_b, axis=1) # mean along sequence dim
@@ -347,7 +455,7 @@ def anp_architecture(m):
         return tar_y
     return call
 
-# custom attentive neural process
+# failed first attempt at attentive-neural-process
 def canp_architecture(m):
     enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
     dec_layer = transformer_layer(m)
@@ -408,11 +516,14 @@ def transformer(m):
     inp_pos_embd = position_embedding(inp_idxs)
     tar_pos_embd = position_embedding(tar_idxs)
     
-    xa = col_embd + inp_pos_embd
-    xb = tar_pos_embd
-    
     if m.architecture == 'anp':
-        output_layer = anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)
+        xa = col_embd + inp_pos_embd
+        output_layer = anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
+    elif m.architecture == 'deberta_anp':
+        xa = col_embd
+        output_layer = deberta_anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)
+    else:
+        raise f"invalid architecture '{m.architecture}'"
     
     
     return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=[output_layer])

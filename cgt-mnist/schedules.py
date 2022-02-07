@@ -105,7 +105,7 @@ def learning_rate_schedule(config, return_all=False):
     
     schedule = s[sched](params)
     
-    if config.lr_warmup is not None:
+    if config.lr_warmup:
         warmup_steps = config.lr_warmup
         schedule = Warmup(schedule, warmup_steps, start_lr)
     
