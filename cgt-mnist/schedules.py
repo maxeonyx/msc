@@ -29,12 +29,13 @@ from dotmap import DotMap
 
 class Linear(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, total_steps, start_lr):
-        super(WarmupLinear, self).__init__()
+        super(Linear, self).__init__()
         
-        self.start_lr = start_lr
-        self.total_steps = total_steps
+        self.start_lr = tf.cast(start_lr, tf.float64)
+        self.total_steps = tf.cast(total_steps, tf.float64)
 
     def __call__(self, step):
+        step = tf.cast(step, tf.float64)
         decay = 1 - step/self.total_steps
         
         return self.start_lr * decay

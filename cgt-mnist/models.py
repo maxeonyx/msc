@@ -94,53 +94,6 @@ def print_masks():
 
 
 
-# scale is the max-min of vals
-# for mnist it's 28 because thats the width and height of the images
-def dual_positional_encoding(n_dims, length):
-    one_axis_dim = n_dims//2
-    i = tf.range(n_dims//4, dtype=tf.float32)
-    i = tf.expand_dims(i, -2)
-    scale = tf.pow(length, 2.*i/one_axis_dim)
-    
-    def pos_enc(vals):
-        vals = tf.expand_dims(vals, -1)
-
-        # the bit inside the sin / cos
-        rate = vals / scale
-        sin = tf.sin(rate)
-        cos = tf.cos(rate)
-        encoding = tf.concat([sin, cos], axis=-1)
-        return encoding
-    
-    def call(idxs):
-        rows = idxs // 28
-        cols = idxs % 28
-        
-        row_enc = pos_enc(rows)
-        col_enc = pos_enc(cols)
-        
-        encoding = tf.concat([row_enc, col_enc], axis=-1)
-        return encoding
-        
-    return call
-
-def linear_position_encoding(dim_lengths, out_vec_lengths):
-    def call(inp):        
-        dims_enc = None
-        for dim in range(len(dim_lengths)):
-            enc = inp
-            for dim_len in dim_lengths[dim+1:]:
-                enc = enc // dim_len
-            enc = enc % dim_lengths[dim]
-            enc = tf.cast(enc, tf.float32) / tf.cast(dim_lengths[dim] - 1, tf.float32)
-            enc = tf.expand_dims(enc, -1)
-            tile_shape = [1 for _ in enc.shape[:-1]] + [out_vec_lengths[dim]]
-            enc = tf.tile(enc, tile_shape)
-            dims_enc = enc if dims_enc is None else tf.concat([dims_enc, enc], axis=-1)
-        
-        return dims_enc
-        
-    return call
 
 def scaled_dot_product_attention(k, q, v, mask):
     batch_size = tf.shape(k)[0]
@@ -290,8 +243,8 @@ def multi_head_attention(embd_dim, n_heads):
         scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
         # (batch_size, seq_len, num_heads, depth)
-        concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
-        # output = dense(concat_attention)
+        output = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
+        # output = dense(output)
         return output, attention_weights
     return call
     
@@ -469,6 +422,55 @@ def canp_architecture(m):
         tar_y = final_layer_norm(final_dropout(tar_y))
         outs = final_layer(tar_y)
         return outs
+    return call
+
+
+# scale is the max-min of vals
+# for mnist it's 28 because thats the width and height of the images
+def dual_positional_encoding(n_dims, length):
+    one_axis_dim = n_dims//2
+    i = tf.range(n_dims//4, dtype=tf.float32)
+    i = tf.expand_dims(i, -2)
+    scale = tf.pow(length, 2.*i/one_axis_dim)
+    
+    def pos_enc(vals):
+        vals = tf.expand_dims(vals, -1)
+
+        # the bit inside the sin / cos
+        rate = vals / scale
+        sin = tf.sin(rate)
+        cos = tf.cos(rate)
+        encoding = tf.concat([sin, cos], axis=-1)
+        return encoding
+    
+    def call(idxs):
+        rows = idxs // 28
+        cols = idxs % 28
+        
+        row_enc = pos_enc(rows)
+        col_enc = pos_enc(cols)
+        
+        encoding = tf.concat([row_enc, col_enc], axis=-1)
+        return encoding
+        
+    return call
+
+def linear_position_encoding(dim_lengths, out_vec_lengths):
+    def call(inp):        
+        dims_enc = None
+        for dim in range(len(dim_lengths)):
+            enc = inp
+            for dim_len in dim_lengths[dim+1:]:
+                enc = enc // dim_len
+            enc = enc % dim_lengths[dim]
+            enc = tf.cast(enc, tf.float32) / tf.cast(dim_lengths[dim] - 1, tf.float32)
+            enc = tf.expand_dims(enc, -1)
+            tile_shape = [1 for _ in enc.shape[:-1]] + [out_vec_lengths[dim]]
+            enc = tf.tile(enc, tile_shape)
+            dims_enc = enc if dims_enc is None else tf.concat([dims_enc, enc], axis=-1)
+        
+        return dims_enc
+        
     return call
 
 def relative_position_embedding(pos_a, pos_b):
