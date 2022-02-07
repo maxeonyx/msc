@@ -12,60 +12,53 @@ import enlighten
 import tensorflow_probability as tfp
 from dotmap import DotMap
 
-class WarmupInvSquare(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, embd_dim, warmup_steps):
-        super(WarmupInvSquare, self).__init__()
+# class WarmupInvSquare(tf.keras.optimizers.schedules.LearningRateSchedule):
+#     def __init__(self, embd_dim, warmup_steps):
+#         super(WarmupInvSquare, self).__init__()
 
-        self.d_model = embd_dim
-        self.d_model = tf.cast(self.d_model, tf.float32)
+#         self.d_model = embd_dim
+#         self.d_model = tf.cast(self.d_model, tf.float32)
 
-        self.warmup_steps = warmup_steps
+#         self.warmup_steps = warmup_steps
 
-    def __call__(self, step):
-        arg1 = step * (self.warmup_steps ** -1.5)
-        arg2 = tf.math.rsqrt(step)
+#     def __call__(self, step):
+#         arg1 = step * (self.warmup_steps ** -1.5)
+#         arg2 = tf.math.rsqrt(step)
 
-        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+#         return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
 
-class WarmupLinear(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, total_steps, peak_lr, warmup_steps):
+class Linear(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, total_steps, start_lr):
         super(WarmupLinear, self).__init__()
         
-        self.peak_lr = peak_lr
+        self.start_lr = start_lr
         self.total_steps = total_steps
-        self.warmup_steps = warmup_steps
 
     def __call__(self, step):
-        arg1 = step/self.warmup_steps
-        arg2 = 1 - (step-self.warmup_steps)/(self.total_steps - self.warmup_steps)
+        decay = 1 - step/self.total_steps
         
-        return self.peak_lr * tf.math.minimum(arg1, arg2)
+        return self.start_lr * decay
 
 class Constant(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, rate):
         super(Constant, self).__init__()
-        self.rate = rate
+        self.rate = tf.cast(rate, tf.float64)
     
     def __call__(self, step):
-        return tf.ones_like(step)*self.rate
+        return tf.ones_like(step, dtype=tf.float64)*self.rate
 
 class Warmup(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, total_steps, warmup_steps, end_lr):
-        
-    
-class WarmupExponential(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, total_steps, warmup_steps, peak_lr, final_lr):
-        super(WarmupExponential, self).__init__()
-        self.scale = tf.cast(peak_lr, tf.float64)
-        self.rate = tf.cast(total_steps/tf.math.log(peak_lr/final_lr), tf.float64)
-        self.warmup_steps = warmup_steps
+    def __init__(self, other_sched, warmup_steps, end_lr):
+        super(Warmup, self).__init__()
+        self.end_lr = tf.cast(end_lr, tf.float64)
+        self.other_sched = other_sched
+        self.warmup_steps = tf.cast(warmup_steps, tf.float64)
     
     def __call__(self, step):
-        step = tf.cast(step, tf.float64)
-        decay_step = tf.cast(step-self.warmup_steps, tf.float64)
-        arg1 = step/self.warmup_steps
-        arg2 = tf.math.exp(-decay_step / self.rate)
-        return self.scale * tf.math.minimum(arg1, arg2)
+        float_step = tf.cast(step, tf.float64)
+        arg1 = tf.math.minimum(self.end_lr * float_step/self.warmup_steps, self.end_lr)
+        arg2 = self.other_sched(step)
+        return tf.math.minimum(arg1, arg2)
 
 
 class Exponential(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -102,19 +95,21 @@ def learning_rate_schedule(config, return_all=False):
     sched, start_lr, *params = config.lr_schedule
     
     s = {
-        'constant': Constant(max_lr),
-        'exponential': Exponential(config.n_steps, start_lr, *params),
-        'linear': Linear(config.n_steps, start_lr, *params),
+        'constant': lambda params: Constant(start_lr),
+        'exponential': lambda params: Exponential(config.n_steps, start_lr, *params),
+        'linear': lambda params: Linear(config.n_steps, start_lr, *params),
     }
     
     if return_all:
-        return s
+        raise "I removed this functionality"
     
-    schedule = s[sched]
+    schedule = s[sched](params)
     
     if config.lr_warmup is not None:
         warmup_steps = config.lr_warmup
-        schedule = Warmup(warmup_steps, start_lr
+        schedule = Warmup(schedule, warmup_steps, start_lr)
+    
+    return schedule
 
 def batch_size_schedule(config, name, params, return_all=False):
     s = {

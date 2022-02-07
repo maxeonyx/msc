@@ -165,44 +165,48 @@ def scaled_dot_product_attention(k, q, v, mask):
     
     return output, attention_weights
 
-# position-content disentagled attention from DeBERTa
-# https://arxiv.org/abs/2006.03654
-def deberta_attention(m):
-    wk_content = layers.Dense(embd_dim)
-    wq_content = layers.Dense(embd_dim)
-    wv_content = layers.Dense(embd_dim)
-    wk_position = layers.Dense(embd_dim)
-    wq_position = layers.Dense(embd_dim)
-    dense = layers.Dense(embd_dim)
+# # position-content disentagled attention from DeBERTa
+# # https://arxiv.org/abs/2006.03654
+# def deberta_attention(m):
+#     wk_content = layers.Dense(embd_dim)
+#     wq_content = layers.Dense(embd_dim)
+#     wv_content = layers.Dense(embd_dim)
+#     wk_position = layers.Dense(embd_dim)
+#     wq_position = layers.Dense(embd_dim)
+#     dense = layers.Dense(embd_dim)
     
-    assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
-    head_width = embd_dim//n_heads
+#     assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
+#     head_width = embd_dim//n_heads
     
-    def split_heads(x, batch_size):
-        # reshape from (batch_size, seq_length, embd_dim) to (batch_size, num_heads, seq_len, head_width)
-        x = tf.reshape(x, (batch_size, -1, n_heads, head_width))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
+#     def split_heads(x, batch_size):
+#         # reshape from (batch_size, seq_length, embd_dim) to (batch_size, num_heads, seq_len, head_width)
+#         x = tf.reshape(x, (batch_size, -1, n_heads, head_width))
+#         return tf.transpose(x, perm=[0, 2, 1, 3])
     
-    def call(k, q, v, mask):
-        batch_size = tf.shape(k)[0]
+#     def mha(k, q, v, mask):
+#         batch_size = tf.shape(k)[0]
         
-        k = wk(k)
-        q = wk(q)
-        v = wk(v)
-        # shape: (batch_size, seq_len_*, embd_dim)
+#         k = wk(k)
+#         q = wk(q)
+#         v = wk(v)
+#         # shape: (batch_size, seq_len_*, embd_dim)
         
-        k = split_heads(k, batch_size)
-        q = split_heads(q, batch_size)
-        v = split_heads(v, batch_size)
-        # shape: (batch_size, num_heads, seq_len_*, head_width)
+#         k = split_heads(k, batch_size)
+#         q = split_heads(q, batch_size)
+#         v = split_heads(v, batch_size)
+#         # shape: (batch_size, num_heads, seq_len_*, head_width)
         
-        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
-        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
-        # (batch_size, seq_len, num_heads, depth)
-        concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
-        output = dense(concat_attention)
-        return output, attention_weights
-    return call
+#         scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
+#         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+#         # (batch_size, seq_len, num_heads, depth)
+#         concat_attention = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
+#         output = dense(concat_attention)
+#         return output, attention_weights
+    
+#     def call_self_attn(x, pos):
+        
+    
+#     return call
 
 def multi_head_attention(embd_dim, n_heads):
     
@@ -223,8 +227,8 @@ def multi_head_attention(embd_dim, n_heads):
         batch_size = tf.shape(k)[0]
         
         k = wk(k)
-        q = wk(q)
-        v = wk(v)
+        q = wq(q)
+        v = wv(v)
         # shape: (batch_size, seq_len_*, embd_dim)
         
         k = split_heads(k, batch_size)
