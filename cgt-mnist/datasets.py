@@ -19,22 +19,26 @@ def find_centroids(config, ds_train):
     num_clusters = config.dataset.n_colors
     n_color_dims = config.dataset.n_color_dims
     batch_size = config.kmeans_batch_size
-    kmeans = MiniBatchKMeans(n_clusters=num_clusters, random_state=0, batch_size=batch_size, verbose=True)
-    ds_batched = ds_train.map(normalize_image).batch(batch_size)
-    with enlighten.get_manager() as manager:
-        title = manager.status_bar(f"K-Means clustering to make {num_clusters}-color MNIST Dataset", justify=enlighten.Justify.CENTER)
-        clusters_names = manager.status_bar(''.join('{:<10}'.format(f"cen. {i}") for i in range(num_clusters)))
-        clusters_status = manager.status_bar(''.join('{:<10}'.format('??????') for _ in range(num_clusters)))
-        pbar = manager.counter(total=60000//batch_size, desc='Discretize to 8 colors', unit='minibatches')
-        for img, _ in pbar(iter(ds_batched)):
-            pixels = img.numpy().reshape(-1, 1)
-            kmeans.partial_fit(pixels)
-            clusters_status.update(''.join('{:<10.3f}'.format(x[0]) for x in np.sort(kmeans.cluster_centers_, axis=0)))
+    kmeans = MiniBatchKMeans(n_clusters=num_clusters, batch_size=batch_size, verbose=True)
+    ds_batched = ds_train.map(normalize_image)
+    data, _ = next(iter(ds_batched))
+    pixels = tf.reshape(data, [-1, n_color_dims])
+    kmeans.fit(pixels)
+#     with enlighten.get_manager() as manager:
+#         title = manager.status_bar(f"K-Means clustering to make {num_clusters}-color MNIST Dataset", justify=enlighten.Justify.CENTER)
+#         clusters_names = manager.status_bar(''.join('{:<10}'.format(f"cen. {i}") for i in range(num_clusters)))
+#         clusters_status = manager.status_bar(''.join('{:<10}'.format('??????') for _ in range(num_clusters)))
+#         pbar = manager.counter(total=60000//batch_size, desc=f'Discretize to {num_clusters} colors', unit='minibatches')
+#         for img, _ in pbar(iter(ds_batched)):
+#             pixels = tf.reshape(img, [-1, n_color_dims]).numpy()
+#             kmeans.partial_fit(pixels)
+            
+#             clusters_status.update(''.join('[' + ', '.join('{:<0.1f}'.format(x[i]) for i in range(len(x))) + ']' for x in np.sort(kmeans.cluster_centers_, axis=0)))
 
-        centroids = kmeans.cluster_centers_
-        centroids = tf.convert_to_tensor(np.sort(centroids, axis=0), dtype=tf.float32)
-        centroids = tf.reshape(centroids, [num_clusters, n_color_dims])
-        return centroids
+    centroids = kmeans.cluster_centers_
+    centroids = tf.convert_to_tensor(np.sort(centroids, axis=0), dtype=tf.float32)
+    centroids = tf.reshape(centroids, [num_clusters, n_color_dims])
+    return centroids
 
 def mnist_gamma_distribution():
     alpha, beta = 1.2, 0.007

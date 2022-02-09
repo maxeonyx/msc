@@ -68,7 +68,7 @@ class Evaluator():
         ds_test = iter(ds_test)
         self.ds_test = ds_test
         
-        dtype = tf.float32# if config.dtype == 'float32' else tf.float16
+        dtype = tf.keras.mixed_precision.global_policy().variable_dtype
         
         self.new_test_batch()
 
@@ -84,8 +84,11 @@ class Evaluator():
             with tf.GradientTape() as tape:
                 x_out = model([x_inp, i_inp, i_tar, enc_mask, dec_mask], training=True)
                 loss = loss_function(x_tar, x_out)
-                scaled_loss = optimizer.get_scaled_loss(loss)
-                gradients = tape.gradient(scaled_loss, weights)
+                if config.mixed_float:
+                    scaled_loss = optimizer.get_scaled_loss(loss)
+                    gradients = tape.gradient(scaled_loss, weights)
+                else:
+                    gradients = tape.gradient(loss, weights)
             return loss, gradients
 
         @tf.function
@@ -159,7 +162,8 @@ class Evaluator():
                 accum_loss += tf.reduce_mean(loss)
             # without dividing, learning rate implicitly changes if batch size changes
             accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
-            gradients = optimizer.get_unscaled_gradients(accum_gradients)
+            if config.mixed_float:
+                accum_gradients = optimizer.get_unscaled_gradients(accum_gradients)
             optimizer.apply_gradients(zip(accum_gradients, weights))
             return accum_loss
 
@@ -339,7 +343,10 @@ class Evaluator():
 
             logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
             unq_inp = self.ds.unquantize(inp_colors)
-            unq_inp_rgb = self.ds.to_grayscale_rgb(unq_inp)
+            if unq_inp.shape[-1] == 1:
+                unq_inp_rgb = self.ds.to_grayscale_rgb(unq_inp)
+            else:
+                unq_inp_rgb = unq_inp
             bg_input = self.viz.scatter_on_bg(unq_inp_rgb, inp_idxs, output_length=seq_length)
             if bg_all is None:
                 bg_all = bg_input
@@ -494,7 +501,7 @@ class TrainingLoop():
         info_bar_text += f"Batch Size: {batch_size_text} (Devices*Minibatch*GradAccum)"
         
         info_bar.update(info_bar_text)
-        
+    
         
     def train(self):
         
@@ -505,7 +512,10 @@ class TrainingLoop():
             
             while self.step_index < self.config.n_steps:
                 
-                self.learning_rate = self.evaler.optimizer.inner_optimizer._decayed_lr(tf.float32)
+                if self.config.mixed_float:
+                    self.learning_rate = self.evaler.optimizer.inner_optimizer._decayed_lr(tf.float32)
+                else:
+                    self.learning_rate = self.evaler.optimizer._decayed_lr(tf.float32)
                 self._train_inner(info_bar, manager)
 
                 steps_bar.update()

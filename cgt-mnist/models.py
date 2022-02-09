@@ -98,12 +98,14 @@ def print_masks():
 
 
 
-def scaled_dot_product_attention(k, q, v, mask, dtype=tf.float16):
+def scaled_dot_product_attention(k, q, v, mask):
     batch_size = tf.shape(k)[0]
     seq_len_kv = tf.shape(k)[-2]
     kq_dim = tf.shape(k)[-1]
     seq_len_q = tf.shape(q)[-2]
     v_dim = tf.shape(v)[-1]
+    
+    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
     
     matmul_qk = tf.matmul(q, k, transpose_b=True)
     # shape: (batch_size, n_heads, seq_len_q, seq_len_kv)
@@ -133,7 +135,7 @@ def deberta_attention(m):
     wq_position = layers.Dense(embd_dim)
     dense = layers.Dense(embd_dim)
     
-    dtype = tf.float32 if m.dtype == 'float32' else tf.float16
+    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
     
     assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
     head_width = embd_dim//n_heads
@@ -222,7 +224,7 @@ def deberta_attention(m):
 def multi_head_attention(m):
     embd_dim, n_heads = m.embd_dim, m.n_heads
     
-    dtype = tf.float32 if m.dtype == 'float32' else tf.float16
+    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
     
     wk = layers.Dense(embd_dim)
     wq = layers.Dense(embd_dim)
@@ -250,7 +252,7 @@ def multi_head_attention(m):
         v = split_heads(v, batch_size)
         # shape: (batch_size, num_heads, seq_len_*, head_width)
         
-        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask, dtype)
+        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
         # (batch_size, seq_len, num_heads, depth)
         output = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
@@ -362,7 +364,8 @@ def deberta_anp_architecture(m):
     # final_dropout = layers.Dropout(m.dropout_rate)
     # final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
     # final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
-    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers, dtype=tf.float32)
+    decoder_dtype = tf.keras.mixed_precision.Policy("float32")
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
     def call(inp, inp_x, tar_x, enc_mask, dec_mask):
         # inp_x = x_encoder(inp_x)
         enc_a_z = inp
@@ -438,7 +441,8 @@ def canp_architecture(m):
 
 # scale is the max-min of vals
 # for mnist it's 28 because thats the width and height of the images
-def dual_positional_encoding(n_dims, length, dtype=tf.float16):
+def dual_positional_encoding(n_dims, length):
+    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
     one_axis_dim = n_dims//2
     i = tf.range(n_dims//4)
     i = tf.cast(i, dtype=dtype)
@@ -467,7 +471,8 @@ def dual_positional_encoding(n_dims, length, dtype=tf.float16):
         
     return call
 
-def linear_position_encoding(dim_lengths, out_vec_lengths, dtype=tf.float16):
+def linear_position_encoding(dim_lengths, out_vec_lengths):
+    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
     def call(inp):        
         dims_enc = None
         for dim in range(len(dim_lengths)):

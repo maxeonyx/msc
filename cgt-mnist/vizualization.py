@@ -96,7 +96,7 @@ class Viz:
             dataset_test_original
             .map(datasets.normalize_image)
             .map(datasets.flatten)
-            .map(self.ds.add_indices)
+            .map(self.ds.shuffle_and_add_indices)
             .batch(NUM_SAMPLES)
         )
         ds_test_quantized = (
@@ -104,16 +104,16 @@ class Viz:
             .map(datasets.normalize_image)
             .map(datasets.flatten)
             .map(self.ds.quantize)
-            .map(self.ds.add_indices)
+            .map(self.ds.shuffle_and_add_indices)
             .batch(NUM_SAMPLES)
         )
         
-        print("quantized:")
-        ex, ex_idxs, _ = next(iter(ds_test_quantized))
-        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False)
         print("unquantized:")
-        ex, ex_idxs, _ = next(iter(ds_test))
+        ex, ex_idxs, *_ = next(iter(ds_test))
         self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False, do_unquantize=False) # don't unquantize because it's not quantized
+        print("quantized:")
+        ex, ex_idxs, *_ = next(iter(ds_test_quantized))
+        self.showSeq(ex, ex_idxs, self.config.dataset.image_size, NUM_SAMPLES, unshuffle=False)
     
     def compare_shuffled_and_unshuffled(self, dataset_test_original):
         
