@@ -78,6 +78,10 @@ class Viz:
             seq = self.ds.unquantize(seq, to="rgb")
         elif seq.shape[-1] == 1:
             seq = self.ds.to_grayscale_rgb(seq)
+        elif seq.shape[-1] != 3:
+            print("seq.shape:", seq.shape)
+            print("idxs.shape:", idxs.shape)
+            assert False, "must either have a color dim with len 1 or 3, or use the do_unquantize flag"
         
         if unshuffle:
             seq = self.scatter_on_bg(seq, idxs, img_length)

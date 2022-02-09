@@ -68,6 +68,8 @@ class Evaluator():
         ds_test = iter(ds_test)
         self.ds_test = ds_test
         
+        dtype = tf.float32# if config.dtype == 'float32' else tf.float16
+        
         self.new_test_batch()
 
         loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
@@ -82,7 +84,8 @@ class Evaluator():
             with tf.GradientTape() as tape:
                 x_out = model([x_inp, i_inp, i_tar, enc_mask, dec_mask], training=True)
                 loss = loss_function(x_tar, x_out)
-                gradients = tape.gradient(loss, weights)
+                scaled_loss = optimizer.get_scaled_loss(loss)
+                gradients = tape.gradient(scaled_loss, weights)
             return loss, gradients
 
         @tf.function
@@ -95,12 +98,12 @@ class Evaluator():
                 colors_inp = shuffled_colors_noise
             n = tf.squeeze(n)
 
-            float_steps = tf.constant(0, tf.float32)
-            accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
-            accum_loss = tf.constant(0, tf.float32)
+            steps = tf.constant(0)
+            accum_gradients = [tf.zeros_like(w) for w in weights]
+            accum_loss = tf.constant(0, dtype)
 
             if config.training_mode == 'query_next' or config.training_mode == 'full_combination':
-                float_steps += 1.0
+                steps += 1
                 enc_mask_type = models.MASK_BACKWARD_EQUAL
                 dec_mask_type = models.MASK_BACKWARD
                 x_inp = colors_inp[:, :]
@@ -113,7 +116,7 @@ class Evaluator():
                 accum_loss += tf.reduce_mean(loss)
 
             if config.training_mode == 'query_unknown':
-                float_steps += 1.0
+                steps += 1
                 enc_mask_type = models.MASK_NONE
                 dec_mask_type = models.MASK_NONE
                 x_inp = colors_inp[:, :n]
@@ -125,7 +128,7 @@ class Evaluator():
                 accum_loss += tf.reduce_mean(loss)
 
             if config.training_mode == 'query_all' or config.training_mode == 'full_combination':
-                float_steps += 1.0
+                steps += 1
                 enc_mask_type = models.MASK_NONE
                 dec_mask_type = models.MASK_NONE
                 x_inp = colors_inp[:, :n]
@@ -135,7 +138,8 @@ class Evaluator():
                 loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
                 accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
                 accum_loss += tf.reduce_mean(loss)
-
+            
+            float_steps = tf.cast(steps, dtype)
             # without dividing, learning rate implicitly changes if batch size changes
             accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
             accum_loss /= float_steps
@@ -144,9 +148,9 @@ class Evaluator():
 
         @tf.function
         def train_step_grad_accum(batch, accum_steps):
-            float_steps = tf.cast(accum_steps, tf.float32)
-            accum_gradients = [tf.zeros_like(w, dtype=tf.float32) for w in weights]
-            accum_loss = tf.constant(0, tf.float32)
+            float_steps = tf.cast(accum_steps, dtype)
+            accum_gradients = [tf.zeros_like(w) for w in weights]
+            accum_loss = tf.constant(0, dtype)
             for step in tf.range(accum_steps):
                 colors, idxs, colors_shuf, idxs_shuf, shuffled_colors_noise, n = batch
                 inputs = colors[step], idxs[step], colors_shuf[step], idxs_shuf[step], shuffled_colors_noise[step], n[step]
@@ -155,6 +159,7 @@ class Evaluator():
                 accum_loss += tf.reduce_mean(loss)
             # without dividing, learning rate implicitly changes if batch size changes
             accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
+            gradients = optimizer.get_unscaled_gradients(accum_gradients)
             optimizer.apply_gradients(zip(accum_gradients, weights))
             return accum_loss
 
@@ -469,6 +474,9 @@ class TrainingLoop():
         log_loss_format = format_loss(tf.math.log(self.running_mean))
         info_bar_text += f"Log Loss (mean): {log_loss_format: <9} "
         
+        learning_rate_format = format_loss(self.learning_rate)
+        info_bar_text += f"Learning Rate: {learning_rate_format: <9} "
+        
         shuf_key = f'loss_shuf_{self.config.test_n_shuf[0]}'
         if shuf_key in self.test_losses:
             test_loss_shuf = format_loss(self.test_losses[shuf_key])
@@ -496,7 +504,8 @@ class TrainingLoop():
             steps_bar = manager.counter(total=self.config.n_steps, count=self.step_index, desc='Steps', color='green', unit='steps')
             
             while self.step_index < self.config.n_steps:
-                    
+                
+                self.learning_rate = self.evaler.optimizer.inner_optimizer._decayed_lr(tf.float32)
                 self._train_inner(info_bar, manager)
 
                 steps_bar.update()
@@ -556,7 +565,7 @@ class TrainingLoop():
                 self.last_log_index = self.step_index
                 wandb.log({
                     'log_loss': tf.math.log(loss),
-                    'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32),
+                    'learning_rate': self.learning_rate,
                     'viz_autoregressive': wandb.Image(fig1),
                     'viz_expected': wandb.Image(fig2),
                     'viz_varying': wandb.Image(fig3),
@@ -568,7 +577,7 @@ class TrainingLoop():
         if self.config['use_wandb'] and self.step_index > 0 and self.step_index > self.last_log_index + self.config['wandb_log_interval']:
             self.last_log_index = self.step_index
             wandb_interval_mean_loss = np.mean(self.loss_history[max(0, self.step_index-self.config['wandb_log_interval']) : self.step_index+1])
-            wandb.log({'log_loss_mean': tf.math.log(wandb_interval_mean_loss), 'loss_mean': wandb_interval_mean_loss, 'loss': loss, 'learning_rate': self.evaler.optimizer._decayed_lr(tf.float32)}, step=self.step_index)
+            wandb.log({'log_loss_mean': tf.math.log(wandb_interval_mean_loss), 'loss_mean': wandb_interval_mean_loss, 'loss': loss, 'learning_rate': self.learning_rate}, step=self.step_index)
                     
         if self.step_index > 0 and self.step_index % self.config.test_interval == 0:
             losses = self.evaler.test_loss(manager=manager)

@@ -1,5 +1,6 @@
 from sklearn.cluster import MiniBatchKMeans
 import os
+import socket
 import tensorflow as tf
 import numpy as np
 from tensorflow import keras
@@ -12,9 +13,11 @@ import enlighten
 import tensorflow_probability as tfp
 from dotmap import DotMap
 
-def model_name(hostname, config):
+def model_name(config):
     
     spec = []
+    
+    hostname = socket.gethostname().split(".")[0]
     
     if config.ds != 'mnist':
         spec.append(config.dataset.name)
@@ -95,7 +98,7 @@ def print_masks():
 
 
 
-def scaled_dot_product_attention(k, q, v, mask):
+def scaled_dot_product_attention(k, q, v, mask, dtype=tf.float16):
     batch_size = tf.shape(k)[0]
     seq_len_kv = tf.shape(k)[-2]
     kq_dim = tf.shape(k)[-1]
@@ -105,13 +108,14 @@ def scaled_dot_product_attention(k, q, v, mask):
     matmul_qk = tf.matmul(q, k, transpose_b=True)
     # shape: (batch_size, n_heads, seq_len_q, seq_len_kv)
     
-    dk = tf.cast(kq_dim, tf.float32)
+    dk = tf.cast(kq_dim, dtype=dtype)
     scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-    
+    scaled_attention_logits = tf.cast(scaled_attention_logits, tf.float32)
     scaled_attention_logits += mask * -1e9 # batch dim broadcast
     
     attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1) # sums to 1 along last axis
     # shape: (batch_size, seq_len_q, seq_len_kv)
+    attention_weights = tf.cast(attention_weights, dtype)
     
     output = tf.matmul(attention_weights, v)
     # shape: (batch_size, seq_len_q, v_dim)
@@ -128,6 +132,8 @@ def deberta_attention(m):
     wk_position = layers.Dense(embd_dim)
     wq_position = layers.Dense(embd_dim)
     dense = layers.Dense(embd_dim)
+    
+    dtype = tf.float32 if m.dtype == 'float32' else tf.float16
     
     assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
     head_width = embd_dim//n_heads
@@ -181,12 +187,13 @@ def deberta_attention(m):
             attention_logits += tf.matmul(pos_q, k, transpose_b=True)
             # shape: (batch_size, n_heads, seq_len_q, seq_len_kv)
 
-        dk = tf.cast(kq_dim, tf.float32)
+        dk = tf.cast(kq_dim, dtype=dtype)
         scaled_attention_logits = attention_logits / tf.math.sqrt(scale * dk)
-
+        scaled_attention_logits = tf.cast(scaled_attention_logits, tf.float32)
         scaled_attention_logits += mask * -1e9 # batch dim broadcast
 
         attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1) # sums to 1 along last axis
+        attention_weights = tf.cast(attention_weights, dtype)
         # shape: (batch_size, seq_len_q, seq_len_kv)
 
         scaled_attention = tf.matmul(attention_weights, v)
@@ -212,7 +219,10 @@ def deberta_attention(m):
     
     return call_cross_attn
 
-def multi_head_attention(embd_dim, n_heads):
+def multi_head_attention(m):
+    embd_dim, n_heads = m.embd_dim, m.n_heads
+    
+    dtype = tf.float32 if m.dtype == 'float32' else tf.float16
     
     wk = layers.Dense(embd_dim)
     wq = layers.Dense(embd_dim)
@@ -240,7 +250,7 @@ def multi_head_attention(embd_dim, n_heads):
         v = split_heads(v, batch_size)
         # shape: (batch_size, num_heads, seq_len_*, head_width)
         
-        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
+        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask, dtype)
         scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
         # (batch_size, seq_len, num_heads, depth)
         output = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
@@ -248,9 +258,10 @@ def multi_head_attention(embd_dim, n_heads):
         return output, attention_weights
     return call
     
-def pointwise_feedforward_layer(m, hidden_dim, out_dim, n_hidden_layers=1):
+def pointwise_feedforward_layer(m, hidden_dim, out_dim, n_hidden_layers=1, dtype=None):
     hidden_layers = [layers.Dense(hidden_dim) for _ in range(n_hidden_layers)]
-    dense2 = layers.Dense(out_dim)
+    dtype = dtype or tf.keras.mixed_precision.global_policy()
+    dense2 = layers.Dense(out_dim, dtype=dtype)
     
     def call(x):
         for layer in hidden_layers:
@@ -283,7 +294,7 @@ def deberta_layer(m):
 
 
 def transformer_layer(m):
-    mha = multi_head_attention(m.embd_dim, m.n_heads)
+    mha = multi_head_attention(m)
     ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
@@ -303,7 +314,7 @@ def transformer_layer(m):
     return call
     
 def transformer_3sep_layer(m):
-    mha = multi_head_attention(m.embd_dim, m.n_heads)
+    mha = multi_head_attention(m)
     ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
@@ -351,7 +362,7 @@ def deberta_anp_architecture(m):
     # final_dropout = layers.Dropout(m.dropout_rate)
     # final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
     # final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
-    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers, dtype=tf.float32)
     def call(inp, inp_x, tar_x, enc_mask, dec_mask):
         # inp_x = x_encoder(inp_x)
         enc_a_z = inp
@@ -385,7 +396,7 @@ def anp_architecture(m):
     x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
     final_dropout = layers.Dropout(m.dropout_rate)
     final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers)
+    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.n_colors, n_hidden_layers=m.n_dec_layers, dtype=tf.float32)
     def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
         inp_x = x_encoder(inp_x)
         tar_x = x_encoder(tar_x)
@@ -427,9 +438,10 @@ def canp_architecture(m):
 
 # scale is the max-min of vals
 # for mnist it's 28 because thats the width and height of the images
-def dual_positional_encoding(n_dims, length):
+def dual_positional_encoding(n_dims, length, dtype=tf.float16):
     one_axis_dim = n_dims//2
-    i = tf.range(n_dims//4, dtype=tf.float32)
+    i = tf.range(n_dims//4)
+    i = tf.cast(i, dtype=dtype)
     i = tf.expand_dims(i, -2)
     scale = tf.pow(length, 2.*i/one_axis_dim)
     
@@ -437,7 +449,7 @@ def dual_positional_encoding(n_dims, length):
         vals = tf.expand_dims(vals, -1)
 
         # the bit inside the sin / cos
-        rate = vals / scale
+        rate = tf.cast(vals, dtype=dtype) / scale
         sin = tf.sin(rate)
         cos = tf.cos(rate)
         encoding = tf.concat([sin, cos], axis=-1)
@@ -455,7 +467,7 @@ def dual_positional_encoding(n_dims, length):
         
     return call
 
-def linear_position_encoding(dim_lengths, out_vec_lengths):
+def linear_position_encoding(dim_lengths, out_vec_lengths, dtype=tf.float16):
     def call(inp):        
         dims_enc = None
         for dim in range(len(dim_lengths)):
@@ -463,7 +475,7 @@ def linear_position_encoding(dim_lengths, out_vec_lengths):
             for dim_len in dim_lengths[dim+1:]:
                 enc = enc // dim_len
             enc = enc % dim_lengths[dim]
-            enc = tf.cast(enc, tf.float32) / tf.cast(dim_lengths[dim] - 1, tf.float32)
+            enc = tf.cast(enc, dtype=dtype) / tf.cast(dim_lengths[dim] - 1, dtype=dtype)
             enc = tf.expand_dims(enc, -1)
             tile_shape = [1 for _ in enc.shape[:-1]] + [out_vec_lengths[dim]]
             enc = tf.tile(enc, tile_shape)
