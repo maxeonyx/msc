@@ -1,0 +1,3 @@
+[submodule "manipnet"]
+	path = manipnet
+	url = ssh://git@github.com/maxeonyx/manipnet
