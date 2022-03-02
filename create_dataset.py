@@ -73,7 +73,7 @@ def bvh_is_hand(file_content):
 """
 The columns that we are extracting to predict hand motion on.
 """
-USED_COLUMNS = [
+USEFUL_COLUMNS = [
     3, 4, 5, # Wrist
 
     8,  # THUMB_CMC_FE  Z-rot
@@ -117,9 +117,81 @@ def extract_useful_columns(bvh_data):
     >>> extract_useful_columns(extract_bvh_file(EXAMPLE_HAND_BVH).data)[0, 4]
     1.964441
     """
-    return bvh_data[:, USED_COLUMNS]
+    return bvh_data[:, USEFUL_COLUMNS]
 
 
+def all_bvh_files(path):
+    """
+    Walk a directory tree and generate a list of all of the Hand BVH files in the tree.
+    """
+
+    for dirpath, subdirpaths, files in os.walk(path):
+        yield from (dirpath + "/" + f for f in files if f.endswith('.bvh'))
+
+
+def read_hand_bvh_files(path):
+    """
+    Read BVH files and yield their contents if they are hand files.
+    """
+
+    for filepath in all_bvh_files(path):
+        file = open(filepath)
+        text = file.read()
+        if bvh_is_hand(text):
+            yield(filepath, text)
+
+def get_bvh_data():
+    """
+    Get a list ofof all the BVH data in the manipnet repo.
+    
+    Returns list of (filename, obj) pairs where obj.data has shape (n_frames, n_deg_of_free)
+
+    Example below based on the number of files in the manipnet database as of the time of writing.
+
+    >>> len(list(get_bvh_data()))
+    124
+    """
+    for name, text in read_hand_bvh_files("manipnet/Data/SimpleVisualizer/Assets/BVH"):
+        
+        obj = extract_bvh_file(text)
+        obj.data = extract_useful_columns(obj.data)
+        yield name, obj.n_frames, obj.data
+
+
+def create_or_load_dataset(force=False):
+    """
+    Load the cached tensorflow dataset or create it from the BVH files on disk, and then cache it on disk.
+    """
+
+    ds_element_spec = (
+        tf.TensorSpec(shape=(), dtype=tf.string),
+        tf.TensorSpec(shape=(), dtype=tf.int32),
+        tf.TensorSpec(shape=[None, len(USEFUL_COLUMNS)])
+    )
+
+    ds_path = './cached_dataset'
+
+    ds_compression = 'GZIP'
+    
+    # by default, try to load and return the saved dataset.
+    # if force, don't try to load.
+    # if loading fails, create a fresh dataset.
+    if not force:
+        try:
+            return tf.data.experimental.load(ds_path, ds_element_spec, ds_compression)
+        except FileNotFoundError as f:
+            print('Couldnt load saved dataset, generating a fresh dataset to "./cached_dataset/" ...')
+    else:
+        print('Forcing generation of a fresh dataset to "./cached_dataset/" ...')
+
+    d = tf.data.Dataset.from_generator(
+        get_bvh_data,
+        output_signature=ds_element_spec,
+    ).cache()
+
+    tf.data.experimental.save(d, ds_path, 'GZIP')
+
+    return d
 
 
 if __name__ == "__main__":
