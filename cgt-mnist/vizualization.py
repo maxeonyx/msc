@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import enlighten
 import tensorflow_probability as tfp
 from dotmap import DotMap
+from icecream import ic
 
 import datasets
 
@@ -73,10 +74,13 @@ class Viz:
         height, width = size
         img_length = height*width
         
+        if len(seq.shape) <= 2:
+            seq = self.ds.reinvent_color_dim(seq)
+        
         # unquantize to rgb
-        if do_unquantize:
+        if seq.dtype == tf.int32:
             seq = self.ds.unquantize(seq, to="rgb")
-        elif seq.shape[-1] == 1:
+        elif seq.dtype == tf.float32 and seq.shape[-1] == 1:
             seq = self.ds.to_grayscale_rgb(seq)
         elif seq.shape[-1] != 3:
             print("seq.shape:", seq.shape)
@@ -85,7 +89,7 @@ class Viz:
         
         if unshuffle:
             seq = self.scatter_on_bg(seq, idxs, img_length)
-
+        
         return self.np_showSeq(seq, size, max_images, cmap, return_fig=return_fig)
 
     def compare_quantized_and_unquantized(self, dataset_test_original):

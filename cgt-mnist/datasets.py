@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import enlighten
 import tensorflow_probability as tfp
 from dotmap import DotMap
+from icecream import ic
+ic.configureOutput(includeContext=True)
 
 def normalize_image(image, label):
     return tf.cast(image, dtype=tf.float32) / 255.0, label
@@ -108,11 +110,15 @@ class Datasets:
         self.ds_test_orig = ds_test_orig
     
     def quantize(self, sequence, label):
+        print("before quant", sequence.shape)
         d = squared_distance(sequence, self.centroids) # (height * width, n_centroids)
         sequence = tf.math.argmin(d, axis=1, output_type=tf.int32)  # (height * width)
+        print("after  quant", sequence.shape)
         return sequence, label
 
     def unquantize(self, x, to="same"):
+        if x.shape[-1] == 1:
+            x = tf.squeeze(x, -1)
         x_one_hot = tf.cast(tf.one_hot(x, depth=len(self.centroids)), dtype=tf.float32)  # (seq, num_centroids)
         if to == "rgb":
             if self.centroids.shape[-1] == 1:
@@ -126,11 +132,20 @@ class Datasets:
         y = tf.linalg.matmul(x_one_hot,centroids)  # (seq, num_features, n_color_dims)
         return y
     
+    def flatten_color_dim(self, sequence, label):
+        new_shape = [*sequence.shape[:-2], sequence.shape[-2] * sequence.shape[-1]]
+        sequence = tf.reshape(sequence, new_shape)
+        return sequence, label
+    
+    def reinvent_color_dim(self, sequence):
+        new_shape = [*sequence.shape[:-1], sequence.shape[-1]//self.config.dataset.n_color_dims, self.config.dataset.n_color_dims]
+        sequence = tf.reshape(sequence, new_shape)
+        return sequence
+    
     def to_grayscale_rgb(self, seq):
         assert seq.shape[-1] == 1, "to_grayscale() only works if the final dim is length 1"
-        
         # turn the final dim from [1] to [3] by filling the color value to r, g, and b
-        seq = tf.tile(seq, [1, 1, 3])
+        seq = tf.tile(seq, [*[1 for _ in seq.shape[:-1]], 3])
         return seq
 
     def expected_col(self, probs):
@@ -161,12 +176,17 @@ class Datasets:
         return sequence, idxs, shuf_sequence, shuf_idxs, label
     
     def add_noise(self, sequence, idxs, shuf_sequence, shuf_idxs, label):
-        
-        n_noise = int(self.config.noise_fraction * self.config.dataset.seq_length)
-        noise = tf.random.uniform([n_noise], minval=0, maxval=self.config.dataset.n_colors, dtype=tf.int32)
-        rand_idxs = tf.random.shuffle(idxs)
-        rand_idxs = rand_idxs[:n_noise, None]
-        shuf_sequence_noise = tf.tensor_scatter_nd_update(shuf_sequence, rand_idxs, noise)
+        if self.config.noise_fraction is not None:
+            n_noise = int(self.config.noise_fraction * self.config.dataset.seq_length)
+            if self.config.discrete:
+                noise = tf.random.uniform([n_noise], minval=0, maxval=self.config.dataset.n_colors, dtype=tf.int32)
+            else:
+                noise = tf.random.uniform([n_noise], minval=0., maxval=1., dtype=tf.float32)
+            rand_idxs = tf.random.shuffle(idxs)
+            rand_idxs = rand_idxs[:n_noise, None]
+            shuf_sequence_noise = tf.tensor_scatter_nd_update(shuf_sequence, rand_idxs, noise)
+        else:
+            shuf_sequence_noise = shuf_sequence
         
         return sequence, idxs, shuf_sequence, shuf_idxs, shuf_sequence_noise, label
 
@@ -197,19 +217,17 @@ class Datasets:
             self.config.dataset.image_size = self.config.dataset.rescale
         self.config.dataset.seq_length = self.config.dataset.image_size[0] * self.config.dataset.image_size[1]
         
-        dataset_test = (
-            dataset_test
-            .map(flatten)
-            .map(self.quantize)
-            .cache()   
-        )
+        dataset_train = dataset_train.map(flatten)
+        dataset_test = dataset_test.map(flatten)
+        if self.config.discrete:
+            dataset_test = dataset_test.map(self.quantize)
+            dataset_train = dataset_train.map(self.quantize)
+        else:
+            dataset_test = dataset_test.map(self.flatten_color_dim)
+            dataset_train = dataset_train.map(self.flatten_color_dim)
         
-        dataset_train = (
-            dataset_train
-            .map(flatten)
-            .map(self.quantize)
-            .cache()
-        )
+        dataset_test = dataset_test.cache()
+        dataset_train = dataset_train.cache()
         
         if for_statistics:
             train = next(iter(dataset_train.batch(60000)))
