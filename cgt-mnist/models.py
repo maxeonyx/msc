@@ -167,8 +167,8 @@ def multi_head_attention(embd_dim, n_heads):
         batch_size = tf.shape(k)[0]
         
         k = wk(k)
-        q = wk(q)
-        v = wk(v)
+        q = wq(q)
+        v = wv(v)
         # shape: (batch_size, seq_len_*, embd_dim)
         
         k = split_heads(k, batch_size)
