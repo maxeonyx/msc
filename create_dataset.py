@@ -157,8 +157,13 @@ def get_bvh_data():
         obj.data = extract_useful_columns(obj.data)
         yield name, obj.n_frames, obj.data
 
+def np_dataset():
 
-def create_or_load_dataset(force=False):
+    data = [x for x in get_bvh_data()]
+
+    return np.array(data, dtype=np.object_)
+
+def tf_dataset(force=False):
     """
     Load the cached tensorflow dataset or create it from the BVH files on disk, and then cache it on disk.
     """
