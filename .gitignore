@@ -1,2 +1,6 @@
 __pycache__/
 cached_dataset
+env/
+.ipynb_checkpoints/
+wandb/
+models/

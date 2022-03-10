@@ -199,6 +199,48 @@ def tf_dataset(force=False):
     return d
 
 
+def write_bvh_file(filename, data):
+    """
+    Extract data out of a BVH file into numpy array
+
+    >>> extract_bvh_file(EXAMPLE_BVH).n_frames
+    5
+    >>> extract_bvh_file(EXAMPLE_BVH).frame_time_s
+    0.008333334
+    >>> extract_bvh_file(EXAMPLE_BVH).data[0, 0]
+    1.528779
+    >>> extract_bvh_file(EXAMPLE_BVH).data[-1, -1]
+    -0.014771
+    """
+    file_content = open(filename, 'r').read()
+    out_file = open(filename + '.generated.bvh', 'w')
+    lines = file_content.split('\n')
+    lines = iter(lines)
+    while True:
+        line = next(lines)
+        print(line, file=out_file)
+        if re.match('MOTION', line):
+            break
+    
+    line = next(lines)
+    print(line, file=out_file)
+    n_frames = int(re.match('Frames: (.+)', line.strip()).group(1))
+    line = next(lines)
+    print(line, file=out_file)
+    frame_time_s = float(re.match('Frame Time: (.+)', line.strip()).group(1))
+    
+    nums = []
+    for i in range(n_frames):
+        nums = list(map(float, next(lines).strip().split(' ')))
+
+        for col in range(len(USEFUL_COLUMNS)):
+            nums[USEFUL_COLUMNS[col]] = data[i, col]
+        
+        print(' '.join(str(n) for n in nums), file=out_file)
+    
+    out_file.close()
+
+
 if __name__ == "__main__":
     import doctest
     doctest.testmod()
