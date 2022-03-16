@@ -300,23 +300,22 @@ def multi_head_attention(m):
         return output, attention_weights
     return call
     
-def pointwise_feedforward_layer(m, hidden_dim, out_dim, n_hidden_layers=1, dtype=None):
+def pointwise_feedforward_layer(m, hidden_dim, output_layer, n_hidden_layers=1, dtype=None):
     hidden_layers = [layers.Dense(hidden_dim) for _ in range(n_hidden_layers)]
     dtype = dtype or tf.keras.mixed_precision.global_policy()
-    dense2 = layers.Dense(out_dim, dtype=dtype)
     
     def call(x):
         for layer in hidden_layers:
             x = layer(x)
             x = m.activation_fn(x)
-        x = dense2(x)
+        x = output_layer(x)
         return x
     return call
 
 
 def deberta_layer(m):
     mha = deberta_attention(m)
-    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
     dropout1 = layers.Dropout(m.dropout_rate)
@@ -337,7 +336,7 @@ def deberta_layer(m):
 
 def transformer_layer(m):
     mha = multi_head_attention(m)
-    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
     dropout1 = layers.Dropout(m.dropout_rate)
@@ -357,7 +356,7 @@ def transformer_layer(m):
     
 def transformer_3sep_layer(m):
     mha = multi_head_attention(m)
-    ffl = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    ffl = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
     layernorm1 = layers.LayerNormalization(epsilon=1e-6)
     layernorm2 = layers.LayerNormalization(epsilon=1e-6)
     dropout1 = layers.Dropout(m.dropout_rate)
@@ -374,38 +373,19 @@ def transformer_3sep_layer(m):
 
         return x
     return call
-    
-# attentive neural process without global latent
-def anp_architecture_no_global_latent(m):
-    enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
-    dec_layer = transformer_3sep_layer(m)
-    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
-    final_dropout = layers.Dropout(m.dropout_rate)
-    final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.output_dim, n_hidden_layers=m.n_dec_layers)
-    def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
-        inp_x = x_encoder(inp_x)
-        tar_x = x_encoder(tar_x)
-        for enc_layer in enc_a_layers:
-            inp_xy += enc_layer(inp_xy, inp_xy, mask=enc_a_mask)
-        tar_y = dec_layer(key=inp_x, query=tar_x, val=inp_xy, mask=dec_mask)
-        tar_y = final_layer_norm(final_dropout(tar_y))
-        outs = final_layer(tar_y)
-        return outs
-    return call
 
     
 # deberta / anp
-def deberta_anp_architecture(m):
+def deberta_anp_architecture(m, output_layer):
     enc_a_layers = [deberta_layer(m) for _ in range(m.n_enc_a_layers)]
     enc_b_layers = [deberta_layer(m) for _ in range(m.n_enc_b_layers)]
     dec_layer = deberta_layer(m)
-    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
     # final_dropout = layers.Dropout(m.dropout_rate)
     # final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
     # final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.output_dim, n_hidden_layers=m.n_dec_layers)
     decoder_dtype = tf.keras.mixed_precision.Policy("float32")
-    decoder = pointwise_feedforward_layer(m, m.dec_dim, m.output_dim, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=output_layer, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
     def call(inp, inp_x, tar_x, r_self, r_cross, enc_mask, dec_mask):
         
         if m.use_relative_positions:
@@ -444,14 +424,15 @@ def deberta_anp_architecture(m):
     return call
     
 # attentive neural process
-def anp_architecture(m):
+def anp_architecture(m, output_layer):
     enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
     enc_b_layers = [transformer_layer(m) for _ in range(m.n_enc_b_layers)]
     dec_layer = transformer_3sep_layer(m)
-    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, m.embd_dim)
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
     final_dropout = layers.Dropout(m.dropout_rate)
     final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.output_dim, n_hidden_layers=m.n_dec_layers, dtype=tf.float32)
+    decoder_dtype = tf.keras.mixed_precision.Policy("float32")
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=output_layer, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
     def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
         inp_x = x_encoder(inp_x)
         tar_x = x_encoder(tar_x)
@@ -470,24 +451,8 @@ def anp_architecture(m):
         global_latent *= tf.ones_like(tar_z)
         
         tar_z = tf.concat([tar_z, global_latent], axis=2) # concat along embd dim
-        tar_y = final_layer(tar_z)
+        tar_y = decoder(tar_z)
         return tar_y
-    return call
-
-# failed first attempt at attentive-neural-process
-def canp_architecture(m):
-    enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
-    dec_layer = transformer_layer(m)
-    final_dropout = layers.Dropout(m.dropout_rate)
-    final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
-    final_layer = pointwise_feedforward_layer(m.ffl_dim, m.output_dim)
-    def call(xa, xb, enc_a_mask, dec_mask):
-        for enc_layer in enc_a_layers:
-            xa += enc_layer(xa, xa, mask=enc_a_mask)
-        tar_y = dec_layer(xa, xb, mask=dec_mask)
-        tar_y = final_layer_norm(final_dropout(tar_y))
-        outs = final_layer(tar_y)
-        return outs
     return call
 
 
@@ -571,22 +536,16 @@ def relative_position_matrix(image_size, pos_embd_fn):
         return encoding
 
     return call
-    
+
 
 def transformer(m):
     
-    colors = Input([None])
-    inp_idxs = Input([None])
-    tar_idxs = Input([None])
+    colors = Input([None], name="colors")
+    inp_idxs = Input([None], name="inp_idxs")
+    tar_idxs = Input([None], name="tar_idxs")
     # use type_spec argument because we don't want the implicit batch dim for these inputs
-    enc_a_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]))
-    dec_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]))
-    
-    if m.discrete == True:
-        m.output_dim = m.n_colors
-    else:
-        m.output_dim = m.n_dist_params
-    
+    enc_a_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="enc_mask")
+    dec_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="dec_mask")
     
     if m.activation == 'relu':
         m.activation_fn = tf.nn.relu
@@ -627,10 +586,18 @@ def transformer(m):
 
     inp_pos_embd = position_embedding(inp_idxs)
     tar_pos_embd = position_embedding(tar_idxs)
+
+    if m.continuous:
+        params_size = tfp.layers.MixtureNormal.params_size(num_components = 3, event_shape=[])
+        reshape_layer = layers.Dense(params_size, activation=None)
+        dist_layer = tfp.layers.MixtureNormal(num_components = 3, event_shape=[])
+        output_layer = lambda x: dist_layer(reshape_layer(x))
+    else:
+        output_layer = tf.keras.layers.Dense(m.n_colors)
     
     if m.architecture == 'anp':
         xa = col_embd + inp_pos_embd
-        output_layer = anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
+        output = anp_architecture(m, output_layer)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
     elif m.architecture == 'deberta_anp':
         make_relative_position_matrix = relative_position_matrix(m.image_size, pos_embd_fn)
         xa = col_embd
@@ -639,9 +606,9 @@ def transformer(m):
             r_cross = make_relative_position_matrix(q_idx=tar_idxs, k_idx=inp_idxs)
         else:
             r_self = r_cross = None
-        output_layer = deberta_anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd, r_self, r_cross, enc_a_mask, dec_mask)
+        output = deberta_anp_architecture(m, output_layer)(xa, inp_pos_embd, tar_pos_embd, r_self, r_cross, enc_a_mask, dec_mask)
     else:
         raise f"invalid architecture '{m.architecture}'"
     
     
-    return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=[output_layer])
+    return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=[output])

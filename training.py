@@ -184,17 +184,82 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
     # x2 = tf.minimum(tf.maximum(x[:,:,:,2] + coeffs[:,:,:,1]*x0 + coeffs[:,:,:,2]*x1, -1.), 1.)
     return x0# tf.concat([tf.reshape(x0,ccs(xs[:-1],[1])), tf.reshape(x1,ccs(xs[:-1],[1])), tf.reshape(x2,ccs(xs[:-1],[1]))],3)
 
+def negloglik(targets, dist):
+
+    loss = -dist.log_prob(targets)
+
+    return loss
 
 def gaussian_loss(targets, pred_params):
 
     means = pred_params[:, :, 0]
     variances = pred_params[:, :, 1]
 
-    dists = tfp.distributions.Normal(loc=means, scale=variances)
+    dist = tfp.distributions.Normal(loc=means, scale=variances)
 
-    loss = - dists.log_prob(targets)
+    loss = -dist.log_prob(targets)
+
+    print('loss shape', loss.shape)
 
     return loss
+
+
+def ds_input_to_keras(config):
+    def call(*inputs):
+
+        colors = inputs[0]
+        idxs = inputs[1]
+        colors_shuf = inputs[2]
+        idxs_shuf = inputs[3]
+
+        i = 4
+        if config.dataset.noise_fraction:
+            shuffled_colors_noise = inputs[i]
+            i += 1
+        
+        if config.dataset.n_split_distribution: 
+            n = inputs[i]
+            n = tf.squeeze(n)
+            i += 1
+        
+        if config.dataset.shuffle:
+            idxs = idxs_shuf
+            colors_tar = colors_shuf
+            colors_inp = colors_shuf
+            if config.dataset.noise_fraction:
+                colors_inp = shuffled_colors_noise
+        else:
+            colors_tar = colors
+            colors_inp = colors
+            if config.dataset.noise_fraction:
+                raise Exception("noise for unshuffled sequences not implemented")
+
+        
+        enc_mask_type = models.MASK_BACKWARD_EQUAL
+        dec_mask_type = models.MASK_BACKWARD_EQUAL
+        x_inp = colors_inp[:, :]
+        x_tar = colors_tar[:, :]
+        i_inp = idxs[:, :]
+        i_tar = idxs[:, :]
+    
+        inp_seq_len = tf.shape(i_inp)[-1]
+        tar_seq_len = tf.shape(i_tar)[-1]
+        enc_mask = models.get_mask(enc_mask_type, inp_seq_len, inp_seq_len)
+        dec_mask = models.get_mask(dec_mask_type, inp_seq_len, tar_seq_len)
+
+        return (
+            {
+                "colors": x_inp,
+                "inp_idxs": i_inp,
+                "tar_idxs": i_tar,
+                "enc_mask": enc_mask,
+                "dec_mask": dec_mask,
+            },
+            x_tar
+        )
+            
+    return call
+
 
         
 class Evaluator():
@@ -224,11 +289,11 @@ class Evaluator():
         if self.config.dataset.discrete:
             loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
         else:
-            if self.config.dataset.loss == 'gaussian':
+            if config.model.distribution == 'gaussian':
                 loss_function = gaussian_loss
             else:
-                assert False, f"unknown loss function: {self.config.dataset.loss}"
-        
+                assert False, f"Unknown distribution type: {config.model.distribution}"
+        self.loss_function = loss_function
         weights = model.trainable_weights
     
         @tf.function
@@ -277,34 +342,32 @@ class Evaluator():
                 if config.dataset.noise_fraction:
                     raise Exception("noise for unshuffled sequences not implemented")
 
-            steps = tf.constant(0)
+            # steps = tf.constant(0)
             accum_gradients = [tf.zeros_like(w) for w in weights]
-            accum_loss = tf.constant(0, dtype)
 
-            if config.training_mode == 'query_next' or config.training_mode == 'combination':
-                steps += 1
-                enc_mask_type = models.MASK_BACKWARD_EQUAL
-                dec_mask_type = models.MASK_BACKWARD_EQUAL
-                x_inp = colors_inp[:, :]
-                x_tar = colors_tar[:, :]
-                i_inp = idxs[:, :]
-                i_tar = idxs[:, :]
+            # if config.training_mode == 'query_next' or config.training_mode == 'combination':
+            # steps += 1
+            enc_mask_type = models.MASK_BACKWARD_EQUAL
+            dec_mask_type = models.MASK_BACKWARD_EQUAL
+            x_inp = colors_inp[:, :]
+            x_tar = colors_tar[:, :]
+            i_inp = idxs[:, :]
+            i_tar = idxs[:, :]
 
-                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
-                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
-                accum_loss += tf.reduce_mean(loss)
+            loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+            # accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
 
-            if config.training_mode == 'query_unknown' or config.training_mode == 'combination':
-                steps += 1
-                enc_mask_type = models.MASK_NONE
-                dec_mask_type = models.MASK_NONE
-                x_inp = colors_inp[:, :n]
-                x_tar = colors_tar[:, n:]
-                i_inp = idxs[:, :n]
-                i_tar = idxs[:, n:]
-                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
-                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
-                accum_loss += tf.reduce_mean(loss)
+            # if config.training_mode == 'query_unknown' or config.training_mode == 'combination':
+            #     steps += 1
+            #     enc_mask_type = models.MASK_NONE
+            #     dec_mask_type = models.MASK_NONE
+            #     x_inp = colors_inp[:, :n]
+            #     x_tar = colors_tar[:, n:]
+            #     i_inp = idxs[:, :n]
+            #     i_tar = idxs[:, n:]
+            #     loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+            #     accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+            #     accum_loss += loss
 
             # if config.training_mode == 'query_all':
             #     steps += 1
@@ -318,11 +381,11 @@ class Evaluator():
             #     accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
             #     accum_loss += tf.reduce_mean(loss)
             
-            float_steps = tf.cast(steps, dtype)
+            # float_steps = tf.cast(steps, dtype)
             # without dividing, learning rate implicitly changes if batch size changes
-            accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
-            accum_loss /= float_steps
-            return accum_loss, accum_gradients
+            # accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
+            # accum_loss /= float_steps
+            return loss, gradients
 
 
         @tf.function
@@ -353,7 +416,7 @@ class Evaluator():
         @tf.function
         def train_step():
             inputs = next(ds_train)
-            return train_step_normal(inputs)
+            return tf.reduce_sum(train_step_normal(inputs))
 
         eval_input_dtype = tf.float32 if config.dataset.continuous else tf.int32
         
@@ -374,14 +437,14 @@ class Evaluator():
             inputs = next(ds_train)
             strategy = tf.distribute.get_strategy()
             per_replica_losses = strategy.run(train_step_normal, args=(inputs,))
-            return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / float(config.num_devices))
+            return tf.reduce_sum(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / float(config.num_devices))
 
         @tf.function
         def train_step_distributed_accum(accum_steps):
             inputs = next(ds_train)
             strategy = tf.distribute.get_strategy()
             per_replica_losses = strategy.run(train_step_grad_accum, args=(inputs, accum_steps))
-            return tf.reduce_mean(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (float(config.num_devices) * float(accum_steps)))
+            return tf.reduce_sum(strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None) / (float(config.num_devices) * float(accum_steps)))
         
         self.train_step = train_step
         self.train_step_grad_accum = train_step_grad_accum
@@ -411,7 +474,6 @@ class Evaluator():
             manager = enlighten.get_manager()
         evaluate_counter = manager.counter(total=total_steps, desc="Evaluating", unit='steps', leave=False)
         
-        loss_function = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
         
         losses = {}
         for shuffled, typ, n_seq in [(True, "shuf", self.config.test_n_shuf), (False, "seq", self.config.test_n_seq)]:
@@ -430,11 +492,10 @@ class Evaluator():
                     samples = None
                     for pix_i in range(self.config.dataset.seq_length - n):
                         
-                        ic(inp_colors.shape, inp_idxs.shape, tar_idxs.shape)
                         pred_logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
 
                         if pix_i == 0:
-                            loss = loss_function(tar_colors, pred_logits)
+                            loss = self.loss_function(tar_colors, pred_logits)
                             name = f"loss_{typ}_{n}"
                             if batch_i == 0:
                                 losses[name] = loss
@@ -456,7 +517,7 @@ class Evaluator():
                     if not self.config.test_autoregressive:
                         continue
                     
-                    loss = loss_function(tar_colors, samples)
+                    loss = self.loss_function(tar_colors, samples)
                     name = f"loss_autoreg_{typ}_{n}"
                     if batch_i == 0:
                         losses[name] = loss
@@ -496,7 +557,7 @@ class Evaluator():
         # compute the expected color across all unknown pixels
         inp_idxs = all_idxs[:, :n]
         tar_idxs = all_idxs[:, n:] # target is all unknown pixels
-        ic(autoregressive_samples.shape, inp_idxs.shape, tar_idxs.shape)
+        # ic(autoregressive_samples.shape, inp_idxs.shape, tar_idxs.shape)
         dist_params = self.eval_step(autoregressive_samples, inp_idxs, tar_idxs)
 
         expected_col = self.ds.expected_col(dist_params)
@@ -514,7 +575,7 @@ class Evaluator():
             inp_idxs = all_idxs[:, :i]
             tar_idxs = all_idxs[:, i:i+1] # target is first unknown pixel only
 
-            ic(autoregressive_samples.shape, inp_idxs.shape, tar_idxs.shape)
+            # ic(autoregressive_samples.shape, inp_idxs.shape, tar_idxs.shape)
             distribution_parameters = self.eval_step(autoregressive_samples, inp_idxs, tar_idxs)
             
             # ic(distribution_parameters.shape)
@@ -548,7 +609,7 @@ class Evaluator():
             
             tar_idxs = all_idxs[:1, n:]
 
-            ic(inp_colors.shape, inp_idxs.shape, tar_idxs.shape)
+            # ic(inp_colors.shape, inp_idxs.shape, tar_idxs.shape)
             logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
             if self.config.dataset.discrete:
                 unq_inp = self.ds.unquantize(inp_colors)
@@ -594,7 +655,7 @@ class Evaluator():
             
             tar_idxs = all_idxs[:1, :]
 
-            ic(inp_colors.shape, inp_idxs.shape, tar_idxs.shape)
+            # ic(inp_colors.shape, inp_idxs.shape, tar_idxs.shape)
             logits = self.eval_step(inp_colors, inp_idxs, tar_idxs)
             
             entropies = entropy_of_logits(logits)
@@ -746,7 +807,8 @@ class TrainingLoop():
             if self.config.distributed:
                 loss = self.evaler.train_step_distributed()
             else:
-                loss = ic(self.evaler.train_step())
+                loss = self.evaler.train_step()
+                print(loss)
             self.accum_steps = 1
         else:
             if type(self.config.grad_accum_steps) is int:
