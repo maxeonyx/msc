@@ -94,9 +94,11 @@ def learning_rate_schedule(config, return_all=False):
         return Constant(0.0004)
     
     sched, start_lr, *params = config.lr_schedule
+
+    if sched == 'constant':
+        return start_lr
     
     s = {
-        'constant': lambda params: Constant(start_lr),
         'exponential': lambda params: Exponential(config.n_steps, start_lr, *params),
         'linear': lambda params: Linear(config.n_steps, start_lr, *params),
     }

@@ -589,9 +589,7 @@ def transformer(m):
 
     if m.continuous:
         params_size = tfp.layers.MixtureNormal.params_size(num_components = 3, event_shape=[])
-        reshape_layer = layers.Dense(params_size, activation=None)
-        dist_layer = tfp.layers.MixtureNormal(num_components = 3, event_shape=[])
-        output_layer = lambda x: dist_layer(reshape_layer(x))
+        output_layer = layers.Dense(params_size, activation=None)
     else:
         output_layer = tf.keras.layers.Dense(m.n_colors)
     

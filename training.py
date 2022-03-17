@@ -184,7 +184,9 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
     # x2 = tf.minimum(tf.maximum(x[:,:,:,2] + coeffs[:,:,:,1]*x0 + coeffs[:,:,:,2]*x1, -1.), 1.)
     return x0# tf.concat([tf.reshape(x0,ccs(xs[:-1],[1])), tf.reshape(x1,ccs(xs[:-1],[1])), tf.reshape(x2,ccs(xs[:-1],[1]))],3)
 
-def negloglik(targets, dist):
+def negloglik(targets, params):
+
+    dist = tfp.layers.MixtureNormal(num_components = 3, event_shape=[])(params)
 
     loss = -dist.log_prob(targets)
 
@@ -209,10 +211,10 @@ def ds_input_to_keras(config):
 
         colors = inputs[0]
         idxs = inputs[1]
-        colors_shuf = inputs[2]
-        idxs_shuf = inputs[3]
+        # colors_shuf = inputs[2]
+        # idxs_shuf = inputs[3]
 
-        i = 4
+        i = 2
         if config.dataset.noise_fraction:
             shuffled_colors_noise = inputs[i]
             i += 1
@@ -222,7 +224,7 @@ def ds_input_to_keras(config):
             n = tf.squeeze(n)
             i += 1
         
-        if config.dataset.shuffle:
+        if config.dataset.shuffle == True:
             idxs = idxs_shuf
             colors_tar = colors_shuf
             colors_inp = colors_shuf

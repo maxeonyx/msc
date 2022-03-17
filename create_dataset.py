@@ -199,46 +199,63 @@ def tf_dataset(force=False):
     return d
 
 
-def write_bvh_file(filename, data):
+def load_one_bvh_file(filename, convert_deg_to_rad=True):
     """
-    Extract data out of a BVH file into numpy array
+    Load one BVH file and return the frame data.
+    """
+    with open(filename, 'r') as f:
+        content = f.read()
+    obj = extract_bvh_file(content)
+    obj.data = extract_useful_columns(obj.data)
 
-    >>> extract_bvh_file(EXAMPLE_BVH).n_frames
-    5
-    >>> extract_bvh_file(EXAMPLE_BVH).frame_time_s
-    0.008333334
-    >>> extract_bvh_file(EXAMPLE_BVH).data[0, 0]
-    1.528779
-    >>> extract_bvh_file(EXAMPLE_BVH).data[-1, -1]
-    -0.014771
+    if convert_deg_to_rad:
+        # convert back to degrees
+        obj.data = obj.data /  360 * (2*np.pi)
+    return obj.data
+
+
+def write_bvh_file(filename, data, convert_rad_to_deg=True):
     """
-    file_content = open(filename, 'r').read()
-    out_file = open(filename + '.generated.bvh', 'w')
-    lines = file_content.split('\n')
-    lines = iter(lines)
-    while True:
+    Copy an existing BVH file and write new animation tracks into it.
+    """
+
+    if convert_rad_to_deg:
+        # convert back to degrees
+        data = data / (2*np.pi) * 360
+
+    with open(filename, 'r') as f:
+        file_content = f.read()
+    
+    with open(filename + '.generated.bvh', 'w') as out_file:
+    
+        lines = file_content.split('\n')
+        lines = iter(lines)
+
+        # echo skeleton definition and motion line
+        while True:
+            line = next(lines)
+            print(line, file=out_file)
+            if re.match('MOTION', line):
+                break
+        
+        # write new frame count
+        line = next(lines)
+        n_frames = int(re.match('Frames: (.+)', line.strip()).group(1))
+        assert data.shape[0] <= n_frames, "Writing more frames than in the base file is currently not supported."
+        print(f"Frames: {data.shape[0]}", file=out_file)
+
+        # echo frame time
         line = next(lines)
         print(line, file=out_file)
-        if re.match('MOTION', line):
-            break
-    
-    line = next(lines)
-    print(line, file=out_file)
-    n_frames = int(re.match('Frames: (.+)', line.strip()).group(1))
-    line = next(lines)
-    print(line, file=out_file)
-    frame_time_s = float(re.match('Frame Time: (.+)', line.strip()).group(1))
-    
-    nums = []
-    for i in range(n_frames):
-        nums = list(map(float, next(lines).strip().split(' ')))
-
-        for col in range(len(USEFUL_COLUMNS)):
-            nums[USEFUL_COLUMNS[col]] = data[i, col]
         
-        print(' '.join(str(n) for n in nums), file=out_file)
-    
-    out_file.close()
+        nums = []
+        for i in range(data.shape[0]):
+            nums = list(map(float, next(lines).strip().split(' ')))
+
+            for col in range(len(USEFUL_COLUMNS)):
+                nums[USEFUL_COLUMNS[col]] = data[i, col]
+            
+            print(' '.join(str(n) for n in nums), file=out_file)
 
 
 if __name__ == "__main__":

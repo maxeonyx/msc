@@ -251,12 +251,14 @@ class Datasets:
         else:
             return angles2
 
-    def chunk(self, angles):
+    def chunk_flatten_add_idxs(self, angles):
         n_total_frames = tf.shape(angles)[0]
+        n_dof = tf.shape(angles)[1]
         n_chunk_frames = self.config.dataset.n_frames
-        i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames-n_chunk_frames, dtype=tf.int32)
-        angles = angles[i:i+n_chunk_frames]
-        return angles
+        i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames*n_dof-n_chunk_frames*n_dof, dtype=tf.int32)
+        angles = tf.reshape(angles, [-1])[i:i+n_chunk_frames*n_dof]
+        idxs = tf.range(i%n_dof, i%n_dof+n_chunk_frames*n_dof)
+        return angles, idxs
         
     def make_datasets(self, for_statistics=False):
         
@@ -266,21 +268,7 @@ class Datasets:
         if self.config.dataset.type == 'image':
             dataset_train = dataset_train.map(normalize_image)
             dataset_test = dataset_test.map(normalize_image)
-        elif self.config.dataset.type == 'hands':
-            dataset_train = (
-                dataset_train
-                .map(self.deg2rad)
-                .map(self.recluster)
-                .map(self.chunk)
-            )
-            dataset_test = (
-                dataset_test
-                .map(self.deg2rad)
-                .map(self.recluster)
-                .map(self.chunk)
-            )
 
-        if self.config.dataset.type == 'image':
             if self.config.dataset.rescale:
                 dataset_train = dataset_train.map(self.rescale)
                 dataset_test = dataset_test.map(self.rescale)
@@ -293,9 +281,19 @@ class Datasets:
             else:
                 dataset_test = dataset_test.map(self.quantize)
                 dataset_train = dataset_train.map(self.quantize)
-        else:
-            dataset_train = dataset_train.map(flatten_hands)
-            dataset_test = dataset_test.map(flatten_hands)
+
+        if self.config.dataset.type == 'hands':
+            dataset_train = (
+                dataset_train
+                .map(self.deg2rad)
+                .map(self.recluster)
+            )
+            dataset_test = (
+                dataset_test
+                .map(self.deg2rad)
+                .map(self.recluster)
+            )
+            ic()
         
         dataset_test = dataset_test.cache()
         dataset_train = dataset_train.cache()
@@ -305,10 +303,33 @@ class Datasets:
             test = next(iter(dataset_test.batch(10000)))
             return train, test
         
+        dataset_test = dataset_test.repeat()
+        dataset_train = dataset_train.repeat()
+
+        if self.config.dataset.type == 'hands':
+            dataset_train = (
+                dataset_train
+                .map(self.chunk_flatten_add_idxs)
+            )
+            dataset_test = (
+                dataset_test
+                .map(self.chunk_flatten_add_idxs)
+            )
+            ic()
+        
+        if self.config.dataset.type == 'image':
+            dataset_test = (
+                dataset_test
+                .map(self.shuffle_and_add_indices)
+            )
+            
+            dataset_train = (
+                dataset_train
+                .map(self.shuffle_and_add_indices)
+            )
+
         dataset_test = (
             dataset_test
-            .repeat()
-            .map(self.shuffle_and_add_indices)
             .shuffle(self.config.dataset.buffer_size)
             .batch(self.config.test_minibatch_size, drop_remainder=True)
             .prefetch(tf.data.experimental.AUTOTUNE)
@@ -316,9 +337,7 @@ class Datasets:
         
         dataset_train = (
             dataset_train
-            .repeat()
             .shuffle(self.config.dataset.buffer_size)
-            .map(self.shuffle_and_add_indices)
         )
         
         if self.config.dataset.noise_fraction:
