@@ -205,6 +205,20 @@ def gaussian_loss(targets, pred_params):
 
     return loss
 
+def von_mises_loss(targets, pred_params):
+
+    print(targets.shape)
+    print(pred_params.shape)
+
+    loc = pred_params[:, :, 0]
+    concentration = pred_params[:, :, 1]
+
+    dist = tfp.distributions.VonMises(loc=loc, concentration=concentration)
+
+    loss = -dist.log_prob(targets)
+
+    return loss
+
 
 def ds_input_to_keras(config):
     def call(*inputs):

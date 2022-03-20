@@ -14,6 +14,7 @@ import tensorflow_probability as tfp
 from dotmap import DotMap
 from icecream import ic
 
+
 def model_name(config):
     
     spec = []
@@ -308,7 +309,8 @@ def pointwise_feedforward_layer(m, hidden_dim, output_layer, n_hidden_layers=1, 
         for layer in hidden_layers:
             x = layer(x)
             x = m.activation_fn(x)
-        x = output_layer(x)
+        if output_layer is not None:
+            x = output_layer(x)
         return x
     return call
 
@@ -376,7 +378,7 @@ def transformer_3sep_layer(m):
 
     
 # deberta / anp
-def deberta_anp_architecture(m, output_layer):
+def deberta_anp_architecture(m):
     enc_a_layers = [deberta_layer(m) for _ in range(m.n_enc_a_layers)]
     enc_b_layers = [deberta_layer(m) for _ in range(m.n_enc_b_layers)]
     dec_layer = deberta_layer(m)
@@ -385,7 +387,7 @@ def deberta_anp_architecture(m, output_layer):
     # final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
     # final_layer = pointwise_feedforward_layer(m, m.dec_dim, m.output_dim, n_hidden_layers=m.n_dec_layers)
     decoder_dtype = tf.keras.mixed_precision.Policy("float32")
-    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=output_layer, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=None, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
     def call(inp, inp_x, tar_x, r_self, r_cross, enc_mask, dec_mask):
         
         if m.use_relative_positions:
@@ -424,7 +426,7 @@ def deberta_anp_architecture(m, output_layer):
     return call
     
 # attentive neural process
-def anp_architecture(m, output_layer):
+def anp_architecture(m):
     enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
     enc_b_layers = [transformer_layer(m) for _ in range(m.n_enc_b_layers)]
     dec_layer = transformer_3sep_layer(m)
@@ -432,7 +434,7 @@ def anp_architecture(m, output_layer):
     final_dropout = layers.Dropout(m.dropout_rate)
     final_layer_norm = layers.LayerNormalization(epsilon=1e-6)
     decoder_dtype = tf.keras.mixed_precision.Policy("float32")
-    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=output_layer, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
+    decoder = pointwise_feedforward_layer(m, m.dec_dim, output_layer=None, n_hidden_layers=m.n_dec_layers, dtype=decoder_dtype)
     def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
         inp_x = x_encoder(inp_x)
         tar_x = x_encoder(tar_x)
@@ -546,6 +548,12 @@ def transformer(m):
     # use type_spec argument because we don't want the implicit batch dim for these inputs
     enc_a_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="enc_mask")
     dec_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="dec_mask")
+
+    tar_shape = tf.shape(tar_idxs)
+    # shapes for tf_distribution
+    batch_shape = tar_shape[0]
+    seq_shape = tar_shape[1]
+    event_shape = ()
     
     if m.activation == 'relu':
         m.activation_fn = tf.nn.relu
@@ -586,16 +594,10 @@ def transformer(m):
 
     inp_pos_embd = position_embedding(inp_idxs)
     tar_pos_embd = position_embedding(tar_idxs)
-
-    if m.continuous:
-        params_size = tfp.layers.MixtureNormal.params_size(num_components = 3, event_shape=[])
-        output_layer = layers.Dense(params_size, activation=None)
-    else:
-        output_layer = tf.keras.layers.Dense(m.n_colors)
     
     if m.architecture == 'anp':
         xa = col_embd + inp_pos_embd
-        output = anp_architecture(m, output_layer)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
+        final_hidden = anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
     elif m.architecture == 'deberta_anp':
         make_relative_position_matrix = relative_position_matrix(m.image_size, pos_embd_fn)
         xa = col_embd
@@ -604,9 +606,24 @@ def transformer(m):
             r_cross = make_relative_position_matrix(q_idx=tar_idxs, k_idx=inp_idxs)
         else:
             r_self = r_cross = None
-        output = deberta_anp_architecture(m, output_layer)(xa, inp_pos_embd, tar_pos_embd, r_self, r_cross, enc_a_mask, dec_mask)
+        final_hidden = deberta_anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd, r_self, r_cross, enc_a_mask, dec_mask)
     else:
         raise f"invalid architecture '{m.architecture}'"
     
+
+
+    if m.continuous:
+        loc = layers.Dense(1, activation=None, name='loc')(final_hidden) # loc
+        concentration = layers.Dense(1, activation='relu', name='concentration')(final_hidden) # conentration
+
+        outputs = [
+            layers.concatenate([loc, concentration])
+        ]
+
+    else:
+        outputs = [
+            tf.keras.layers.Dense(m.n_colors)(final_hidden)
+        ]
     
-    return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=[output])
+    return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=outputs)
+    
