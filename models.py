@@ -20,9 +20,15 @@ def model_name(config):
     spec = []
     
     hostname = socket.gethostname().split(".")[0]
+
+    if hostname == 'maxeonyx-pc-manjaro':
+        hostname = 'maxpc'
     
     if config.ds != 'mnist':
         spec.append(config.ds)
+    
+    if config.model.comment:
+        spec.append(config.model.comment)
         
     if 'rescale' in config.dataset:
         spec.append(f'{config.dataset.image_size[0]}x{config.dataset.image_size[1]}')
@@ -582,7 +588,7 @@ def transformer(m):
         position_embedding = lambda x_inp: layers.Dense(m.embd_dim)(layers.Dense(m.embd_dim, activation=m.activation_fn)(lin_embd(x_inp)))
     elif m.position_embedding == 'pos_and_embd':
 
-        frame_embd = pos_enc(m.embd_dim//2, scale=10000)
+        frame_embd = pos_enc(m.embd_dim//2, scale=100)
         dof_embd = layers.Embedding(m.seq_len, m.embd_dim//2)
         def pos_and_embd(idxx):
             frame_idx = idxx // m.n_dof
