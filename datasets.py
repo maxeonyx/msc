@@ -17,7 +17,10 @@ ic.configureOutput(includeContext=True)
 def ignore_label(image, label):
     return image
 
-def ignore_metadata(filename, n_frames, angles):
+def is_right_hand(filename, n_frames, angles, is_right_hand):
+    return is_right_hand == True
+
+def ignore_metadata(filename, n_frames, angles, is_right_hand):
     return angles
 
 def normalize_image(image):
@@ -239,17 +242,20 @@ class Datasets:
         angles = (angles / 360. ) * 2. * np.pi
         return angles
 
+    def circular_mean(self, angles):
+         # compute the circular mean of the data for this example+track
+         # rotate the data so that the circular mean is 0
+         # store the circular mean
+         means_cos_a = tf.reduce_mean(tf.math.cos(angles), axis=0)
+         means_sin_a = tf.reduce_mean(tf.math.sin(angles), axis=0)
+         circular_means = tf.math.atan2(means_sin_a, means_cos_a)
+         return circular_means
+
     def recluster(self, angles):
-        # re-map non-zero
-        angles2 = tf.where(angles >= 0, angles, angles + 2.*np.pi)
-
-        var1 = tf.math.reduce_variance(angles)
-        var2 = tf.math.reduce_variance(angles2)
-
-        if var1 < var2:
-            return angles
-        else:
-            return angles2
+         # rotate the data so the circular mean is 0
+         circular_means = self.circular_mean(angles)
+         angles = angles - circular_means[None, :]
+         return angles
 
     def chunk_flatten_add_idxs(self, angles):
         n_total_frames = tf.shape(angles)[0]

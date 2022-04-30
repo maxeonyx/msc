@@ -155,7 +155,13 @@ def get_bvh_data():
         
         obj = extract_bvh_file(text)
         obj.data = extract_useful_columns(obj.data)
-        yield name, obj.n_frames, obj.data
+        if "right" in name:
+            is_right_hand = True
+        elif "left" in name:
+            is_right_hand = False
+        else:
+            raise Exception(f"Found file {name} with no left/right distinction")
+        yield name, obj.n_frames, obj.data, is_right_hand
 
 def np_dataset():
 
@@ -171,7 +177,8 @@ def tf_dataset(force=False):
     ds_element_spec = (
         tf.TensorSpec(shape=(), dtype=tf.string),
         tf.TensorSpec(shape=(), dtype=tf.int32),
-        tf.TensorSpec(shape=[None, len(USEFUL_COLUMNS)])
+        tf.TensorSpec(shape=[None, len(USEFUL_COLUMNS)]),
+        tf.TensorSpec(shape=(), dtype=tf.bool),
     )
 
     ds_path = './cached_dataset'
