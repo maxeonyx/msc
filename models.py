@@ -27,6 +27,9 @@ def model_name(config):
     if config.ds != 'mnist':
         spec.append(config.ds)
     
+    if config.model.architecture != 'anp':
+        spec.append(config.model.architecture)
+    
     if config.model.comment:
         spec.append(config.model.comment)
         
@@ -463,7 +466,20 @@ def anp_architecture(m):
         return tar_y
     return call
 
-
+    
+# gpt style
+def gpt(m):
+    enc_a_layers = [transformer_layer(m) for _ in range(m.n_enc_a_layers)]
+    x_encoder = pointwise_feedforward_layer(m, m.ffl_dim, output_layer=layers.Dense(m.embd_dim))
+    def call(inp_xy, inp_x, tar_x, enc_a_mask, dec_mask):
+        inp_x = x_encoder(inp_x)
+        tar_x = x_encoder(tar_x)
+        enc_inp_a = inp_xy
+        for enc_layer in enc_a_layers:
+            enc_inp_a += enc_layer(enc_inp_a, enc_inp_a, mask=enc_a_mask)
+        
+        return enc_inp_a
+    return call
 
 def linear_position_encoding(dim_lengths, out_vec_lengths):
     dtype = tf.keras.mixed_precision.global_policy().compute_dtype
@@ -551,6 +567,10 @@ def transformer(m):
     colors = Input([None], name="colors")
     inp_idxs = Input([None], name="inp_idxs")
     tar_idxs = Input([None], name="tar_idxs")
+    
+    # inp_idxs = Input([None], name="inp_frame_idxs")
+    # inp_idxs = Input([None], name="inp_frame_idxs")
+
     # use type_spec argument because we don't want the implicit batch dim for these inputs
     enc_a_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="enc_mask")
     dec_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="dec_mask")
@@ -588,15 +608,17 @@ def transformer(m):
         position_embedding = lambda x_inp: layers.Dense(m.embd_dim)(layers.Dense(m.embd_dim, activation=m.activation_fn)(lin_embd(x_inp)))
     elif m.position_embedding == 'pos_and_embd':
 
-        frame_embd = pos_enc(m.embd_dim//2, scale=100)
-        dof_embd = layers.Embedding(m.seq_len, m.embd_dim//2)
-        def pos_and_embd(idxx):
-            frame_idx = idxx // m.n_dof
-            dof_idx = idxx % m.n_dof
+        # frame_embd = pos_enc(m.embd_dim//2, scale=100)
+        # dof_embd = layers.Embedding(m.seq_len, m.embd_dim//2)
+        # def pos_and_embd(idxx):
+        #     frame_idx = idxx // m.n_dof
+        #     dof_idx = idxx % m.n_dof
 
-            return tf.concat([frame_embd(frame_idx), dof_embd(dof_idx)], axis=-1)
+        #     return tf.concat([frame_embd(frame_idx), dof_embd(dof_idx)], axis=-1)
     
-        position_embedding = pos_and_embd
+        # position_embedding = pos_and_embd
+
+        position_embedding = layers.Embedding(m.n_dof*8000, m.embd_dim)
 
     inp_pos_embd = position_embedding(inp_idxs)
     tar_pos_embd = position_embedding(tar_idxs)
@@ -604,6 +626,9 @@ def transformer(m):
     if m.architecture == 'anp':
         xa = col_embd + inp_pos_embd
         final_hidden = anp_architecture(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)    
+    if m.architecture == 'gpt':
+        xa = col_embd + inp_pos_embd
+        final_hidden = gpt(m)(xa, inp_pos_embd, tar_pos_embd,  enc_a_mask, dec_mask)  
     elif m.architecture == 'deberta_anp':
         make_relative_position_matrix = relative_position_matrix(m.image_size, pos_embd_fn)
         xa = col_embd
@@ -619,12 +644,19 @@ def transformer(m):
 
 
     if m.continuous:
-        loc = layers.Dense(1, activation=None, name='loc')(final_hidden) # loc
-        concentration = layers.Dense(1, activation='relu', name='concentration')(final_hidden) # conentration
+        if m.loc_scale:
+            loc = layers.Dense(1, activation=None, name='loc')(final_hidden) # loc
+            concentration = layers.Dense(1, activation='relu', name='concentration')(final_hidden) # conentration
 
-        outputs = [
-            layers.concatenate([loc, concentration])
-        ]
+            outputs = [
+                layers.concatenate([loc, concentration])
+            ]
+        elif m.scalar:
+            loc = layers.Dense(1, activation=None, name='loc')(final_hidden) # loc
+
+            outputs = [
+                loc
+            ]
 
     else:
         outputs = [

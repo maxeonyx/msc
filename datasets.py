@@ -257,13 +257,35 @@ class Datasets:
          angles = angles - circular_means[None, :]
          return angles
 
-    def chunk_flatten_add_idxs(self, angles):
+    def chunk_flatten_add_multiidxs(self, angles):
         n_total_frames = tf.shape(angles)[0]
+        
         n_dof = tf.shape(angles)[1]
         n_chunk_frames = self.config.dataset.n_frames
         i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames*n_dof-n_chunk_frames*n_dof, dtype=tf.int32)
+        # angles = tf.reshape(angles, [-1])[i:i+n_chunk_frames*n_dof]
+        # idxs = tf.range(i%n_dof, i%n_dof+n_chunk_frames*n_dof)
+        
+        frame_i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames-n_chunk_frames, dtype=tf.int32)
+        frame_idxs = tf.range(frame_i, frame_i+n_chunk_frames)
+        frame_idxs = tf.reshape(frame_idxs, [n_chunk_frames, 1])
+        frame_idxs = tf.tile(frame_idxs, [1, n_dof])
+
+        dof_idxs = tf.range(n_dof)
+        dof_idxs = tf.reshape(dof_idxs, [1, n_dof])
+        dof_idxs = tf.tile(dof_idxs, [n_chunk_frames, 1])
+        
+        return angles, frame_idxs, dof_idxs
+
+    def chunk_flatten_add_idxs(self, angles):
+        n_total_frames = tf.shape(angles)[0]
+        
+        n_dof = tf.shape(angles)[1]
+        n_chunk_frames = self.config.dataset.n_frames
+        frame_i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames-n_chunk_frames, dtype=tf.int32)
+        i = frame_i*n_dof
         angles = tf.reshape(angles, [-1])[i:i+n_chunk_frames*n_dof]
-        idxs = tf.range(i%n_dof, i%n_dof+n_chunk_frames*n_dof)
+        idxs = tf.range(i, i+n_chunk_frames*n_dof, dtype=tf.int32)
         return angles, idxs
         
     def make_datasets(self, for_statistics=False):

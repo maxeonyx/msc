@@ -219,7 +219,6 @@ def von_mises_loss(targets, pred_params):
 
     return loss
 
-
 def ds_input_to_keras(config):
     def call(*inputs):
 
@@ -358,20 +357,22 @@ class Evaluator():
                 if config.dataset.noise_fraction:
                     raise Exception("noise for unshuffled sequences not implemented")
 
-            # steps = tf.constant(0)
+            steps = tf.constant(0)
             accum_gradients = [tf.zeros_like(w) for w in weights]
 
-            # if config.training_mode == 'query_next' or config.training_mode == 'combination':
-            # steps += 1
-            enc_mask_type = models.MASK_BACKWARD_EQUAL
-            dec_mask_type = models.MASK_BACKWARD_EQUAL
-            x_inp = colors_inp[:, :]
-            x_tar = colors_tar[:, :]
-            i_inp = idxs[:, :]
-            i_tar = idxs[:, :]
+            if config.training_mode == 'query_next' or config.training_mode == 'combination':
+                steps += 1
+                enc_mask_type = models.MASK_BACKWARD_EQUAL
+                dec_mask_type = models.MASK_BACKWARD_EQUAL
+                # enc_mask_type = models.MASK_BACKWARD
+                # dec_mask_type = models.MASK_BACKWARD
+                x_inp = colors_inp[:, :-1]
+                x_tar = colors_tar[:, 1:]
+                i_inp = idxs[:, :-1]
+                i_tar = idxs[:, 1:]
 
-            loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
-            # accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
+                loss, gradients = train_step_inner_inner(x_inp, x_tar, i_inp, i_tar, enc_mask_type, dec_mask_type)
+                accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
 
             # if config.training_mode == 'query_unknown' or config.training_mode == 'combination':
             #     steps += 1
@@ -397,10 +398,10 @@ class Evaluator():
             #     accum_gradients = [accum_grad+grad for accum_grad, grad in zip(accum_gradients, gradients)]
             #     accum_loss += tf.reduce_mean(loss)
             
-            # float_steps = tf.cast(steps, dtype)
+            float_steps = tf.cast(steps, dtype)
             # without dividing, learning rate implicitly changes if batch size changes
-            # accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
-            # accum_loss /= float_steps
+            accum_gradients = [accum_grad / float_steps for accum_grad in accum_gradients]
+            accum_loss /= float_steps
             return loss, gradients
 
 
