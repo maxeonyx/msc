@@ -12,3 +12,5 @@ ipywidgets ~= 7.6
 icecream ~= 2.1
 tensorflow_datasets ~= 4.5
 tensorflow_probability ~= 0.16
+python-box ~= 6.0
+tensorflow ~= 2.9
