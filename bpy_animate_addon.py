@@ -6,115 +6,8 @@ bl_info = {
 
 import bpy
 import numpy as np
-import tensorflow as tf
-physical_devices = tf.config.list_physical_devices('GPU')
-# print(physical_devices)
-assert len(physical_devices) == 1, "Did not see the expected number of GPUs"
-# to allow other tensorflow processes to use the gpu
-# https://stackoverflow.com/a/60699372/7989988
-tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-import tensorflow_probability as tfp
-import enlighten
 
-def negloglik(targets, params):
-
-    dist = tfp.layers.MixtureNormal(num_components = 3, event_shape=[])(params)
-
-    loss = -dist.log_prob(targets)
-
-    return loss
-
-def von_mises_loss(targets, pred_params):
-
-    loc = pred_params[:, :, 0]
-    concentration = pred_params[:, :, 1]
-
-    dist = tfp.distributions.VonMises(loc=loc, concentration=concentration)
-
-    loss = -dist.log_prob(targets)
-
-    return loss
-
-dof = 23
-
-def generate_data(wm, abs_model_path, conditioning_data, window_frames, new_frames):
-    manager = enlighten.get_manager()
-    
-    model = tf.keras.models.load_model(
-        abs_model_path,
-        custom_objects={
-            'negloglik': negloglik,
-            'von_mises_loss': von_mises_loss
-        },
-    )
-
-    conditioning_data = tf.cast(conditioning_data, tf.float32)
-
-    prev_frames = min(window_frames, conditioning_data.shape[0])
-    n_frames_to_predict = new_frames
-
-    counter = manager.counter(total=n_frames_to_predict*dof)
-    wm.progress_begin(0, n_frames_to_predict*dof)
-
-    dof_idxs = tf.tile(tf.range(dof)[None, :], [prev_frames + 1, 1])
-    frame_idxs = tf.tile(tf.range(prev_frames + 1)[:, None], [1, dof]) * dof
-    idxs = dof_idxs + frame_idxs
-    idxs = tf.reshape(idxs, [-1])
-
-    def iteration(i, data):
-        tar_idx = prev_frames*dof + i + 1
-        inp_idxs = tf.range(i, prev_frames*dof + i)
-        inp = data[-prev_frames*dof:]
-        inp_len = tf.shape(inp_idxs)[0]
-        tar_len = 1
-        pred_params = model({
-            "colors": inp[None, :],
-            "inp_idxs": inp_idxs[None, :],
-            "tar_idxs": tar_idx[None, None],
-            "enc_mask": tf.zeros((inp_len, inp_len)),
-            "dec_mask": tf.zeros((tar_len, inp_len)),
-        })
-
-        loc = pred_params[:, :, 0]
-#        concentration = pred_params[:, :, 1]
-
-#        dist = tfp.distributions.VonMises(loc=loc, concentration=concentration)
-#        sample = dist.mean()
-        sample = loc
-        sample = tf.reshape(sample, [-1])
-        data = tf.concat([data, sample], axis=0)
-        return i+1, data
-
-    @tf.function(
-        input_signature=[tf.TensorSpec([None, dof])],
-    )
-    def do_batch(data):
-        inp_data = tf.reshape(data[-prev_frames:, :], [prev_frames*dof])
-        _i, out_data = tf.while_loop(
-            cond=lambda i, data: i < dof,
-            body=iteration,
-            loop_vars=[
-                tf.constant(0),
-                inp_data
-            ],
-            shape_invariants=[
-                tf.TensorShape([]),
-                tf.TensorShape([None]),
-            ],
-        )
-        return tf.reshape(out_data[-dof:], [1, dof])
-
-#    test_data = tf.cast(create_dataset.load_one_bvh_file(filename, convert_deg_to_rad=True), tf.float32)
-    generated_data = conditioning_data[:prev_frames, :]
-    for i in range(n_frames_to_predict):
-        result = do_batch(generated_data)
-        generated_data = tf.concat([generated_data, result], axis=0)
-        counter.update(incr=dof)
-        wm.progress_update(i*dof)
-    counter.close()
-
-    return generated_data
 
 
 USEFUL_COLUMNS = set([
@@ -211,17 +104,18 @@ class GenerateAnimation(bpy.types.Operator):
         global model_path
         wm = context.window_manager
         old_obj = context.object
-        new_obj = context.object.copy()
+        # new_obj = context.object.copy()
         model_path = self.model_path
         abs_model_path = bpy.path.abspath(model_path)
         
-        if not new_obj.name.find('generated') != -1:
-            new_obj.name = old_obj.name + '.generated'
-        
-        new_obj.animation_data.action = bpy.data.actions.new(name="GeneratedAction")
+        # if not new_obj.name.find('generated') != -1:
+        #     new_obj.name = old_obj.name + '.generated'
         
         animation_tracks = old_obj.animation_data.action.fcurves
         assert len(animation_tracks) == 54, f"Expected 54 total animation tracks on a hand BVH, found {len(animation_tracks)}"
+        
+        old_obj.animation_data.action = bpy.data.actions.new(name="GeneratedAction")
+        
 
         conditioning_data = np.zeros([self.conditioning_steps, dof])
         
@@ -242,14 +136,14 @@ class GenerateAnimation(bpy.types.Operator):
         for i_track in range(n_tracks):
             track_name, track_type, track_index = COLUMN_ACCESS[i_track]
             data_path = f'pose.bones["{track_name}"].{track_type}'
-            fc = new_obj.animation_data.action.fcurves.new(data_path=data_path, index=track_index)
+            fc = old_obj.animation_data.action.fcurves.new(data_path=data_path, index=track_index)
             fc.keyframe_points.add(n_frames)
             for i_frame in range(n_frames):
                 fc.keyframe_points[i_frame].co = (i_frame + 1.0, generated_data[i_frame, i_track])
         
         wm.progress_end()
                 
-        context.collection.objects.link(new_obj)
+        # context.collection.objects.link(new_obj)
 
         return {'FINISHED'}            # Lets Blender know the operator finished successfully.
 

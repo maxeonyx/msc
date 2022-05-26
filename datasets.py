@@ -243,19 +243,20 @@ class Datasets:
         return angles
 
     def circular_mean(self, angles):
-         # compute the circular mean of the data for this example+track
-         # rotate the data so that the circular mean is 0
-         # store the circular mean
-         means_cos_a = tf.reduce_mean(tf.math.cos(angles), axis=0)
-         means_sin_a = tf.reduce_mean(tf.math.sin(angles), axis=0)
-         circular_means = tf.math.atan2(means_sin_a, means_cos_a)
-         return circular_means
+        # compute the circular mean of the data for this example+track
+        # rotate the data so that the circular mean is 0
+        # store the circular mean
+        means_cos_a = tf.reduce_mean(tf.math.cos(angles), axis=0)
+        means_sin_a = tf.reduce_mean(tf.math.sin(angles), axis=0)
+        circular_means = tf.math.atan2(means_sin_a, means_cos_a)
+        return circular_means
 
     def recluster(self, angles):
-         # rotate the data so the circular mean is 0
-         circular_means = self.circular_mean(angles)
-         angles = angles - circular_means[None, :]
-         return angles
+        # rotate the data so the circular mean is 0
+        circular_means = self.circular_mean(angles)
+        angles = angles - circular_means[None, :]
+        angles = tf.cond(angles < np.pi, lambda: angles+np.pi*2, lambda: angles)
+        return angles
 
     def chunk_flatten_add_multiidxs(self, angles):
         n_total_frames = tf.shape(angles)[0]
