@@ -166,8 +166,10 @@ def get_bvh_data():
 def np_dataset():
 
     data = [x for x in get_bvh_data()]
-
-    return np.array(data, dtype=np.object_)
+    data = np.array(data, dtype=np.object_)
+    # sort by filename
+    data = data[data[:, 0].argsort()]
+    return data
 
 def tf_dataset(force=False):
     """

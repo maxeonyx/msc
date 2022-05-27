@@ -9,7 +9,7 @@ tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 import tensorflow_probability as tfp
 import enlighten
-
+from dotmap import DotMap as dm
 
 def negloglik(targets, params):
 
@@ -32,24 +32,16 @@ def von_mises_loss(targets, pred_params):
 
 dof = 23
 
-def generate_data(wm, abs_model_path, conditioning_data, window_frames, new_frames):
-    manager = enlighten.get_manager()
-    
-    model = tf.keras.models.load_model(
-        abs_model_path,
-        custom_objects={
-            'negloglik': negloglik,
-            'von_mises_loss': von_mises_loss
-        },
-    )
+def generate_data(model, conditioning_data, window_frames, new_frames, sample_fn, progress=True):
 
     conditioning_data = tf.cast(conditioning_data, tf.float32)
 
     prev_frames = min(window_frames, conditioning_data.shape[0])
     n_frames_to_predict = new_frames
 
-    counter = manager.counter(total=n_frames_to_predict*dof)
-    wm.progress_begin(0, n_frames_to_predict*dof)
+    if progress:
+        manager = enlighten.get_manager()
+        counter = manager.counter(total=total)
 
     dof_idxs = tf.tile(tf.range(dof)[None, :], [prev_frames + 1, 1])
     frame_idxs = tf.tile(tf.range(prev_frames + 1)[:, None], [1, dof]) * dof
@@ -69,13 +61,7 @@ def generate_data(wm, abs_model_path, conditioning_data, window_frames, new_fram
             "enc_mask": tf.zeros((inp_len, inp_len)),
             "dec_mask": tf.zeros((tar_len, inp_len)),
         })
-
-        loc = pred_params[:, :, 0]
-#        concentration = pred_params[:, :, 1]
-
-#        dist = tfp.distributions.VonMises(loc=loc, concentration=concentration)
-#        sample = dist.mean()
-        sample = loc
+        sample = sample_fn(pred_params)
         sample = tf.reshape(sample, [-1])
         data = tf.concat([data, sample], axis=0)
         return i+1, data
@@ -99,13 +85,13 @@ def generate_data(wm, abs_model_path, conditioning_data, window_frames, new_fram
         )
         return tf.reshape(out_data[-dof:], [1, dof])
 
-#    test_data = tf.cast(create_dataset.load_one_bvh_file(filename, convert_deg_to_rad=True), tf.float32)
     generated_data = conditioning_data[:prev_frames, :]
     for i in range(n_frames_to_predict):
         result = do_batch(generated_data)
         generated_data = tf.concat([generated_data, result], axis=0)
-        counter.update(incr=dof)
-        wm.progress_update(i*dof)
-    counter.close()
+        if progress:
+            counter.update(incr=dof)
+    if progress:
+        counter.close()
 
     return generated_data

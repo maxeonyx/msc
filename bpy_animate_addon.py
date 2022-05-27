@@ -7,9 +7,6 @@ bl_info = {
 import bpy
 import numpy as np
 
-
-
-
 USEFUL_COLUMNS = set([
     3, 4, 5, # Wrist
 
@@ -83,7 +80,7 @@ class VIEW3D_PT_generate_animation(bpy.types.Panel):
         self.layout.label(text="Click Generate")
         self.layout.operator(GenerateAnimation.bl_idname, icon='MESH_CUBE', text="Generate")
 
-model_path = "//models/cuda10-hands-gpt-1layer-contin-bs1x1x8-may26-2"
+anim_path = "//anims/cuda10-hands-gpt-1layer-contin-bs1x1x8-may26-2"
 
 class GenerateAnimation(bpy.types.Operator):
     """Generate Animation Script"""      # Use this as a tooltip for menu items and buttons.
@@ -94,58 +91,45 @@ class GenerateAnimation(bpy.types.Operator):
     conditioning_steps: bpy.props.IntProperty(name="# Conditioning Frames", default=30, min=1, max=100)
     new_frames: bpy.props.IntProperty(name="# Generated Frames", default=100, min=1)
     window_size: bpy.props.IntProperty(name="# Frames in Autoregressive Window", default=30, min=1, max=100)
-    model_path: bpy.props.StringProperty(name="File path for model (dir)", default=model_path)
+    anim_path: bpy.props.StringProperty(name="File path for animation data", default=anim_path)
     
     def invoke(self, context, event):
         wm = context.window_manager
         return wm.invoke_props_dialog(self)
 
     def execute(self, context):        # execute() is called when running the operator.
-        global model_path
+        global anim_path
         wm = context.window_manager
-        old_obj = context.object
-        # new_obj = context.object.copy()
-        model_path = self.model_path
-        abs_model_path = bpy.path.abspath(model_path)
+        obj = context.object
         
-        # if not new_obj.name.find('generated') != -1:
-        #     new_obj.name = old_obj.name + '.generated'
+        abs_anim_path = bpy.path.abspath(self.anim_path)
+        meta, data = np.load(abs_anim_path, allow_pickle=True)
         
-        animation_tracks = old_obj.animation_data.action.fcurves
-        assert len(animation_tracks) == 54, f"Expected 54 total animation tracks on a hand BVH, found {len(animation_tracks)}"
+        n_frames = data.shape[0]
+        n_tracks = data.shape[1]
         
-        old_obj.animation_data.action = bpy.data.actions.new(name="GeneratedAction")
+        if meta.type == 'dataset':
+            # turn hand blue
+        elif meta.type == 'generated':
+            # turn hand red
         
-
-        conditioning_data = np.zeros([self.conditioning_steps, dof])
+        wm.progress_begin(0, n_frames*n_tracks)
         
-        i_track_n = 0
-        for i_track, track in enumerate(animation_tracks):
-            if i_track in USEFUL_COLUMNS:
-                for i_frame, frame in enumerate(track.keyframe_points):
-                    if i_frame >= self.conditioning_steps:
-                        break
-                    conditioning_data[i_frame, i_track_n] = frame.co.y
-                i_track_n += 1
-        
-        generated_data = generate_data(wm, abs_model_path, conditioning_data, window_frames=self.window_size, new_frames=self.new_frames)
-        
-        n_frames = generated_data.shape[0]
-        n_tracks = generated_data.shape[1]
+        # attach a new Action to the hand
+        obj.animation_data.action = bpy.data.actions.new(name="GeneratedAction")
         
         for i_track in range(n_tracks):
             track_name, track_type, track_index = COLUMN_ACCESS[i_track]
             data_path = f'pose.bones["{track_name}"].{track_type}'
-            fc = old_obj.animation_data.action.fcurves.new(data_path=data_path, index=track_index)
+            fc = obj.animation_data.action.fcurves.new(data_path=data_path, index=track_index)
             fc.keyframe_points.add(n_frames)
             for i_frame in range(n_frames):
                 fc.keyframe_points[i_frame].co = (i_frame + 1.0, generated_data[i_frame, i_track])
+                wm.progress_update(i_track*n_frames+i_frame)
         
         wm.progress_end()
-                
-        # context.collection.objects.link(new_obj)
 
-        return {'FINISHED'}            # Lets Blender know the operator finished successfully.
+        return {'FINISHED'}
 
 def menu_func(self, context):
     self.layout.operator(GenerateAnimation.bl_idname)
