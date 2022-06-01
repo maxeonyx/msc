@@ -402,3 +402,76 @@ class Datasets:
         dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
 
         return dataset_train, dataset_test
+
+    def make_lstm_hand_datasets(self, for_statistics=False):
+        
+        dataset_train = self.ds_train_orig
+        dataset_test = self.ds_test_orig
+
+        assert self.config.dataset.type == 'hands'
+        dataset_train = (
+            dataset_train
+            .map(deg2rad)
+            .map(recluster)
+        )
+        dataset_test = (
+            dataset_test
+            .map(deg2rad)
+            .map(recluster)
+        )
+        
+        dataset_test = dataset_test.cache()
+        dataset_train = dataset_train.cache()
+        
+        if for_statistics:
+            train = next(iter(dataset_train.batch(60000)))
+            test = next(iter(dataset_test.batch(10000)))
+            return train, test
+        
+        dataset_test = dataset_test.repeat()
+        dataset_train = dataset_train.repeat()
+
+        dataset_train = (
+            dataset_train
+            .map(self.chunk_flatten_add_idxs)
+        )
+        dataset_test = (
+            dataset_test
+            .map(self.chunk_flatten_add_idxs)
+        )
+        
+        dataset_test = (
+            dataset_test
+            .shuffle(self.config.dataset.buffer_size)
+            .batch(self.config.test_minibatch_size, drop_remainder=True)
+            .prefetch(tf.data.experimental.AUTOTUNE)
+        )
+        
+        dataset_train = (
+            dataset_train
+            .shuffle(self.config.dataset.buffer_size)
+        )
+        
+        if self.config.dataset.noise_fraction:
+            dataset_train = dataset_train.map(self.add_noise)
+        
+        
+        def n_split(d):
+            if self.dist:
+                return d.map(self.add_n_from_distribution)
+            else:
+                return d
+        
+        if self.config.grad_accum_steps is None or self.config.grad_accum_steps == 1:
+            dataset_train = dataset_train.batch(self.config.global_batch_size)
+            dataset_train = n_split(dataset_train)
+            print("Not using gradient accumulation")
+        else:
+            dataset_train = dataset_train.batch(self.config.minibatch_size)
+            dataset_train = n_split(dataset_train)
+            dataset_train = dataset_train.batch(self.config.max_accum_steps * self.config.num_devices)
+            print("Using gradient accumulation")
+            
+        dataset_train = dataset_train.prefetch(tf.data.experimental.AUTOTUNE)
+
+        return dataset_train, dataset_test
