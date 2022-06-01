@@ -562,6 +562,38 @@ def relative_position_matrix(image_size, pos_embd_fn):
     return call
 
 
+def lstm(m):
+    
+    colors = Input([None], name="colors")
+    
+    ### ignored
+    inp_idxs = Input([None], name="inp_idxs")
+    tar_idxs = Input([None], name="tar_idxs") # LSTM: assume only 1
+    enc_a_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="enc_mask")
+    dec_mask = Input(type_spec=tf.TensorSpec(shape=[None, None]), name="dec_mask")
+    ### ignored
+    
+    m = colors
+    m = layers.Dense(m.embd_dim, activation='relu')(m)
+    m = layers.LSTM(m.embd_dim)(m)
+    
+    if m.loc_scale:
+        loc = layers.Dense(1, activation=None, name='loc')(m) # loc
+        concentration = layers.Dense(1, activation='relu', name='concentration')(m) # conentration
+
+        outputs = [
+            layers.concatenate([loc, concentration])
+        ]
+    elif m.scalar:
+        loc = layers.Dense(1, activation=None, name='loc')(m) # loc
+
+        outputs = [
+            loc
+        ]
+    
+    return Model(inputs=[colors, inp_idxs, tar_idxs, enc_a_mask, dec_mask], outputs=outputs)
+
+
 def transformer(m):
     
     colors = Input([None], name="colors")
