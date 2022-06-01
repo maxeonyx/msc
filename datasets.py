@@ -117,6 +117,35 @@ def flatten_hands(data):
     sequence = tf.reshape(data, [-1]) # (height * width, color)
     return sequence
 
+def deg2rad(angles):
+    angles = (angles / 360. ) * 2. * np.pi
+    return angles
+
+def circular_mean(angles):
+    # compute the circular mean of the data for this example+track
+    # rotate the data so that the circular mean is 0
+    # store the circular mean
+    means_cos_a = tf.reduce_mean(tf.math.cos(angles), axis=0)
+    means_sin_a = tf.reduce_mean(tf.math.sin(angles), axis=0)
+    circular_means = tf.math.atan2(means_sin_a, means_cos_a)
+    return circular_means
+
+def recluster(angles):
+    # rotate the data so the circular mean is 0
+    circular_means = circular_mean(angles)
+    print("angles shape:", angles.shape)
+    print("circular_means shape:", circular_means.shape)
+    print("circular_means:", circular_means)
+    print("angles:", angles)
+    angles = angles - circular_means[None, :]
+    print("angles adjusted (before wrap):", angles)
+    new_circular_means = circular_mean(angles)
+    print("new_circular_means:", new_circular_means)
+    angles = tf.where(angles < -np.pi, angles+np.pi*2, angles)
+    angles = tf.where(angles > np.pi, angles-np.pi*2, angles)
+    print("angles adjusted (after wrap):", angles)
+    return angles, circular_means
+
 class Datasets:
     
     def __init__(self, config, ds_train_orig, ds_test_orig, centroids, distribution):
@@ -237,26 +266,7 @@ class Datasets:
     def rescale(self, image):
         image = tf.image.resize(image, self.config.dataset.rescale)
         return image
-    
-    def deg2rad(self, angles):
-        angles = (angles / 360. ) * 2. * np.pi
-        return angles
 
-    def circular_mean(self, angles):
-        # compute the circular mean of the data for this example+track
-        # rotate the data so that the circular mean is 0
-        # store the circular mean
-        means_cos_a = tf.reduce_mean(tf.math.cos(angles), axis=0)
-        means_sin_a = tf.reduce_mean(tf.math.sin(angles), axis=0)
-        circular_means = tf.math.atan2(means_sin_a, means_cos_a)
-        return circular_means
-
-    def recluster(self, angles):
-        # rotate the data so the circular mean is 0
-        circular_means = self.circular_mean(angles)
-        angles = angles - circular_means[None, :]
-        angles = tf.cond(angles < np.pi, lambda: angles+np.pi*2, lambda: angles)
-        return angles
 
     def chunk_flatten_add_multiidxs(self, angles):
         n_total_frames = tf.shape(angles)[0]
@@ -314,13 +324,13 @@ class Datasets:
         if self.config.dataset.type == 'hands':
             dataset_train = (
                 dataset_train
-                .map(self.deg2rad)
-                .map(self.recluster)
+                .map(deg2rad)
+                .map(recluster)
             )
             dataset_test = (
                 dataset_test
-                .map(self.deg2rad)
-                .map(self.recluster)
+                .map(deg2rad)
+                .map(recluster)
             )
             ic()
         

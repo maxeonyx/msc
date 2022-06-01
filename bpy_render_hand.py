@@ -27,8 +27,8 @@ def render(cfg):
     bpy.context.scene.cycles.samples = 256
     bpy.context.scene.render.fps = 30
     bpy.context.scene.cycles.device = 'GPU'
-    bpy.context.scene.render.resolution_x = 480
-    bpy.context.scene.render.resolution_y = 270
+    bpy.context.scene.render.resolution_x = 1600
+    bpy.context.scene.render.resolution_y = 900
     bpy.context.scene.frame_start = 0
     bpy.context.scene.frame_end = cfg.conditioning_steps + cfg.new_frames
     bpy.context.scene.render.image_settings.file_format = 'FFMPEG'

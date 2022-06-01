@@ -6,6 +6,7 @@ bl_info = {
 
 import bpy
 import numpy as np
+import json
 
 USEFUL_COLUMNS = set([
     3, 4, 5, # Wrist
@@ -80,7 +81,7 @@ class VIEW3D_PT_generate_animation(bpy.types.Panel):
         self.layout.label(text="Click Generate")
         self.layout.operator(GenerateAnimation.bl_idname, icon='MESH_CUBE', text="Generate")
 
-anim_path = "//anims/cuda10-hands-gpt-1layer-contin-bs1x1x8-may26-2"
+anim_path = "//anims/ds_bottle1_body1_left_1500.npy"
 
 class GenerateAnimation(bpy.types.Operator):
     """Generate Animation Script"""      # Use this as a tooltip for menu items and buttons.
@@ -105,13 +106,17 @@ class GenerateAnimation(bpy.types.Operator):
         abs_anim_path = bpy.path.abspath(self.anim_path)
         meta, data = np.load(abs_anim_path, allow_pickle=True)
         
+        print(json.dumps(meta))
+        
         n_frames = data.shape[0]
         n_tracks = data.shape[1]
         
         if meta.type == 'dataset':
             # turn hand blue
+            pass
         elif meta.type == 'generated':
             # turn hand red
+            pass
         
         wm.progress_begin(0, n_frames*n_tracks)
         
@@ -124,7 +129,7 @@ class GenerateAnimation(bpy.types.Operator):
             fc = obj.animation_data.action.fcurves.new(data_path=data_path, index=track_index)
             fc.keyframe_points.add(n_frames)
             for i_frame in range(n_frames):
-                fc.keyframe_points[i_frame].co = (i_frame + 1.0, generated_data[i_frame, i_track])
+                fc.keyframe_points[i_frame].co = (i_frame + 1.0, data[i_frame, i_track])
                 wm.progress_update(i_track*n_frames+i_frame)
         
         wm.progress_end()
