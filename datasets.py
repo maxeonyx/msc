@@ -4,6 +4,7 @@ import tensorflow as tf
 import numpy as np
 from tensorflow import keras
 from tensorflow.keras import Model, Input, layers
+import tensorflow_addons as tfa
 from IPython.display import display
 import tensorflow_datasets as tfds
 import time
@@ -133,18 +134,18 @@ def circular_mean(angles):
 def recluster(angles):
     # rotate the data so the circular mean is 0
     circular_means = circular_mean(angles)
-    print("angles shape:", angles.shape)
-    print("circular_means shape:", circular_means.shape)
-    print("circular_means:", circular_means)
-    print("angles:", angles)
+    # print("angles shape:", angles.shape)
+    # print("circular_means shape:", circular_means.shape)
+    # print("circular_means:", circular_means)
+    # print("angles:", angles)
     angles = angles - circular_means[None, :]
-    print("angles adjusted (before wrap):", angles)
+    # print("angles adjusted (before wrap):", angles)
     new_circular_means = circular_mean(angles)
-    print("new_circular_means:", new_circular_means)
+    # print("new_circular_means:", new_circular_means)
     angles = tf.where(angles < -np.pi, angles+np.pi*2, angles)
     angles = tf.where(angles > np.pi, angles-np.pi*2, angles)
-    print("angles adjusted (after wrap):", angles)
-    return angles, circular_means
+    # print("angles adjusted (after wrap):", angles)
+    return angles
 
 class Datasets:
     
@@ -272,8 +273,8 @@ class Datasets:
         n_total_frames = tf.shape(angles)[0]
         
         n_dof = tf.shape(angles)[1]
-        n_chunk_frames = self.config.dataset.n_frames
-        i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames*n_dof-n_chunk_frames*n_dof, dtype=tf.int32)
+        n_chunk_frames = self.config.dataset.n_frames // self.config.dataset.resample_time
+        # i = tf.random.uniform(shape=[], minval=0, maxval=n_total_frames*n_dof-n_chunk_frames*n_dof, dtype=tf.int32)
         # angles = tf.reshape(angles, [-1])[i:i+n_chunk_frames*n_dof]
         # idxs = tf.range(i%n_dof, i%n_dof+n_chunk_frames*n_dof)
         
@@ -281,12 +282,18 @@ class Datasets:
         frame_idxs = tf.range(frame_i, frame_i+n_chunk_frames)
         frame_idxs = tf.reshape(frame_idxs, [n_chunk_frames, 1])
         frame_idxs = tf.tile(frame_idxs, [1, n_dof])
+        frame_idxs = tf.reshape(frame_idxs, [-1])
 
         dof_idxs = tf.range(n_dof)
         dof_idxs = tf.reshape(dof_idxs, [1, n_dof])
         dof_idxs = tf.tile(dof_idxs, [n_chunk_frames, 1])
         
-        return angles, frame_idxs, dof_idxs
+        # add channel dim
+        chunk = angles[frame_i:frame_i+self.config.dataset.n_frames, :, None]
+        chunk = tf.image.resize(chunk, [n_chunk_frames, n_dof])
+        chunk = tf.reshape(chunk, [-1])
+        # TODO output dof_idxs, hack when making LSTM
+        return chunk, frame_idxs#, dof_idxs
 
     def chunk_flatten_add_idxs(self, angles):
         n_total_frames = tf.shape(angles)[0]
@@ -433,11 +440,11 @@ class Datasets:
 
         dataset_train = (
             dataset_train
-            .map(self.chunk_flatten_add_idxs)
+            .map(self.chunk_flatten_add_multiidxs)
         )
         dataset_test = (
             dataset_test
-            .map(self.chunk_flatten_add_idxs)
+            .map(self.chunk_flatten_add_multiidxs)
         )
         
         dataset_test = (
