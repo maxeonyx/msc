@@ -10,9 +10,10 @@ def circular_mean(angles, axis=0):
     circular_means = tf.math.atan2(means_sin_a, means_cos_a)
     return circular_means
 
-def recluster(angles, frame_axis=0):
-    # rotate the data so the circular mean is 0
-    circular_means = circular_mean(angles, axis=frame_axis)
+def recluster(angles, frame_axis=0, circular_means=None):
+    if circular_means is None: 
+        # rotate the data so the circular mean is 0
+        circular_means = circular_mean(angles, axis=frame_axis)
     angles = angles - tf.expand_dims(circular_means, axis=frame_axis)
     angles = tf.where(angles < -np.pi, angles+np.pi*2, angles)
     angles = tf.where(angles > np.pi, angles-np.pi*2, angles)

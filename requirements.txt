@@ -14,3 +14,4 @@ tensorflow_probability ~= 0.16
 python-box ~= 6.0
 randomname ~= 0.1
 ipympl ~= 0.9
+transformers ~= 4.19
