@@ -7,6 +7,7 @@ import sys
 from dotmap import DotMap as dm
 
 from .data_bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
+from ml import util
 
 # assumes running with working directory as root of the repo
 DEFAULT_BVH_DIR = "./BVH"
@@ -41,7 +42,7 @@ def extract_bvh_file(file_content):
     return dm({
         "n_frames": n_frames,
         "frame_time_s": frame_time_s,
-        "data": np.array(nums),
+        "data": np.array(nums, dtype=np.float32),
     })
 
 def bvh_is_hand(file_content):
@@ -231,6 +232,55 @@ def np_dataset(force=False, convert_deg_to_rad=True):
     np.save(ds_path, data, allow_pickle=True)
 
     return data
+
+dataset_means_cache = None
+def dataset_means():
+    """
+    Compute the circular means of the dataset
+    1 mean per track, after concatenating all examples on the time dim.
+    """
+    global dataset_means_cache
+    if dataset_means_cache is None:
+        d = np_dataset()
+        dd = np.concatenate(d[:, 1])
+        dataset_means_cache = util.circular_mean(dd, axis=0)
+    
+    return dataset_means_cache
+
+def reclustered_dataset(dataset=None):
+
+    if dataset is None:
+        dataset = np_dataset()
+    means = dataset_means()
+    for i in range(dataset.shape[0]):
+        dataset[i, 1] = util.recluster(dataset[i, 1], frame_axis=0, circular_means=means)
+    
+    return dataset
+
+def np_decimated_time_dim(force=False, norm_diff=1.0):
+
+    d = np_dataset(force)
+    rc_d = reclustered_dataset(dataset=d)
+
+    # use diff norm from reclustered dataset to avoid wrapping artifacts
+
+    for i_example in range(d.shape[0]):
+        rc_track = rc_d[i_example, 1]
+        d_track = d[i_example, 1]
+        prev_rc = rc_track[0]
+        prev_d = d_track[0]
+        new_track = [d_track[0]]
+        for i_frame in range(1, rc_track.shape[0]):
+            curr = rc_track[i_frame]
+            diff = np.linalg.norm(curr - prev_rc)
+            if diff > norm_diff:
+                new_track.append(prev_d)
+                prev_rc = curr
+                prev_d = d_track[i_frame]
+        
+        d[i_example, 1] = np.array(new_track)
+    
+    return d
 
 def load_one_bvh_file(filename, convert_deg_to_rad=True):
     """

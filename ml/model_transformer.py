@@ -17,7 +17,7 @@ class WarmupLRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             self.other_schedule = keras.optimizers.schedules.ExponentialDecay(
                 initial_learning_rate=peak_learning_rate,
                 decay_steps=1000,
-                decay_rate=0.99
+                decay_rate=0.96
             )
 
 
@@ -73,9 +73,9 @@ def scaled_dot_product_attention(k, q, v, mask):
 def multi_head_attention(cfg):
     embd_dim, n_heads = cfg.embd_dim, cfg.n_heads
     
-    wk = layers.Dense(embd_dim)
-    wq = layers.Dense(embd_dim)
-    wv = layers.Dense(embd_dim)
+    wk = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
+    wq = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
+    wv = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
     
     assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
     head_width = embd_dim//n_heads
@@ -108,23 +108,30 @@ def multi_head_attention(cfg):
     return call
 
 def pointwise_feedforward_layer(cfg, output_layer, n_hidden_layers=1, dtype=None):
-    hidden_layers = [layers.Dense(cfg.ffl_dim) for _ in range(n_hidden_layers)]
-    dtype = dtype or tf.keras.mixed_precision.global_policy()
 
-    
+
     if cfg.activation == 'relu':
-        activation_fn = tf.nn.relu
+        activation_fn = keras.activations.relu
     elif cfg.activation == 'swish':
-        activation_fn = tf.nn.silu
+        activation_fn = keras.activations.swish
     elif cfg.activation == 'gelu':
-        activation_fn = tf.nn.gelu
+        activation_fn = keras.activations.gelu
     else:
         raise ValueError('Unknown activation function: {}'.format(cfg.activation))
+
+    hidden_layers = [
+        keras.Sequential([
+            layers.Dense(cfg.ffl_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range)),
+            layers.Dropout(cfg.dropout_rate),
+            activation_fn,
+        ]) for _ in range(n_hidden_layers)
+    ]
+    dtype = dtype or tf.keras.mixed_precision.global_policy()
+
     
     def call(x):
         for layer in hidden_layers:
             x = layer(x)
-            x = activation_fn(x)
         if output_layer is not None:
             x = output_layer(x)
         return x
@@ -140,7 +147,7 @@ def transformer_layer(cfg):
     def call(kv_embd, q_embd, mask):
         x = q_embd
         out1 = layernorm1(dropout1(kv_embd)) # prenorm
-        attn_out, attn_weights = mha(out1, q_embd, out1, mask)
+        attn_out, attn_weights = mha(out1, out1, out1, mask)
         x += attn_out
 
         out2 = layernorm2(dropout2(x)) # prenorm
@@ -159,28 +166,17 @@ def gpt(cfg):
         return embd
     return call
 
-class Transformer(Model):
-    def __init__(self, cfg, embedder, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.cfg = cfg
-        self.embedder = embedder
-        self.transformer = gpt(cfg | cfg.transformer)
-    
-    def call(self, inputs):
-        embd = self.embedder.embed_sequence_with_begin_sentinel(inputs)
-        seq_len = tf.shape(embd)[1]
-        enc_mask = create_look_backward_equal_mask(seq_len, seq_len)
-        embd = self.transformer(embd, enc_mask)
-        angles = self.embedder.unembed(embd)
-        return angles
+class FeedforwardWrapper(Model):
 
     def predict(self, x, y, n_frames):
         x = x.copy()
 
         batch_size = tf.shape(x["angles"])[0]
 
-        angles = self(x)
+        output = self(x)
+        angles = self.prediction_head.sample(output)
+        if not self.prediction_head.sample_is_mean:
+            pred_angles_mean = self.prediction_head.mean(output)
         frame_idxs = x["frame_idxs"]
         hand_idxs = x["hand_idxs"]
         dof_idxs = x["dof_idxs"]
@@ -202,13 +198,39 @@ class Transformer(Model):
                     hand_idxs = tf.concat([hand_idxs, tile_batch_seq(i_hand)], axis=-1)
                     dof_idxs  = tf.concat([dof_idxs,  tile_batch_seq(i_dof)],  axis=-1)
 
-                    new_angles = self({
+                    output = self({
                         "angles": angles,
                         "frame_idxs": frame_idxs,
                         "hand_idxs": hand_idxs,
                         "dof_idxs": dof_idxs,
-                    })[..., -1:] # transformer outputs a sequence, but we only need the new token
+                    })[..., -1:, :] # transformer outputs a sequence, but we only need the new token
+
+                    new_angles = self.prediction_head.sample(output)
+                    if not self.prediction_head.sample_is_mean:
+                        new_pred_angles_mean = self.prediction_head.mean(output)
 
                     angles = tf.concat([angles, new_angles], axis=-1)
+                    if not self.prediction_head.sample_is_mean:
+                        pred_angles_mean = tf.concat([pred_angles_mean, new_pred_angles_mean], axis=-1)
 
-        return angles[..., :-1] # remove last output because otherwise we have n+1 which doesn't evenly divide
+        if not self.prediction_head.sample_is_mean:
+            return angles[..., :-1], pred_angles_mean[..., :-1]
+        return angles[..., :-1], None # remove last output because otherwise we have n+1 which doesn't evenly divide
+
+
+class Transformer(FeedforwardWrapper):
+    def __init__(self, cfg, embedder, prediction_head, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.cfg = cfg
+        self.embedder = embedder
+        self.prediction_head = prediction_head
+        self.transformer = gpt(cfg | cfg.transformer)
+    
+    def call(self, inputs):
+        embd = self.embedder.embed_sequence_with_begin_sentinel(inputs, length=self.cfg.n_hands * self.cfg.n_dof)
+        embd = embd[..., :-(self.cfg.n_hands*self.cfg.n_dof-1), :]
+        seq_len = tf.shape(embd)[1]
+        enc_mask = tf.eye(seq_len)
+        embd = self.transformer(embd, enc_mask)
+        return self.prediction_head.unembed(embd)

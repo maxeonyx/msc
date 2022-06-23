@@ -3,39 +3,26 @@ Takes a np BVH dataset and returns a model-agnostic tf.data.Dataset pipeline, wh
 """
 
 import sys
+import math
 
 import numpy as np
 import tensorflow as tf
 
+from ml import util
+
 from . import data_bvh
 
 
-def add_idx_arrays(filename, angles):
+def add_idx_arrays(x, frame_idxs_only=False):
     """
     Add idx arrays to the dataset
     """
-    shape = tf.shape(angles)
-    return {
-        "filename": filename,
-        "angles": angles,
+    shape = tf.shape(x["angles"])
+    return x | {
         "frame_idxs": tf.tile(tf.range(shape[0])[:, None, None], (1, shape[1], shape[2])),
         "hand_idxs": tf.tile(tf.range(shape[1])[None, :, None], (shape[0], 1, shape[2])),
         "dof_idxs": tf.tile(tf.range(shape[2])[None, None, :], (shape[0], shape[1], 1)),
     }
-
-# cut a fixed size chunk from the tensor at a random frame index
-def random_chunk(cfg, x):
-    shape = tf.shape(x["angles"])
-    n_frames = shape[0]
-    # get a random index
-    idx = tf.random.uniform([], minval=0, maxval=n_frames-cfg.chunk_size, dtype=tf.int32)
-
-    x["angles"] = x["angles"][idx:idx+cfg.chunk_size, :, :]
-    x["frame_idxs"] = x["frame_idxs"][:cfg.chunk_size, :, :]
-    x["hand_idxs"] = x["hand_idxs"][idx:idx+cfg.chunk_size, :, :]
-    x["dof_idxs"] = x["dof_idxs"][idx:idx+cfg.chunk_size, :, :]
-
-    return x
 
 # flatten the angle and *_idx tensors
 def flatten(x):
@@ -72,7 +59,7 @@ def frame_idxs_for(cfg, offset_in_frame, seq_length):
 
 
 # cut a fixed size chunk from the tensor at a random token index
-def random_flat_chunk(cfg, x, aligned=False):
+def random_flat_chunk(cfg, size, x, aligned=False):
     shape = tf.shape(x["angles"])
     n_frames = shape[0]
     
@@ -82,7 +69,7 @@ def random_flat_chunk(cfg, x, aligned=False):
     x["dof_idxs"] = tf.reshape(x["dof_idxs"], [-1])
     
     tok_per_frame = cfg.n_hands * cfg.n_dof
-    chunk_size = cfg.chunk_size
+    chunk_size = size
     chunk_toks = chunk_size * tok_per_frame
 
     if aligned:
@@ -105,42 +92,6 @@ def random_flat_chunk(cfg, x, aligned=False):
 
     return x
 
-# cut a fixed size chunk from the tensor at a random token index
-def random_flat_chunk_batched(cfg, x, aligned=False):
-    shape = tf.shape(x["angles"])
-    batch_size = shape[0]
-    n_frames = shape[1]
-
-    x["angles"] = tf.reshape(x["angles"], [batch_size, -1])
-    x["frame_idxs"] = tf.reshape(x["frame_idxs"], [batch_size, -1])
-    x["hand_idxs"] = tf.reshape(x["hand_idxs"], [batch_size, -1])
-    x["dof_idxs"] = tf.reshape(x["dof_idxs"], [batch_size, -1])
-    
-    tok_per_frame = cfg.n_hands * cfg.n_dof
-    chunk_size = cfg.chunk_size
-    chunk_toks = chunk_size * tok_per_frame
-
-    if aligned:
-        # get a random index
-        idx = tf.random.uniform([batch_size], minval=0, maxval=n_frames-chunk_size, dtype=tf.int32)
-        idx = idx * tok_per_frame
-    else:
-        idx = tf.random.uniform([batch_size], minval=0, maxval=n_frames*tok_per_frame-chunk_toks, dtype=tf.int32)
-
-    batch_i = tf.stack([tf.tile(tf.range(batch_size)[:, None], [1, chunk_toks]), idx[:, None] + tf.range(chunk_toks)[None, :]], axis=-1)
-    print(batch_i)
-    x["angles"] = tf.gather_nd(x["angles"], batch_i)
-    print(x["angles"])
-    if cfg.relative_frame_idxs:
-        x["frame_idxs"] = tf.vectorized_map(lambda i: frame_idxs_for(cfg, i % tok_per_frame, chunk_toks), idx)
-    else:
-        x["frame_idxs"] = tf.gather_nd(x["frame_idxs"], batch_i)
-
-
-    x["hand_idxs"] = tf.gather_nd(x["hand_idxs"], batch_i)
-    x["dof_idxs"] = tf.gather_nd(x["dof_idxs"], batch_i)
-
-    return x
 
 def to_train_input_and_target(cfg, x):
     inp = x.copy()
@@ -150,11 +101,21 @@ def to_train_input_and_target(cfg, x):
     inp["hand_idxs"] = inp["hand_idxs"][..., :-1]
     inp["dof_idxs"] = inp["dof_idxs"][..., :-1]
 
+    inp_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof - 1]
+    inp["angles"] = tf.ensure_shape(inp["angles"], inp_shape)
+    inp["frame_idxs"] = tf.ensure_shape(inp["frame_idxs"], inp_shape)
+    inp["hand_idxs"] = tf.ensure_shape(inp["hand_idxs"], inp_shape)
+    inp["dof_idxs"] = tf.ensure_shape(inp["dof_idxs"], inp_shape)
+
     if cfg.target_is_sequence:
         tar = x["angles"]
-        tf.ensure_shape(tar, [cfg.chunk_size * cfg.n_hands * cfg.n_dof])
+        tar = tf.ensure_shape(tar, [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof])
     else:
         tar = x["angles"][..., -1]
+    
+    # rescale targets to match the embedded inputs
+    if cfg.scale_to_1_1:
+        tar = tar / math.pi
 
     return (inp, tar)
 
@@ -186,6 +147,19 @@ def subset(cfg, x):
     return x
 
 
+def recluster(filename, angles):
+    means = data_bvh.dataset_means()
+    angles = util.recluster(angles, frame_axis=0, circular_means=means)
+
+    return filename, angles
+
+def to_dict(filename, angles):
+    return {
+        "filename": filename,
+        "angles": angles,
+    }
+
+
 # take np BVH dataset and return angles, hand idxs, frame idxs, and dof idxs
 def tf_dataset(cfg):
     """
@@ -208,27 +182,41 @@ def tf_dataset(cfg):
             create_dataset = True
     
     if create_dataset:
+
+        if cfg.decimated:
+            np_d = data_bvh.np_decimated_time_dim(cfg.force)
+        else:
+            np_d = data_bvh.np_dataset(cfg.force)
+
         dataset = tf.data.Dataset.from_generator(
-            lambda: data_bvh.get_bvh_data(convert_deg_to_rad=cfg.convert_deg_to_rad),
+            lambda: ((filename, angle) for filename, angle in np_d),
             output_signature=(
                 tf.TensorSpec(name="filename", shape=(), dtype=tf.string),
-                tf.TensorSpec(name="angles", shape=[None, cfg.n_hands, cfg.n_dof], dtype=tf.float32),
+                tf.TensorSpec(name="angles", shape=[None, 2, 23], dtype=tf.float32),
             )
         )
 
-        dataset = dataset.map(add_idx_arrays)
+        if cfg.recluster:
+            dataset = dataset.map(recluster)
 
-        tf.data.experimental.save(dataset, cfg.cached_dataset_path)
+        dataset = dataset.snapshot(cfg.cached_dataset_path)
+    
+    if cfg.vector:
+        return tf_dataset_vector(cfg, dataset)
+    else:
+        return tf_dataset_scalar(cfg, dataset)
 
-    dataset = dataset.cache()
-
+def tf_dataset_scalar(cfg, dataset):
     dataset = dataset.repeat()
     dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
+    
+    dataset = dataset.map(to_dict)
 
+    dataset = dataset.map(add_idx_arrays)
     dataset = dataset.map(lambda x: subset(cfg, x))
     
     # train input isn't always frame aligned
-    train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, x))
+    train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
     train_dataset = train_dataset.batch(cfg.batch_size)
     # split into input and target, with 1 token offset
     train_dataset = train_dataset.map(lambda x: to_train_input_and_target(cfg, x))
@@ -236,10 +224,42 @@ def tf_dataset(cfg):
 
     # test input is always frame-aligned
     # take fixed size chunks from the tensor at random frame indices
-    test_dataset = dataset.map(lambda x: random_flat_chunk(cfg, x, aligned=True))
+    test_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size + cfg.predict_frames, x, aligned=True))
     test_dataset = test_dataset.map(lambda x: to_test_input_and_target(cfg, x))
     # test dataset doesn't need to be split
     test_dataset = test_dataset.batch(1)
 
     return train_dataset, test_dataset
+
+def add_frame_idxs(x):
+    x["frame_idxs"] = tf.range(tf.shape(x["angles"])[0])
+    return x
+
+def to_sin_cos(x):
+    sin = tf.sin(x["angles"])
+    cos = tf.cos(x["angles"])
+    x["angles"] = tf.stack([sin, cos], axis=-1)
+    return x
     
+def tf_dataset_vector(cfg, dataset):
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
+    dataset = dataset.map(to_dict)
+    dataset = dataset.map(add_idx_arrays)
+    dataset = dataset.map(lambda x: subset(cfg, x))
+    
+    # train input isn't always frame aligned
+    train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
+    train_dataset = train_dataset.batch(cfg.batch_size)
+    # split into input and target, with 1 token offset
+    train_dataset = train_dataset.map(lambda x: to_train_input_and_target(cfg, x))
+    train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
+
+    # test input is always frame-aligned
+    # take fixed size chunks from the tensor at random frame indices
+    test_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size + cfg.predict_frames, x, aligned=True))
+    test_dataset = test_dataset.map(lambda x: to_test_input_and_target(cfg, x))
+    # test dataset doesn't need to be split
+    test_dataset = test_dataset.batch(1)
+
+    return train_dataset, test_dataset
