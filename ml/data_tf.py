@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 import tensorflow as tf
+from einops import rearrange, reduce, repeat
 
 from ml import util
 
@@ -17,7 +18,7 @@ def add_idx_arrays(x, frame_idxs_only=False):
     """
     Add idx arrays to the dataset
     """
-    shape = tf.shape(x["angles"])
+    shape = x["angles"].bounding_shape()
     return x | {
         "frame_idxs": tf.tile(tf.range(shape[0])[:, None, None], (1, shape[1], shape[2])),
         "hand_idxs": tf.tile(tf.range(shape[1])[None, :, None], (shape[0], 1, shape[2])),
@@ -140,9 +141,6 @@ def subset(cfg, x):
     Slice just some of the data.
     """
     x["angles"] = x["angles"][:, :cfg.n_hands, :cfg.n_dof]
-    x["frame_idxs"] = x["frame_idxs"][:, :cfg.n_hands, :cfg.n_dof]
-    x["hand_idxs"] = x["hand_idxs"][:, :cfg.n_hands, :cfg.n_dof]
-    x["dof_idxs"] = x["dof_idxs"][:, :cfg.n_hands, :cfg.n_dof]
 
     return x
 
@@ -170,36 +168,18 @@ def tf_dataset(cfg):
     each with shape (n_hands, n_frames, n_dof)
     """
 
-    if cfg.force:
-        print(f"Forcing creation of {cfg.cached_dataset_path}", file=sys.stderr)
-        create_dataset = True
+    if cfg.decimated:
+        np_d = data_bvh.np_decimated_time_dim(cfg.force)
     else:
-        try:
-            dataset = tf.data.experimental.load(cfg.cached_dataset_path)
-            create_dataset = False
-        except tf.errors.NotFoundError as f:
-            print(f"{cfg.cached_dataset_path} not found, creating...", file=sys.stderr)
-            create_dataset = True
+        np_d = data_bvh.np_dataset(cfg.force)
     
-    if create_dataset:
+    if cfg.recluster:
+        np_d = data_bvh.reclustered_dataset(np_d)
 
-        if cfg.decimated:
-            np_d = data_bvh.np_decimated_time_dim(cfg.force)
-        else:
-            np_d = data_bvh.np_dataset(cfg.force)
+    dataset = tf.data.Dataset.from_tensor_slices((tf.constant(np_d[:, 0]), tf.ragged.constant(np_d[:, 1])))
 
-        dataset = tf.data.Dataset.from_generator(
-            lambda: ((filename, angle) for filename, angle in np_d),
-            output_signature=(
-                tf.TensorSpec(name="filename", shape=(), dtype=tf.string),
-                tf.TensorSpec(name="angles", shape=[None, 2, 23], dtype=tf.float32),
-            )
-        )
-
-        if cfg.recluster:
-            dataset = dataset.map(recluster)
-
-        dataset = dataset.snapshot(cfg.cached_dataset_path)
+    dataset = dataset.snapshot(cfg.cached_dataset_path)
+    dataset = dataset.cache()
     
     if cfg.vector:
         return tf_dataset_vector(cfg, dataset)
@@ -207,13 +187,13 @@ def tf_dataset(cfg):
         return tf_dataset_scalar(cfg, dataset)
 
 def tf_dataset_scalar(cfg, dataset):
-    dataset = dataset.repeat()
-    dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
     
     dataset = dataset.map(to_dict)
-
-    dataset = dataset.map(add_idx_arrays)
     dataset = dataset.map(lambda x: subset(cfg, x))
+    dataset = dataset.map(add_idx_arrays)
+
+    dataset = dataset.repeat()
+    dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
     
     # train input isn't always frame aligned
     train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
@@ -238,26 +218,40 @@ def add_frame_idxs(x):
 def to_sin_cos(x):
     sin = tf.sin(x["angles"])
     cos = tf.cos(x["angles"])
-    x["angles"] = tf.stack([sin, cos], axis=-1)
+    x["angles"] = rearrange([sin, cos], 'sincos ... -> ... sincos')
+    return x
+
+
+def random_flat_vector_chunk(cfg, x):
+    """
+    Take a random flat chunk of the dataset.
+    """
+
+    n_frames = x["angles"].shape[0]
+    i = tf.random.uniform(shape=(), minval=0, maxval=n_frames-cfg.chunk_size, dtype=tf.int32)
+
+    x["angles"] = x["angles"][i:i+cfg.chunk_size]
+
     return x
     
 def tf_dataset_vector(cfg, dataset):
+
+    dataset = dataset.map(to_dict)
+    dataset = dataset.map(lambda x: subset(cfg, x))
+    dataset = dataset.map(add_frame_idxs)
+
     dataset = dataset.repeat()
     dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
-    dataset = dataset.map(to_dict)
-    dataset = dataset.map(add_idx_arrays)
-    dataset = dataset.map(lambda x: subset(cfg, x))
     
-    # train input isn't always frame aligned
-    train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
+    dataset = dataset.map(lambda x: random_flat_vector_chunk(cfg, x))
+    dataset = dataset.map(to_sin_cos)
+
     train_dataset = train_dataset.batch(cfg.batch_size)
     # split into input and target, with 1 token offset
     train_dataset = train_dataset.map(lambda x: to_train_input_and_target(cfg, x))
     train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     # test input is always frame-aligned
-    # take fixed size chunks from the tensor at random frame indices
-    test_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size + cfg.predict_frames, x, aligned=True))
     test_dataset = test_dataset.map(lambda x: to_test_input_and_target(cfg, x))
     # test dataset doesn't need to be split
     test_dataset = test_dataset.batch(1)

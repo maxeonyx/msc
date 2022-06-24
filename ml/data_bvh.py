@@ -259,6 +259,16 @@ def reclustered_dataset(dataset=None):
 
 def np_decimated_time_dim(force=False, norm_diff=1.0):
 
+    ds_path = "./cache/np_dataset_decimated.npy"
+
+    if not force:
+        try:
+            return np.load(ds_path, allow_pickle=True)
+        except FileNotFoundError as f:
+            print(f'Couldnt load saved dataset, generating a fresh dataset to "{ds_path}" ...', file=sys.stderr)
+    else:
+        print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
+
     d = np_dataset(force)
     rc_d = reclustered_dataset(dataset=d)
 
@@ -279,6 +289,8 @@ def np_decimated_time_dim(force=False, norm_diff=1.0):
                 prev_d = d_track[i_frame]
         
         d[i_example, 1] = np.array(new_track)
+
+    np.save(ds_path, d, allow_pickle=True)
     
     return d
 

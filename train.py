@@ -29,20 +29,20 @@ cfg = config.get()
 cfg.force = False
 d, d_test = data_tf.tf_dataset(cfg)
 
-prediction_head = MSE_angle()
+prediction_head = VonMises()
 embedder = AllIndicesConcatEmbedder(cfg)
 
 # model = Dumb(cfg, embedder, prediction_head)
 # model = Conv(cfg, embedder, prediction_head)
-model = Transformer(cfg, embedder, prediction_head)
+model = KerasTransformer(cfg, embedder, prediction_head)
 # model = RecurrentWrapper(cfg, ParallelLSTM(cfg), embedder, prediction_head)
 
-# optimizer = keras.optimizers.Adam(learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
-optimizer = keras.optimizers.Adam()
+optimizer = keras.optimizers.SGD(momentum=0.9, learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
+# optimizer = keras.optimizers.Adam()
 model.compile(loss=prediction_head.loss, optimizer=optimizer)
 
 log_dir = f"./runs/{run_name}"
-model.fit(d, steps_per_epoch=3000, epochs=8, callbacks=[
+model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
     viz.VizCallback(cfg, iter(d_test), log_dir + "/train"),
     keras.callbacks.TensorBoard(log_dir=log_dir),
 ])

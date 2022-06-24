@@ -27,144 +27,6 @@ class WarmupLRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             true_fn=lambda: self.peak_learning_rate * tf.cast(step, tf.float32) / tf.cast(self.warmup_steps, tf.float32),
             false_fn=lambda: self.other_schedule(step)
         )
-    
-
-
-def create_look_backward_equal_mask(size_q, size_k):
-    mask = 1 - tf.linalg.band_part(tf.ones((size_q, size_k)), -1, 0)
-    return mask  # (size_q, size_k)
-
-def create_look_backward_mask(size_q, size_k):
-    mask = tf.linalg.band_part(tf.ones((size_q, size_k)), 0, -1)
-    return mask  # (size_q, size_k)
-
-def create_look_forward_mask(size_q, size_k):
-    return tf.transpose(create_look_backward_mask(size_k, size_q))
-
-def create_look_forward_equal_mask(size_q, size_k):
-    return tf.transpose(create_look_backward_equal_mask(size_k, size_q))
-
-def scaled_dot_product_attention(k, q, v, mask):
-    batch_size = tf.shape(k)[0]
-    seq_len_kv = tf.shape(k)[-2]
-    kq_dim = tf.shape(k)[-1]
-    seq_len_q = tf.shape(q)[-2]
-    v_dim = tf.shape(v)[-1]
-    
-    dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-    
-    matmul_qk = tf.matmul(q, k, transpose_b=True)
-    # shape: (batch_size, n_heads, seq_len_q, seq_len_kv)
-    
-    dk = tf.cast(kq_dim, dtype=dtype)
-    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
-    scaled_attention_logits = tf.cast(scaled_attention_logits, tf.float32)
-    scaled_attention_logits += mask * -1e9 # batch dim broadcast
-    
-    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1) # sums to 1 along last axis
-    # shape: (batch_size, seq_len_q, seq_len_kv)
-    attention_weights = tf.cast(attention_weights, dtype)
-    
-    output = tf.matmul(attention_weights, v)
-    # shape: (batch_size, seq_len_q, v_dim)
-    
-    return output, attention_weights
-
-def multi_head_attention(cfg):
-    embd_dim, n_heads = cfg.embd_dim, cfg.n_heads
-    
-    wk = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
-    wq = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
-    wv = layers.Dense(embd_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range))
-    
-    assert embd_dim % n_heads == 0, "embd_dim must divide evenly into n_heads"
-    head_width = embd_dim//n_heads
-    
-    def split_heads(x):
-        xs = tf.shape(x)
-        # reshape from (batch_size, seq_length, embd_dim) to (batch_size, num_heads, seq_len, head_width)
-        x = tf.reshape(x, (xs[0], xs[1], n_heads, head_width))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
-    
-    def call(k, q, v, mask):
-        batch_size = tf.shape(k)[0]
-        
-        k = wk(k)
-        q = wq(q)
-        v = wv(v)
-        # shape: (batch_size, seq_len_*, embd_dim)
-        
-        k = split_heads(k)
-        q = split_heads(q)
-        v = split_heads(v)
-        # shape: (batch_size, num_heads, seq_len_*, head_width)
-        
-        scaled_attention, attention_weights = scaled_dot_product_attention(k, q, v, mask)
-        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
-        # (batch_size, seq_len, num_heads, depth)
-        output = tf.reshape(scaled_attention, (batch_size, -1, embd_dim))
-        # output = dense(output)
-        return output, attention_weights
-    return call
-
-def pointwise_feedforward_layer(cfg, output_layer, n_hidden_layers=1, dtype=None):
-
-
-    if cfg.activation == 'relu':
-        activation_fn = keras.activations.relu
-    elif cfg.activation == 'swish':
-        activation_fn = keras.activations.swish
-    elif cfg.activation == 'gelu':
-        activation_fn = keras.activations.gelu
-    else:
-        raise ValueError('Unknown activation function: {}'.format(cfg.activation))
-
-    hidden_layers = [
-        keras.Sequential([
-            layers.Dense(cfg.ffl_dim, kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=cfg.initializer_range)),
-            layers.Dropout(cfg.dropout_rate),
-            activation_fn,
-        ]) for _ in range(n_hidden_layers)
-    ]
-    dtype = dtype or tf.keras.mixed_precision.global_policy()
-
-    
-    def call(x):
-        for layer in hidden_layers:
-            x = layer(x)
-        if output_layer is not None:
-            x = output_layer(x)
-        return x
-    return call
-
-def transformer_layer(cfg):
-    mha = multi_head_attention(cfg)
-    ffl = pointwise_feedforward_layer(cfg, output_layer=layers.Dense(cfg.embd_dim))
-    layernorm1 = layers.LayerNormalization(epsilon=1e-6)
-    layernorm2 = layers.LayerNormalization(epsilon=1e-6)
-    dropout1 = layers.Dropout(cfg.dropout_rate)
-    dropout2 = layers.Dropout(cfg.dropout_rate)
-    def call(kv_embd, q_embd, mask):
-        x = q_embd
-        out1 = layernorm1(dropout1(kv_embd)) # prenorm
-        attn_out, attn_weights = mha(out1, out1, out1, mask)
-        x += attn_out
-
-        out2 = layernorm2(dropout2(x)) # prenorm
-        ffl_out = ffl(out2)
-        x += ffl_out
-
-        return x
-    return call
-
-# gpt style transformer
-def gpt(cfg):
-    enc_layers = [transformer_layer(cfg) for _ in range(cfg.n_enc_layers)]
-    def call(embd, enc_mask):
-        for enc_layer in enc_layers:
-            embd += enc_layer(embd, embd, mask=enc_mask)
-        return embd
-    return call
 
 class FeedforwardWrapper(Model):
 
@@ -218,19 +80,66 @@ class FeedforwardWrapper(Model):
         return angles[..., :-1], None # remove last output because otherwise we have n+1 which doesn't evenly divide
 
 
-class Transformer(FeedforwardWrapper):
+
+############ keras transformer impl
+
+def causal_attention_mask(batch_size, n_dest, n_src, dtype):
+    """
+    Mask the upper half of the dot product matrix in self attention.
+    This prevents flow of information from future tokens to current token.
+    1's in the lower triangle, counting from the lower right corner.
+    """
+    i = tf.range(n_dest)[:, None]
+    j = tf.range(n_src)
+    m = i >= j - n_src + n_dest
+    mask = tf.cast(m, dtype)
+    mask = tf.reshape(mask, [1, n_dest, n_src])
+    mult = tf.concat(
+        [tf.expand_dims(batch_size, -1), tf.constant([1, 1], dtype=tf.int32)], 0
+    )
+    return tf.tile(mask, mult)
+
+
+class TransformerBlock(layers.Layer):
+    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
+        super(TransformerBlock, self).__init__()
+        self.att = layers.MultiHeadAttention(num_heads, embed_dim)
+        self.ffn = keras.Sequential(
+            [layers.Dense(ff_dim, activation="relu"), layers.Dense(embed_dim),]
+        )
+        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
+        self.dropout1 = layers.Dropout(rate)
+        self.dropout2 = layers.Dropout(rate)
+
+    def call(self, inputs):
+        input_shape = tf.shape(inputs)
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+        causal_mask = causal_attention_mask(batch_size, seq_len, seq_len, tf.bool)
+        attention_output = self.att(inputs, inputs, attention_mask=causal_mask)
+        attention_output = self.dropout1(attention_output)
+        out1 = self.layernorm1(inputs + attention_output)
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout2(ffn_output)
+        return self.layernorm2(out1 + ffn_output)
+
+
+class KerasTransformer(FeedforwardWrapper):
     def __init__(self, cfg, embedder, prediction_head, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        cfg = cfg | cfg.transformer
         self.cfg = cfg
         self.embedder = embedder
         self.prediction_head = prediction_head
-        self.transformer = gpt(cfg | cfg.transformer)
+        self.transformer_layers = [
+            TransformerBlock(cfg.embd_dim, cfg.n_heads, cfg.ffl_dim, cfg.dropout_rate)
+            for _ in range(cfg.n_layers)
+        ]
     
     def call(self, inputs):
-        embd = self.embedder.embed_sequence_with_begin_sentinel(inputs, length=self.cfg.n_hands * self.cfg.n_dof)
-        embd = embd[..., :-(self.cfg.n_hands*self.cfg.n_dof-1), :]
-        seq_len = tf.shape(embd)[1]
-        enc_mask = tf.eye(seq_len)
-        embd = self.transformer(embd, enc_mask)
+        embd = self.embedder.embed_sequence_with_begin_sentinel(inputs, length=1)
+        for layer in self.transformer_layers:
+            embd = layer(embd)
         return self.prediction_head.unembed(embd)
