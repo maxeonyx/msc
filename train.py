@@ -1,6 +1,6 @@
 from cmath import e
 import os
-from trace import Trace
+import pickle
 
 from matplotlib import pyplot as plt
 import tensorboard
@@ -13,7 +13,7 @@ from ml.embed import *
 from ml.model_mlp import *
 from ml.model_lstm import *
 from ml.model_transformer import *
-from ml.losses import *
+from ml.prediction_heads import *
 
 try:
     run_name = os.environ["RUN_NAME"]
@@ -30,16 +30,16 @@ cfg.force = False
 d, d_test = data_tf.tf_dataset(cfg)
 
 prediction_head = VonMises()
-embedder = AllIndicesConcatEmbedder(cfg)
+embedder = AllIndicesAddEmbedder(cfg)
 
 # model = Dumb(cfg, embedder, prediction_head)
 # model = Conv(cfg, embedder, prediction_head)
 model = KerasTransformer(cfg, embedder, prediction_head)
-# model = RecurrentWrapper(cfg, ParallelLSTM(cfg), embedder, prediction_head)
+# model = RecurrentWrapper(cfg, ParallelLSTM(cfg | cfg.parallel_lstm), embedder, prediction_head)
 
 optimizer = keras.optimizers.SGD(momentum=0.9, learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
-# optimizer = keras.optimizers.Adam()
-model.compile(loss=prediction_head.loss, optimizer=optimizer)
+# optimizer = keras.optimizers.Adam(learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
+model.compile(loss=prediction_head.loss, optimizer=optimizer, metrics=[KerasLossWrapper(prediction_head.loss)])
 
 log_dir = f"./runs/{run_name}"
 model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
@@ -47,3 +47,8 @@ model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_pe
     keras.callbacks.TensorBoard(log_dir=log_dir),
 ])
 print(f"Finished run '{run_name}'")
+
+
+model.save(f"models/{run_name}")
+with open(f"models/{run_name}/custom_objects.pkl", "wb") as f:
+    pickle.dump(keras.utils.get_custom_objects(), f)

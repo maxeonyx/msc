@@ -1,14 +1,12 @@
 import io
+import math
+from einops import rearrange
 
 import tensorflow as tf
 import numpy as np
 from matplotlib import pyplot as plt
 
-from ml import data_bvh
-
-from . import util
-
-from ml.data_bvh import np_dataset
+from ml import data_bvh, util
 
 def plot_to_image(figure):
   """Converts the matplotlib plot specified by 'figure' to a PNG image and
@@ -22,8 +20,6 @@ def plot_to_image(figure):
   buf.seek(0)
   # Convert PNG buffer to TF image
   image = tf.image.decode_png(buf.getvalue(), channels=4)
-  # Add the batch dimension
-  image = tf.expand_dims(image, 0)
   return image
 
 
@@ -31,19 +27,26 @@ def plot_to_image(figure):
 class VizCallback(tf.keras.callbacks.Callback):
     def __init__(self, cfg, test_data_iter, log_dir):
         super(VizCallback, self).__init__()
+        self.writer = tf.summary.create_file_writer(log_dir)
         self.cfg = cfg
         self.test_data_iter = test_data_iter
-        self.log_dir = log_dir
-        self.test_inputs = [next(test_data_iter) for _ in range(cfg.n_test_samples)]
+        self.test_inputs = next(test_data_iter)
 
     def on_epoch_end(self, epoch, logs=None):
-        writer = tf.summary.create_file_writer(self.log_dir)
-        with writer.as_default():
-            for i, (x, y) in enumerate(self.test_inputs):
-                y_pred_samples, y_pred_mean = self.model.predict(x, y, n_frames=self.cfg.predict_frames)
-                img = plot_to_image(show_animations(self.cfg, y, y_pred_samples, y_pred_mean))
-                tf.summary.image(f"anim_track_{i+1}", img, step=epoch)
-        writer.close()
+        with self.writer.as_default():
+            x_batch, y_batch = self.test_inputs
+            y_pred_mean_batch, y_pred_sample_batch = self.model.predict(x_batch, n_frames=self.cfg.predict_frames)
+            imgs = []
+
+            if y_pred_sample_batch is None:
+                y_pred_sample_batch = [None for _ in range(y_pred_mean_batch.shape[0])]
+
+            for x, y, y_pred_mean, y_pred_sample in zip(x_batch, y_batch, y_pred_mean_batch, y_pred_sample_batch):
+                img = plot_to_image(show_animations(self.cfg, [y, y_pred_mean, y_pred_sample]))
+                imgs.append(img)
+            img = rearrange(imgs, "b h w c -> b h w c")
+            tf.summary.image(f"anim_tracks", img, step=epoch*self.cfg.steps_per_epoch)
+        
 
 
 def show_angles(cfg, ax, data):
@@ -53,33 +56,26 @@ def show_angles(cfg, ax, data):
     """
 
     data = tf.transpose(data, [1, 0])
-    ax.imshow(data[:, :].numpy())
+    ax.imshow(data[:, :].numpy(), vmin=-math.pi/2, vmax=math.pi/2, cmap="RdBu")
 
 
-def show_animations(cfg, tar_data, pred_data, pred_mean):
+def show_animations(cfg, data):
     """
     Show model input and output as reclustered images.
     Requires data be frame-aligned
     """
-        
-    fig, ax = plt.subplots(3 if pred_mean is not None else 2)
+    
+    num_figs = len(data)
 
-    tar_data = tar_data["angles"]
-    pred_data = pred_data
+    fig, ax = plt.subplots(num_figs)
 
     def reshape_data(data):
         n_frames = data.shape[-1] // (cfg.n_hands * cfg.n_dof)
         data = tf.reshape(data, [n_frames, cfg.n_hands * cfg.n_dof])
         return data
 
-    tar_data = reshape_data(tar_data)
-    pred_data = reshape_data(pred_data)
-    if pred_mean is not None:
-        pred_mean = reshape_data(pred_mean)
-
-    show_angles(cfg, ax[0], tar_data)
-    show_angles(cfg, ax[1], pred_data)
-    if pred_mean is not None:
-        show_angles(cfg, ax[2], pred_mean)
+    for i, d in enumerate(data):
+        d = reshape_data(d)
+        show_angles(cfg, ax[i], d)
 
     return fig

@@ -1,12 +1,15 @@
-import tensorflow as tf
-import numpy as np
+
 import os
 import re
 import sys
+import pickle
+
+import tensorflow as tf
+import numpy as np
 
 from dotmap import DotMap as dm
 
-from .data_bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
+from ml.data_bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
 from ml import util
 
 # assumes running with working directory as root of the repo
@@ -197,7 +200,46 @@ def get_bvh_data(bvh_dir=None, convert_deg_to_rad=True):
         if convert_deg_to_rad:
             data = data / 360 * (2*np.pi)
         
-        yield name, data
+        yield name, data, data.shape[0]
+
+def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True):
+    """
+    Get a numpy dataset of all the BVH data in the manipnet dataset.
+
+    >>> len(np_dataset_parallel_lists())
+    3
+
+    >>> len(np_dataset_parallel_lists()[0])
+    62
+
+    >>> np_dataset_parallel_lists()[0][0]
+    './BVH/bottle1_body1/'
+
+    >>> np_dataset_parallel_lists()[1][0].shape
+    (8000, 2, 23)
+
+    """
+
+    ds_path = "./cache/dataset.pickle"
+
+    if not force:
+        try:
+            with open(ds_path, "rb") as f:
+                return pickle.load(f)
+        except FileNotFoundError as f:
+            print(f'Couldnt load saved dataset, generating a fresh dataset to "{ds_path}" ...', file=sys.stderr)
+    else:
+        print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
+
+    data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
+    data.sort(key=lambda x: x[0])
+    # sort by filename
+    filenames, angles, n_frames = zip(*data)
+
+    with open(ds_path, "wb") as f:
+        pickle.dump((filenames, angles, n_frames), f)
+
+    return filenames, data, n_frames
 
 def np_dataset(force=False, convert_deg_to_rad=True):
     """
@@ -210,26 +252,28 @@ def np_dataset(force=False, convert_deg_to_rad=True):
     './BVH/bottle1_body1/'
 
     >>> np_dataset()[0, 1].shape
-    (2, 8000, 23)
+    (8000, 2, 23)
 
     """
 
-    ds_path = "./cache/np_dataset.npy"
+    ds_path = "./cache/dataset.npy"
 
     if not force:
         try:
-            return np.load(ds_path, allow_pickle=True)
+            with open(ds_path, "rb") as f:
+                return np.load(f, allow_pickle=True)
         except FileNotFoundError as f:
             print(f'Couldnt load saved dataset, generating a fresh dataset to "{ds_path}" ...', file=sys.stderr)
     else:
         print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
 
-    data = [x for x in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
-    data = np.array(data, dtype=object)
+    data = [(f, d, n) for f, d, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
+    data.sort(key=lambda x: x[0])
     # sort by filename
-    data = data[data[:, 0].argsort()]
+    data = np.array(data, dtype=object)
 
-    np.save(ds_path, data, allow_pickle=True)
+    with open(ds_path, "wb") as f:
+        np.save(f, data, allow_pickle=True)
 
     return data
 
@@ -257,21 +301,16 @@ def reclustered_dataset(dataset=None):
     
     return dataset
 
-def np_decimated_time_dim(force=False, norm_diff=1.0):
+def np_decimated_time_dim(datasets=None, force=False, norm_diff=1.0):
 
-    ds_path = "./cache/np_dataset_decimated.npy"
-
-    if not force:
-        try:
-            return np.load(ds_path, allow_pickle=True)
-        except FileNotFoundError as f:
-            print(f'Couldnt load saved dataset, generating a fresh dataset to "{ds_path}" ...', file=sys.stderr)
+    if datasets is None:
+        d = np_dataset(force)
+        rc_d = reclustered_dataset(dataset=d)
+    elif datasets[0] is not None and datasets[1] is None:
+        d, rc_d = datasets
+        rc_d = reclustered_dataset(dataset=d)
     else:
-        print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
-
-    d = np_dataset(force)
-    rc_d = reclustered_dataset(dataset=d)
-
+        d, rc_d = datasets
     # use diff norm from reclustered dataset to avoid wrapping artifacts
 
     for i_example in range(d.shape[0]):
@@ -289,8 +328,6 @@ def np_decimated_time_dim(force=False, norm_diff=1.0):
                 prev_d = d_track[i_frame]
         
         d[i_example, 1] = np.array(new_track)
-
-    np.save(ds_path, d, allow_pickle=True)
     
     return d
 

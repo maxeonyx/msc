@@ -5,7 +5,7 @@ import tensorflow as tf
 from tensorflow import keras
 from keras import layers, Model, Input
 
-from ml import data_tf
+from ml import data_tf, models
 
 class WarmupLRSchedule(keras.optimizers.schedules.LearningRateSchedule):
 
@@ -20,64 +20,20 @@ class WarmupLRSchedule(keras.optimizers.schedules.LearningRateSchedule):
                 decay_rate=0.96
             )
 
-
     def __call__(self, step):
         return tf.cond(
             pred=tf.less(step, self.warmup_steps),
             true_fn=lambda: self.peak_learning_rate * tf.cast(step, tf.float32) / tf.cast(self.warmup_steps, tf.float32),
             false_fn=lambda: self.other_schedule(step)
         )
+    
+    def get_config(self):
+        return {
+            'peak_learning_rate': self.peak_learning_rate,
+            'warmup_steps': self.warmup_steps,
+            'other_schedule': self.other_schedule
+        }
 
-class FeedforwardWrapper(Model):
-
-    def predict(self, x, y, n_frames):
-        x = x.copy()
-
-        batch_size = tf.shape(x["angles"])[0]
-
-        output = self(x)
-        angles = self.prediction_head.sample(output)
-        if not self.prediction_head.sample_is_mean:
-            pred_angles_mean = self.prediction_head.mean(output)
-        frame_idxs = x["frame_idxs"]
-        hand_idxs = x["hand_idxs"]
-        dof_idxs = x["dof_idxs"]
-        
-        start_frame = frame_idxs[..., -1] + 1
-        for i_frame in tf.range(start_frame, start_frame + n_frames):
-            for i_hand in tf.range(self.cfg.n_hands):
-                for i_dof in tf.range(self.cfg.n_dof):
-                    # tile a constant value to the batch dimension and len=1 seq dim
-                    tile_batch_seq = lambda x: tf.tile(x[None, None], [batch_size, 1])
-                    
-                    if self.cfg.relative_frame_idxs and not self.cfg.target_is_sequence:
-                        tile_batch = lambda x: tf.tile(x[None, :], [batch_size, 1])
-                        frame_idxs = tile_batch(data_tf.frame_idxs_for(self.cfg, i_hand * self.cfg.n_dof + i_dof, tf.shape(angles)[-1]))
-                    elif self.cfg.relative_frame_idxs:
-                        raise NotImplementedError("Transformer does not yet support relative frame indices")
-                    else:
-                        frame_idxs = tf.concat([frame_idxs, tile_batch_seq(i_frame)], axis=1)
-                    hand_idxs = tf.concat([hand_idxs, tile_batch_seq(i_hand)], axis=-1)
-                    dof_idxs  = tf.concat([dof_idxs,  tile_batch_seq(i_dof)],  axis=-1)
-
-                    output = self({
-                        "angles": angles,
-                        "frame_idxs": frame_idxs,
-                        "hand_idxs": hand_idxs,
-                        "dof_idxs": dof_idxs,
-                    })[..., -1:, :] # transformer outputs a sequence, but we only need the new token
-
-                    new_angles = self.prediction_head.sample(output)
-                    if not self.prediction_head.sample_is_mean:
-                        new_pred_angles_mean = self.prediction_head.mean(output)
-
-                    angles = tf.concat([angles, new_angles], axis=-1)
-                    if not self.prediction_head.sample_is_mean:
-                        pred_angles_mean = tf.concat([pred_angles_mean, new_pred_angles_mean], axis=-1)
-
-        if not self.prediction_head.sample_is_mean:
-            return angles[..., :-1], pred_angles_mean[..., :-1]
-        return angles[..., :-1], None # remove last output because otherwise we have n+1 which doesn't evenly divide
 
 
 
@@ -102,7 +58,7 @@ def causal_attention_mask(batch_size, n_dest, n_src, dtype):
 
 class TransformerBlock(layers.Layer):
     def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1):
-        super(TransformerBlock, self).__init__()
+        super().__init__()
         self.att = layers.MultiHeadAttention(num_heads, embed_dim)
         self.ffn = keras.Sequential(
             [layers.Dense(ff_dim, activation="relu"), layers.Dense(embed_dim),]
@@ -125,12 +81,10 @@ class TransformerBlock(layers.Layer):
         return self.layernorm2(out1 + ffn_output)
 
 
-class KerasTransformer(FeedforwardWrapper):
+class KerasTransformer(models.SequenceModelBase):
     def __init__(self, cfg, embedder, prediction_head, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+        super().__init__(cfg, *args, **kwargs)
         cfg = cfg | cfg.transformer
-        self.cfg = cfg
         self.embedder = embedder
         self.prediction_head = prediction_head
         self.transformer_layers = [

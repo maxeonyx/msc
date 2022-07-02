@@ -1,12 +1,11 @@
 import tensorflow as tf
-from keras import layers, Model, Sequential
+from keras import layers, Sequential
 
-from ml.model_transformer import FeedforwardWrapper
+from ml.models import *
 
-class Conv(FeedforwardWrapper):
+class Conv(SequenceModelBase):
     def __init__(self, cfg, embedder, prediction_head, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.cfg = cfg
+        super().__init__(cfg, *args, **kwargs)
         self.embedder = embedder
         self.prediction_head = prediction_head
         self.conv_layer = layers.Conv1D(filters=cfg.conv.filters, kernel_size=cfg.conv.width_frames*cfg.n_hands*cfg.n_dof, activation="relu", padding='valid')
@@ -17,10 +16,9 @@ class Conv(FeedforwardWrapper):
         outputs = self.prediction_head.unembed(embd)
         return outputs
 
-class Dumb(FeedforwardWrapper):
+class Dumb(SequenceModelBase):
     def __init__(self, cfg, embedder, prediction_head, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.cfg = cfg
+        super().__init__(cfg, *args, **kwargs)
         self.embedder = embedder
         self.prediction_head = prediction_head
         self.model = Sequential([
