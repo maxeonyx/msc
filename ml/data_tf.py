@@ -9,7 +9,7 @@ import numpy as np
 import tensorflow as tf
 from einops import rearrange, reduce, repeat
 
-from ml import util
+from ml import utils
 
 from . import data_bvh
 
@@ -104,15 +104,15 @@ def to_train_input_and_target(cfg, x):
     inp["hand_idxs"] = inp["hand_idxs"][..., :-1]
     inp["dof_idxs"] = inp["dof_idxs"][..., :-1]
 
-    inp_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof - 1]
-    inp["angles"] = tf.ensure_shape(inp["angles"], inp_shape)
-    inp["frame_idxs"] = tf.ensure_shape(inp["frame_idxs"], inp_shape)
-    inp["hand_idxs"] = tf.ensure_shape(inp["hand_idxs"], inp_shape)
-    inp["dof_idxs"] = tf.ensure_shape(inp["dof_idxs"], inp_shape)
+    # inp_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof - 1]
+    # inp["angles"] = tf.ensure_shape(inp["angles"], inp_shape)
+    # inp["frame_idxs"] = tf.ensure_shape(inp["frame_idxs"], inp_shape)
+    # inp["hand_idxs"] = tf.ensure_shape(inp["hand_idxs"], inp_shape)
+    # inp["dof_idxs"] = tf.ensure_shape(inp["dof_idxs"], inp_shape)
 
     if cfg.target_is_sequence:
         tar = x["angles"]
-        tar = tf.ensure_shape(tar, [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof])
+        # tar = tf.ensure_shape(tar, [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof])
     else:
         tar = x["angles"][..., -1]
     
@@ -150,7 +150,7 @@ def subset(cfg, x):
 
 
 def recluster(x, circular_means):
-    x["angles"] = util.recluster(x["angles"], frame_axis=0, circular_means=circular_means)
+    x["angles"] = utils.recluster(x["angles"], frame_axis=0, circular_means=circular_means)
     return x
 
 
@@ -177,7 +177,7 @@ def make_decimate_fn(cfg):
 
 def to_dict(filename, angles):
     return {
-        "filename": filename,
+        # "filename": filename,
         "angles": angles,
     }
 
@@ -228,7 +228,7 @@ def tf_dataset(cfg):
     dataset = dataset.map(lambda x: subset(cfg, x))
 
     if cfg.recluster:
-        circular_means = util.circular_mean(all_angles, axis=0)[:cfg.n_hands, :cfg.n_dof]
+        circular_means = utils.circular_mean(all_angles, axis=0)[:cfg.n_hands, :cfg.n_dof]
         dataset = dataset.map(lambda x: recluster(x, circular_means))
     
     if cfg.decimate:

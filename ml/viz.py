@@ -3,10 +3,7 @@ import math
 from einops import rearrange
 
 import tensorflow as tf
-import numpy as np
 from matplotlib import pyplot as plt
-
-from ml import data_bvh, util
 
 def plot_to_image(figure):
   """Converts the matplotlib plot specified by 'figure' to a PNG image and
@@ -22,20 +19,19 @@ def plot_to_image(figure):
   image = tf.image.decode_png(buf.getvalue(), channels=4)
   return image
 
-
-
 class VizCallback(tf.keras.callbacks.Callback):
-    def __init__(self, cfg, test_data_iter, log_dir):
+    def __init__(self, cfg, test_data_iter, predictor, log_dir):
         super(VizCallback, self).__init__()
         self.writer = tf.summary.create_file_writer(log_dir)
         self.cfg = cfg
         self.test_data_iter = test_data_iter
         self.test_inputs = next(test_data_iter)
+        self.predictor = predictor
 
     def on_epoch_end(self, epoch, logs=None):
         with self.writer.as_default():
             x_batch, y_batch = self.test_inputs
-            y_pred_mean_batch, y_pred_sample_batch = self.model.predict(x_batch, n_frames=self.cfg.predict_frames)
+            y_pred_mean_batch, y_pred_sample_batch = self.predictor(x_batch | { "n_frames": self.cfg.predict_frames })
             imgs = []
 
             if y_pred_sample_batch is None:
@@ -47,7 +43,6 @@ class VizCallback(tf.keras.callbacks.Callback):
             img = rearrange(imgs, "b h w c -> b h w c")
             tf.summary.image(f"anim_tracks", img, step=epoch*self.cfg.steps_per_epoch)
         
-
 
 def show_angles(cfg, ax, data):
     """

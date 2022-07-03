@@ -10,7 +10,7 @@ import numpy as np
 from dotmap import DotMap as dm
 
 from ml.data_bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
-from ml import util
+from ml import utils
 
 # assumes running with working directory as root of the repo
 DEFAULT_BVH_DIR = "./BVH"
@@ -287,7 +287,7 @@ def dataset_means():
     if dataset_means_cache is None:
         d = np_dataset()
         dd = np.concatenate(d[:, 1])
-        dataset_means_cache = util.circular_mean(dd, axis=0)
+        dataset_means_cache = utils.circular_mean(dd, axis=0)
     
     return dataset_means_cache
 
@@ -297,7 +297,7 @@ def reclustered_dataset(dataset=None):
         dataset = np_dataset()
     means = dataset_means()
     for i in range(dataset.shape[0]):
-        dataset[i, 1] = util.recluster(dataset[i, 1], frame_axis=0, circular_means=means)
+        dataset[i, 1] = utils.recluster(dataset[i, 1], frame_axis=0, circular_means=means)
     
     return dataset
 

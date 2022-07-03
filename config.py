@@ -25,7 +25,7 @@ def get():
         "predict_frames": 20,
         "test_batch_size": 3,
 
-        "batch_size": 16,
+        "batch_size": 12,
         "learning_rate": 0.05,
         "steps": 100,
         "steps_per_epoch": 100,

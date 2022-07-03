@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 
 import pickle
+import os
 
 import tensorflow as tf
 from tensorflow import keras
 from box import Box as b
 
-run_name = "forward_snipe"
+try:
+    run_name = os.environ["RUN_NAME"]
+except KeyError:
+    print("RUN_NAME not set. Must provide a name to run 'create_animation.py'.")
 
-with open(f"models/{run_name}/custom_objects.pkl", "rb") as f:
-    custom_objects = pickle.load(f)
-
-with keras.util.custom_object_scope(custom_objects):
-    model = keras.models.load_model(f"models/{run_name}")
+model = keras.models.load_model(f"models/{run_name}", compile=False)
 
 cfg = b(
     batch_size = 3,
@@ -25,7 +25,7 @@ x = {
     "dof_idxs": tf.zeros([cfg.batch_size, 0], dtype=tf.int32),
 }
 
-y_pred_mean_batch, y_pred_sample_batch = model.predict(x, None, n_frames=30)
+y_pred_mean_batch, y_pred_sample_batch = model.predict(x, 30)
 
 from ml import viz
 
