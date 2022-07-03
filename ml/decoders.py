@@ -5,12 +5,10 @@ from tensorflow_probability import distributions as tfd
 
 def von_mises_fisher(cfg, name="von_mises_fisher"):
 
-    def dist(params):
-        mean_direction = tf.linalg.normalize(params[..., 0:2], axis=-1) # normalize mean_direction
-        concentration = tf.nn.softplus(params[..., 2])
-        return tfd.VonMisesFisher(mean_direction=mean_direction, concentration=concentration)
+    def dist(p):
+        return tfd.VonMisesFisher(mean_direction=p[..., :2], concentration=p[..., 2])
 
-    def loss(d, targets):
+    def loss(targets, d):
         sin = tf.math.sin(targets)
         cos = tf.math.cos(targets)
         targets = tf.stack([sin, cos], axis=-1)
@@ -18,6 +16,9 @@ def von_mises_fisher(cfg, name="von_mises_fisher"):
     
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
     params = layers.Dense(3, name="params")(inputs)
+    mean_direction, _norm = tf.linalg.normalize(params[..., 0:2], axis=-1) # normalize mean_direction
+    concentration = tf.nn.softplus(params[..., 2:])
+    params = tf.concat([mean_direction, concentration], axis=-1)
     d = tfp.layers.DistributionLambda(dist)(params)
 
     return loss, Model(inputs=inputs, outputs=d, name=f"{name}_decoder")
@@ -29,7 +30,7 @@ def von_mises(cfg, name="von_mises"):
         concentration = tf.nn.softplus(params[..., 1])
         return tfd.VonMises(loc=loc, concentration=concentration)
     
-    def loss(d, targets):
+    def loss(targets, d):
         return -tf.reduce_mean(d.log_prob(targets))
 
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")

@@ -1,9 +1,11 @@
 import tensorflow as tf
-from tensorflow.keras import Input, Model
 
-def predictor(cfg, model):
+def create_predict_fn(cfg, model):
+    """
+    Create a predict function that does autoregressive sampling.
+    """
 
-    @tf.function
+    # @tf.function
     def predict(x, n_frames):
         batch_size = x["angles"].shape[0]
 
@@ -45,10 +47,10 @@ def predictor(cfg, model):
                 "hand_idxs": hand_idxs,
                 "dof_idxs": dof_idxs,
             }
-            dist = model(inputs, training=False)[..., -1:, :] # model outputs a sequence, but we only need the new token
+            dist = model(inputs, training=False) # model outputs a sequence, but we only need the new token
 
-            new_angles = dist.mean()
-            new_angles_sample = dist.sample()
+            new_angles = dist.mean()[:, -1:]
+            new_angles_sample = dist.sample()[:, -1:]
 
             angles = tf.concat([angles, new_angles], axis=-1)
             angles_sample = tf.concat([angles_sample, new_angles_sample], axis=-1)
@@ -77,18 +79,5 @@ def predictor(cfg, model):
         )
         
         return angles, angles_sample
-
-    x = {
-        "angles": Input(shape=[None], dtype=tf.float32, name="angles"),
-        "frame_idxs": Input(shape=[None], dtype=tf.int32, name="frame_idxs"),
-        "hand_idxs": Input(shape=[None], dtype=tf.int32, name="hand_idxs"),
-        "dof_idxs": Input(shape=[None], dtype=tf.int32, name="dof_idxs"),
-    }
-
-    n_frames = Input(type_spec=tf.TensorSpec(shape=[], dtype=tf.int32), name="n_frames")
-
-    outputs = predict(inputs, model, n_frames=n_frames)
-
-    inputs = list(x.values()) + [n_frames]
-
-    return Model(inputs=inputs, outputs=outputs)
+    
+    return predict

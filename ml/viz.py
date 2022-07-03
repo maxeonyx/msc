@@ -31,7 +31,7 @@ class VizCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         with self.writer.as_default():
             x_batch, y_batch = self.test_inputs
-            y_pred_mean_batch, y_pred_sample_batch = self.predictor(x_batch | { "n_frames": self.cfg.predict_frames })
+            y_pred_mean_batch, y_pred_sample_batch = self.predictor(x_batch, n_frames=self.cfg.predict_frames)
             imgs = []
 
             if y_pred_sample_batch is None:

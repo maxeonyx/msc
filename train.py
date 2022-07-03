@@ -6,7 +6,7 @@ from tensorflow import keras
 from tensorflow.keras import layers, Model, Input
 
 import config
-from ml import data_tf, utils, viz, embedders, predictor, encoders, decoders
+from ml import data_tf, predict, utils, viz, embedders, encoders, decoders
 
 try:
     run_name = os.environ["RUN_NAME"]
@@ -24,7 +24,7 @@ d, d_test = data_tf.tf_dataset(cfg)
 
 embedder = embedders.add_embedder(cfg)
 encoder = encoders.transformer(cfg | cfg.transformer)
-loss_fn, decoder = decoders.von_mises_fisher(cfg)
+loss_fn, decoder = decoders.von_mises(cfg)
 
 inputs = {
     "angles": Input(shape=[None], dtype=tf.float32, name="angles"),
@@ -37,7 +37,7 @@ latents = encoder(embeddings)
 dist = decoder(latents)
 model = keras.Model(inputs=list(inputs.values()), outputs=dist)
 
-predict = predictor(cfg, model)
+predictor = predict.create_predict_fn(cfg, model)
 
 optimizer = keras.optimizers.SGD(momentum=0.9, learning_rate=utils.WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
 # optimizer = keras.optimizers.Adam(learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
@@ -45,7 +45,7 @@ model.compile(loss=loss_fn, optimizer=optimizer, metrics=[utils.KerasLossWrapper
 
 log_dir = f"./runs/{run_name}"
 model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
-    viz.VizCallback(cfg, iter(d_test), predict, log_dir + "/train"),
+    viz.VizCallback(cfg, iter(d_test), predictor, log_dir + "/train"),
     keras.callbacks.TensorBoard(log_dir=log_dir),
 ])
 print(f"Finished run '{run_name}'")
