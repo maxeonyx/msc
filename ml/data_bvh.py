@@ -178,8 +178,12 @@ def get_bvh_data(bvh_dir=None, convert_deg_to_rad=True):
     """
     for (l_fname, l_text), (r_fname, r_text) in chunk(read_hand_bvh_files(bvh_dir or DEFAULT_BVH_DIR), 2):
         
-        assert "left" in l_fname.lower()
-        assert "right" in r_fname.lower()
+        if "left" in r_fname.lower() and "right" in l_fname.lower():
+            l_fname, r_fname = r_fname, l_fname
+            l_text, r_text = r_text, l_text
+        
+        assert "left" in l_fname.lower(), f"Filename {l_fname} does not fit the pattern."
+        assert "right" in r_fname.lower(), f"Filename {l_fname} does not fit the pattern."
         assert l_fname.lower().replace("left", "right") == r_fname.lower()
 
         l_obj = extract_bvh_file(l_text)
@@ -234,12 +238,16 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True):
     data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
     data.sort(key=lambda x: x[0])
     # sort by filename
-    filenames, angles, n_frames = zip(*data)
+    filenames, angles, n_frames = [], [], []
+    for f, a, n in data:
+        filenames.append(f)
+        angles.append(a)
+        n_frames.append(n)
 
     with open(ds_path, "wb") as f:
         pickle.dump((filenames, angles, n_frames), f)
 
-    return filenames, data, n_frames
+    return filenames, angles, n_frames
 
 def np_dataset(force=False, convert_deg_to_rad=True):
     """

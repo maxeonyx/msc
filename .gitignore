@@ -6,9 +6,10 @@ wandb/
 *.blend1
 
 # artifacts
-!.gitkeep
-renders/
-anims/
-models/
-cache/
-runs/
+renders/*
+anims/*
+models/*
+cache/*
+runs/*
+
+!**/.gitkeep

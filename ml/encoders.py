@@ -8,7 +8,7 @@ def conv(cfg, name="conv"):
 
     embd = inputs
     for _ in range(cfg.n_layers):
-        embd = layers.Conv1D(filters=cfg.filters, kernel_size=kernel_size, activation="relu", padding='causal')(embd)
+        embd = layers.Conv1D(filters=cfg.filters, kernel_size=kernel_size, activation=cfg.activation, padding='causal')(embd)
     
     return Model(inputs=inputs, outputs=embd, name=name)
 
@@ -18,7 +18,7 @@ def mlp(cfg, name="mlp"):
 
     embd = inputs
     for i in range(cfg.n_layers):
-        embd = layers.Dense(cfg.hidden_dim, activation="relu")(embd)
+        embd = layers.Dense(cfg.hidden_dim, activation=cfg.activation)(embd)
         embd = layers.Dropout(cfg.dropout_rate)(embd)
     
     outputs = embd
@@ -53,7 +53,7 @@ def transformer_block(cfg, name="transformer_block"):
     attention_output = layers.MultiHeadAttention(cfg.n_heads, cfg.embd_dim)(inputs, inputs, attention_mask=causal_mask)
     attention_output = layers.Dropout(cfg.dropout_rate)(attention_output)
     out1 = layers.LayerNormalization(epsilon=1e-6)(inputs + attention_output)
-    ffn_output = layers.Dense(cfg.ffl_dim, activation="relu")(out1)
+    ffn_output = layers.Dense(cfg.ffl_dim, activation=cfg.activation)(out1)
     ffn_output = layers.Dense(cfg.embd_dim)(ffn_output)
     ffn_output = layers.Dropout(cfg.dropout_rate)(ffn_output)
     out2 = layers.LayerNormalization(epsilon=1e-6)(out1 + ffn_output)

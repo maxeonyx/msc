@@ -1,15 +1,16 @@
 import tensorflow as tf
 
-def create_predict_fn(cfg, model):
+def create_predict_fn(cfg, dist_fn, model):
     """
     Create a predict function that does autoregressive sampling.
     """
 
-    # @tf.function
+    @tf.function
     def predict(x, n_frames):
         batch_size = x["angles"].shape[0]
 
-        dist = model(x, training=False)
+        params = model(x, training=False)
+        dist = dist_fn(params)
         angles = dist.mean()
         angles_sample = dist.sample()
 
@@ -17,7 +18,10 @@ def create_predict_fn(cfg, model):
         hand_idxs = x["hand_idxs"]
         dof_idxs = x["dof_idxs"]
         
-        start_frame = frame_idxs[..., -1] + 1
+        if frame_idxs.shape[1] == 0:
+            start_frame = tf.zeros([batch_size, 1], dtype=tf.int32)
+        else:
+            start_frame = frame_idxs[:, -1:] + 1
 
         # tile a constant value to the batch dimension and len=1 seq dim
         def tile_batch_seq(x):
@@ -32,11 +36,11 @@ def create_predict_fn(cfg, model):
         def body(i, angles, angles_sample, frame_idxs, hand_idxs, dof_idxs):
 
             i_frame_offset = i // (cfg.n_hands * cfg.n_dof)
-            i_frame = start_frame + i_frame_offset
+            i_frame = start_frame + i_frame_offset[None, None]
             i_hand = (i // cfg.n_dof) % cfg.n_hands
             i_dof = i_frame_offset % cfg.n_dof
             
-            frame_idxs = tf.concat([frame_idxs, i_frame[..., None]], axis=1)
+            frame_idxs = tf.concat([frame_idxs, i_frame], axis=-1)
 
             hand_idxs = tf.concat([hand_idxs, tile_batch_seq(i_hand)], axis=-1)
             dof_idxs  = tf.concat([dof_idxs,  tile_batch_seq(i_dof)],  axis=-1)
@@ -47,10 +51,10 @@ def create_predict_fn(cfg, model):
                 "hand_idxs": hand_idxs,
                 "dof_idxs": dof_idxs,
             }
-            dist = model(inputs, training=False) # model outputs a sequence, but we only need the new token
-
-            new_angles = dist.mean()[:, -1:]
-            new_angles_sample = dist.sample()[:, -1:]
+            params = model(inputs, training=False) # model outputs a sequence, but we only need the new token
+            dist = dist_fn(params[:, -1:, :])
+            new_angles = dist.mean()
+            new_angles_sample = dist.sample()
 
             angles = tf.concat([angles, new_angles], axis=-1)
             angles_sample = tf.concat([angles_sample, new_angles_sample], axis=-1)

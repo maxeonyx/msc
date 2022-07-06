@@ -20,18 +20,18 @@ def plot_to_image(figure):
   return image
 
 class VizCallback(tf.keras.callbacks.Callback):
-    def __init__(self, cfg, test_data_iter, predictor, log_dir):
+    def __init__(self, cfg, test_data_iter, predict_fn, log_dir):
         super(VizCallback, self).__init__()
         self.writer = tf.summary.create_file_writer(log_dir)
         self.cfg = cfg
         self.test_data_iter = test_data_iter
         self.test_inputs = next(test_data_iter)
-        self.predictor = predictor
+        self.predict_fn = predict_fn
 
     def on_epoch_end(self, epoch, logs=None):
         with self.writer.as_default():
             x_batch, y_batch = self.test_inputs
-            y_pred_mean_batch, y_pred_sample_batch = self.predictor(x_batch, n_frames=self.cfg.predict_frames)
+            y_pred_mean_batch, y_pred_sample_batch = self.predict_fn(x_batch, self.cfg.predict_frames)
             imgs = []
 
             if y_pred_sample_batch is None:

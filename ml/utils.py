@@ -57,8 +57,8 @@ class KerasLossWrapper(tf.keras.metrics.Metric):
     Show instantaneous loss in keras progress bar.
     """
 
-    def __init__(self, loss_fn, name=None, dtype=None):
-        super().__init__(name="instantaneous_loss", dtype=dtype)
+    def __init__(self, loss_fn, name="instantaneous_loss", dtype=None):
+        super().__init__(name=name, dtype=dtype)
         self.loss_fn = loss_fn
         self.total = self.add_weight(name="total", initializer="zeros")
     

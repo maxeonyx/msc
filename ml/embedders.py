@@ -67,6 +67,8 @@ def add_embedder(cfg, name="embedder"):
     hand_idxs = Input(shape=[None], dtype=tf.int32, name="hand_idxs")
     dof_idxs = Input(shape=[None], dtype=tf.int32, name="dof_idxs")
 
+    batch_size = tf.shape(angles)[0]
+
     embd_angle = angle_pos_enc(cfg, cfg.embd_dim)(angles)
     embd_frame_idxs = pos_enc(cfg.embd_dim, 10000)(frame_idxs)
     embd_hand_idxs = layers.Embedding(cfg.n_hands, cfg.embd_dim)(hand_idxs)
@@ -74,7 +76,7 @@ def add_embedder(cfg, name="embedder"):
 
     embd = tf.add_n([embd_angle, embd_hand_idxs, embd_frame_idxs, embd_dof_idxs])
 
-    begin_tok = layers.Embedding(1, cfg.embd_dim)(tf.zeros_like(frame_idxs[..., :1], dtype=tf.int32))
+    begin_tok = layers.Embedding(1, cfg.embd_dim)(tf.zeros([batch_size, 1], dtype=tf.int32))
     embd = tf.concat([begin_tok, embd], axis=-2)
 
     return Model(inputs=[angles, frame_idxs, hand_idxs, dof_idxs], outputs=embd, name=name)

@@ -32,28 +32,24 @@ def get():
         "warmup_steps": 10000,
 
         # Model config
-        "embd_dim": 256,
+        "embd_dim": 64,
         "dropout_rate": 0.1,
 
-        "parallel_lstm": {
-            "embd_dim": 64,
-        },
-        "multi_lstm": {
-            "n_layers": 10,
-        },
         "mlp": {
             "layers": [1024],
+            "activation": "relu",
         },
         "conv": {
             "filters": 16,
             "width_frames": 1,
+            "activation": "relu",
         },
         "transformer": {
             "initializer_range": 0.01,
-            "n_layers": 3,
-            "ffl_dim": 1024,
+            "n_layers": 2,
+            "ffl_dim": 256,
             "n_heads": 4,
-            "activation": "gelu",
+            "activation": "relu",
         },
         "deberta": {
             "num_attention_heads": 4,
