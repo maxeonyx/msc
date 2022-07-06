@@ -6,7 +6,7 @@ from tensorflow_probability import distributions as tfd
 def von_mises_fisher(cfg, name="von_mises_fisher"):
 
     def dist(p):
-        return tfd.VonMisesFisher(mean_direction=p[..., :2], concentration=p[..., 2])
+        return tfd.VonMisesFisher(mean_direction=p[:, :, :2], concentration=p[:, :, 2])
 
     def loss(targets, d):
         sin = tf.math.sin(targets)
@@ -26,8 +26,8 @@ def von_mises_fisher(cfg, name="von_mises_fisher"):
 def von_mises(cfg, name="von_mises"):
 
     def dist(params):
-        loc = params[..., 0]
-        concentration = tf.nn.softplus(params[..., 1])
+        loc = params[: , :, 0]
+        concentration = tf.nn.softplus(params[:, :, 1])
         return tfd.VonMises(loc=loc, concentration=concentration)
     
     def loss(targets, d):
@@ -35,6 +35,6 @@ def von_mises(cfg, name="von_mises"):
 
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
     params = layers.Dense(2, name="params")(inputs)
-    d = tfp.layers.DistributionLambda(dist)(params)
+    d = layers.Lambda(lambda params: dist(params))(params)
 
-    return loss, Model(inputs=inputs, outputs=d, name=f"{name}_decoder")
+    return loss, dist, Model(inputs=inputs, outputs=params, name=f"{name}_decoder")

@@ -42,7 +42,7 @@ predictor = predict.create_predict_fn(cfg, model)
 optimizer = keras.optimizers.SGD(momentum=0.9, learning_rate=utils.WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
 # optimizer = keras.optimizers.Adam(learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
 model.compile(loss=loss_fn, optimizer=optimizer, metrics=[utils.KerasLossWrapper(loss_fn)])
-
+model.build(input_shape=[i.shape for i in inputs.values()])
 log_dir = f"./runs/{run_name}"
 model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
     viz.VizCallback(cfg, iter(d_test), predictor, log_dir + "/train"),
