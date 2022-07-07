@@ -1,6 +1,7 @@
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 from random import shuffle
+import numpy as np
 
 import hands_dataset
 
@@ -12,6 +13,7 @@ def endless_cropped_masked_hand_animations(np_data):
             filename, n_frames, data, is_right_hand = np_data[i]
             window_size = 100
             n_dof = 23
+            data = data * np.pi / 360. # convert to radians
             window_start = torch.randint(low=0, high=n_frames-window_size, size=[])
             chunk = data[window_start:window_start+window_size]
             frame_idxs = torch.range(window_start, window_start+window_size).reshape([window_size, 1, 1]).repeat(1, n_dof, 1)
@@ -20,9 +22,9 @@ def endless_cropped_masked_hand_animations(np_data):
 
             yield {
                 'angles': chunk,
-                'frame_idx': frame_idxs,
-                'dof_idx': dof_idxs,
-                'hand_idx': is_right_hand,
+                'frame_idxs': frame_idxs,
+                'dof_idxs': dof_idxs,
+                'hand_idxs': is_right_hand,
             }
 
 class HandsDataset(torch.utils.data.Dataset):
