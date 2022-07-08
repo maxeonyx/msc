@@ -32,7 +32,7 @@ inputs = {
 }
 embedder = embedders.add_embedder(cfg)
 encoder = encoders.transformer(cfg | cfg.transformer)
-loss_fn, dist_fn, decoder = decoders.von_mises(cfg)
+loss_fn, dist_fn, decoder = decoders.von_mises_fisher(cfg)
 embeddings = embedder(inputs)
 latents = encoder(embeddings)
 params = decoder(latents)

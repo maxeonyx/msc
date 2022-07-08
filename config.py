@@ -27,8 +27,8 @@ def get():
 
         "batch_size": 12,
         "learning_rate": 0.05,
-        "steps": 100,
-        "steps_per_epoch": 100,
+        "steps": 100000,
+        "steps_per_epoch": 1000,
         "warmup_steps": 10000,
 
         # Model config
