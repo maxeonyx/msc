@@ -2,6 +2,7 @@ import math
 
 import tensorflow as tf
 from tensorflow.keras import layers, Model, Input
+import einops
 
 from ml import utils
 
@@ -74,10 +75,10 @@ def add_embedder(cfg, name="embedder"):
     embd_hand_idxs = layers.Embedding(cfg.n_hands, cfg.embd_dim)(hand_idxs)
     embd_dof_idxs = layers.Embedding(cfg.n_dof, cfg.embd_dim)(dof_idxs)
 
-    embd = tf.add_n([embd_angle, embd_hand_idxs, embd_frame_idxs, embd_dof_idxs])
+    embd = tf.add_n([embd_angle, embd_frame_idxs, embd_hand_idxs, embd_dof_idxs])
 
     begin_tok = layers.Embedding(1, cfg.embd_dim)(tf.zeros([batch_size, 1], dtype=tf.int32))
-    embd = tf.concat([begin_tok, embd], axis=-2)
+    embd = tf.concat([begin_tok, embd], axis=1) # concat on frame/sequence dim
 
     return Model(inputs=[angles, frame_idxs, hand_idxs, dof_idxs], outputs=embd, name=name)
     

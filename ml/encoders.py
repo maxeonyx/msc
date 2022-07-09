@@ -17,9 +17,10 @@ def mlp(cfg, name="mlp"):
     inputs = Input(shape=(None, cfg.embd_dim))
 
     embd = inputs
-    for i in range(cfg.n_layers):
+    for _ in range(cfg.n_layers):
         embd = layers.Dense(cfg.hidden_dim, activation=cfg.activation)(embd)
         embd = layers.Dropout(cfg.dropout_rate)(embd)
+    embd = layers.Dense(cfg.embd_dim)(embd)
     
     outputs = embd
 
@@ -42,9 +43,7 @@ def causal_attention_mask(batch_size, n_dest, n_src, dtype):
     return tf.tile(mask, mult)
 
 def transformer_block(cfg, name="transformer_block"):
-    print(cfg)
     inputs = Input(shape=(None, cfg.embd_dim))
-    print(inputs.shape)
 
     input_shape = tf.shape(inputs)
     batch_size = input_shape[0]
@@ -68,3 +67,16 @@ def transformer(cfg, name="transformer"):
         embd = transformer_block(cfg, name=f"{name}_block_{i}")(embd)
     
     return Model(inputs, embd, name=name)
+
+
+# def deberta(cfg, name="deberta"):
+
+#     from transformers import models.deberta.TFDebertaEncoder
+
+#     inputs = Input(shape=(None, cfg.embd_dim))
+
+#     encoder = TFDebertaEncoder(
+        
+#     )
+    
+#     return Model(inputs, embd, name=name)

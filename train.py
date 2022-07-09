@@ -23,35 +23,50 @@ cfg = config.get()
 cfg.force = False
 d, d_test = data_tf.tf_dataset(cfg)
 
-# create model
-inputs = {
-    "angles": Input(shape=[None], dtype=tf.float32, name="angles"),
-    "frame_idxs": Input(shape=[None], dtype=tf.int32, name="frame_idxs"),
-    "hand_idxs": Input(shape=[None], dtype=tf.int32, name="hand_idxs"),
-    "dof_idxs": Input(shape=[None], dtype=tf.int32, name="dof_idxs"),
-}
-embedder = embedders.add_embedder(cfg)
-encoder = encoders.transformer(cfg | cfg.transformer)
-loss_fn, dist_fn, decoder = decoders.von_mises_fisher(cfg)
-embeddings = embedder(inputs)
-latents = encoder(embeddings)
-params = decoder(latents)
-model = keras.Model(inputs=list(inputs.values()), outputs=params)
+def create_model(cfg, encoder_type):
+
+    cfg = cfg | cfg[encoder_type]
+    # create model
+    inputs = {
+        "angles": Input(shape=[None], dtype=tf.float32, name="angles"),
+        "frame_idxs": Input(shape=[None], dtype=tf.int32, name="frame_idxs"),
+        "hand_idxs": Input(shape=[None], dtype=tf.int32, name="hand_idxs"),
+        "dof_idxs": Input(shape=[None], dtype=tf.int32, name="dof_idxs"),
+    }
+    embedder = embedders.add_embedder(cfg)
+
+    if encoder_type == "transformer":
+        encoder = encoders.transformer(cfg | cfg.transformer)
+    elif encoder_type == "mlp":
+        encoder = encoders.mlp(cfg | cfg.mlp)
+    elif encoder_type == "conv":
+        encoder = encoders.conv(cfg | cfg.conv)
+
+    loss_fn, dist_fn, mean_fn, sample_fn, decoder = decoders.von_mises(cfg)
+    embeddings = embedder(inputs)
+    latents = encoder(embeddings)
+    params = decoder(latents)
+    
+    model = keras.Model(inputs=list(inputs.values()), outputs=params)
+    predict_fn = predict.create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model)
+
+    return loss_fn, predict_fn, model
+
+loss_fn, predict_fn, model = create_model(cfg, "transformer")
 
 model.summary(expand_nested=True)
 
-optimizer = keras.optimizers.SGD(momentum=0.9, learning_rate=utils.WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
+if cfg.optimizer == "warmup_sgd":
+    optcfg = cfg | cfg.warmup_sgd
+    optimizer = keras.optimizers.SGD(momentum=optcfg.momentum, clipnorm=optcfg.clip_norm, learning_rate=utils.WarmupLRSchedule(optcfg.lr, optcfg.warmup_steps))
 # optimizer = keras.optimizers.Adam(learning_rate=WarmupLRSchedule(cfg.learning_rate, cfg.warmup_steps))
 model.compile(loss=loss_fn, optimizer=optimizer, metrics=[utils.KerasLossWrapper(loss_fn)])
-model.build(input_shape=[i.shape for i in inputs.values()])
 
 log_dir = f"./runs/{run_name}"
-predict_fn = predict.create_predict_fn(cfg, dist_fn, model)
 
 model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
     viz.VizCallback(cfg, iter(d_test), predict_fn, log_dir + "/train"),
-    keras.callbacks.TensorBoard(log_dir=log_dir),
-])
+    keras.callbacks.TensorBoard(log_dir=log_dir, update_freq=100),])
 print(f"Finished training '{run_name}'")
 
 model.save(f"models/{run_name}")

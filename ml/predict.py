@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-def create_predict_fn(cfg, dist_fn, model):
+def create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model):
     """
     Create a predict function that does autoregressive sampling.
     """
@@ -11,8 +11,8 @@ def create_predict_fn(cfg, dist_fn, model):
 
         params = model(x, training=False)
         dist = dist_fn(params)
-        angles = dist.mean()
-        angles_sample = dist.sample()
+        angles = mean_fn(dist)
+        angles_sample = sample_fn(dist)
 
         frame_idxs = x["frame_idxs"]
         hand_idxs = x["hand_idxs"]
@@ -37,7 +37,7 @@ def create_predict_fn(cfg, dist_fn, model):
 
             i_frame_offset = i // (cfg.n_hands * cfg.n_dof)
             i_frame = start_frame + i_frame_offset[None, None]
-            i_hand = (i // cfg.n_dof) % cfg.n_hands
+            i_hand = (i // n_frames) % cfg.n_hands
             i_dof = i_frame_offset % cfg.n_dof
             
             frame_idxs = tf.concat([frame_idxs, i_frame], axis=-1)
@@ -53,11 +53,11 @@ def create_predict_fn(cfg, dist_fn, model):
             }
             params = model(inputs, training=False) # model outputs a sequence, but we only need the new token
             dist = dist_fn(params[:, -1:, :])
-            new_angles = dist.mean()
-            new_angles_sample = dist.sample()
+            new_angles = mean_fn(dist)
+            new_angles_sample = sample_fn(dist)
 
-            angles = tf.concat([angles, new_angles], axis=-1)
-            angles_sample = tf.concat([angles_sample, new_angles_sample], axis=-1)
+            angles = tf.concat([angles, new_angles], axis=1)
+            angles_sample = tf.concat([angles_sample, new_angles_sample], axis=1)
             
             return i+1, angles, angles_sample, frame_idxs, hand_idxs, dof_idxs
         

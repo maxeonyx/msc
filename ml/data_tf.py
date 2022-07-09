@@ -104,21 +104,15 @@ def to_train_input_and_target(cfg, x):
     inp["hand_idxs"] = inp["hand_idxs"][..., :-1]
     inp["dof_idxs"] = inp["dof_idxs"][..., :-1]
 
-    # inp_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof - 1]
-    # inp["angles"] = tf.ensure_shape(inp["angles"], inp_shape)
-    # inp["frame_idxs"] = tf.ensure_shape(inp["frame_idxs"], inp_shape)
-    # inp["hand_idxs"] = tf.ensure_shape(inp["hand_idxs"], inp_shape)
-    # inp["dof_idxs"] = tf.ensure_shape(inp["dof_idxs"], inp_shape)
+    inp_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof - 1]
+    inp["angles"] = tf.ensure_shape(inp["angles"], inp_shape)
+    inp["frame_idxs"] = tf.ensure_shape(inp["frame_idxs"], inp_shape)
+    inp["hand_idxs"] = tf.ensure_shape(inp["hand_idxs"], inp_shape)
+    inp["dof_idxs"] = tf.ensure_shape(inp["dof_idxs"], inp_shape)
 
-    if cfg.target_is_sequence:
-        tar = x["angles"]
-        # tar = tf.ensure_shape(tar, [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof])
-    else:
-        tar = x["angles"][..., -1]
-    
-    # rescale targets to match the embedded inputs
-    if cfg.scale_to_1_1:
-        tar = tar / math.pi
+    tar = x["angles"]
+    tar_shape = [cfg.batch_size, cfg.chunk_size * cfg.n_hands * cfg.n_dof]
+    tar = tf.ensure_shape(tar, tar_shape)
 
     return (inp, tar)
 

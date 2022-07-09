@@ -25,31 +25,43 @@ def get():
         "predict_frames": 20,
         "test_batch_size": 3,
 
-        "batch_size": 12,
-        "learning_rate": 0.05,
+        "batch_size": 32,
         "steps": 100000,
         "steps_per_epoch": 1000,
-        "warmup_steps": 10000,
+
+        "optimizer": "warmup_sgd",
+        "adam": {
+            "lr": 0.0005,
+        },
+        "warmup_sgd": {
+            "momentum": 0.9,
+            "clip_norm": 1.0,
+            "lr": 0.01,
+            "warmup_steps": 10000,
+        },
 
         # Model config
-        "embd_dim": 64,
-        "dropout_rate": 0.1,
+        "embd_dim": 128,
 
         "mlp": {
-            "layers": [1024],
+            "hidden_dim": 1024,
+            "n_layers": 1,
             "activation": "relu",
+            "dropout_rate": 0.1,
         },
         "conv": {
             "filters": 16,
             "width_frames": 1,
             "activation": "relu",
+            "dropout_rate": 0.1,
         },
         "transformer": {
             "initializer_range": 0.01,
-            "n_layers": 2,
-            "ffl_dim": 256,
+            "n_layers": 3,
+            "ffl_dim": 512,
             "n_heads": 4,
-            "activation": "relu",
+            "activation": "gelu",
+            "dropout_rate": 0.1,
         },
         "deberta": {
             "num_attention_heads": 4,
