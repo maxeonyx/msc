@@ -38,7 +38,7 @@ def create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model):
             i_frame_offset = i // (cfg.n_hands * cfg.n_dof)
             i_frame = start_frame + i_frame_offset[None, None]
             i_hand = (i // n_frames) % cfg.n_hands
-            i_dof = i_frame_offset % cfg.n_dof
+            i_dof = i % cfg.n_dof
             
             frame_idxs = tf.concat([frame_idxs, i_frame], axis=-1)
 

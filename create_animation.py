@@ -28,7 +28,7 @@ x = {
     "hand_idxs": tf.zeros([cfg.test_batch_size, 0], dtype=tf.int32),
     "dof_idxs": tf.zeros([cfg.test_batch_size, 0], dtype=tf.int32),
 }
-predict_fn = predict.create_predict_fn(cfg, decoders.von_mises_dist, model)
+predict_fn = predict.create_predict_fn(cfg, decoders.von_mises_dist, decoders.von_mises_mean, decoders.von_mises_sample, model)
 y_pred_mean_batch, y_pred_sample_batch = predict_fn(x, 30)
 
 from ml import viz

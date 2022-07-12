@@ -95,6 +95,11 @@ def random_flat_chunk(cfg, size, x, aligned=False):
 
     return x
 
+# def random_foveal_chunk(cfg, chunk_size, x):
+
+#     idx = tf.random.uniform([], minval=0, maxval=n_frames-chunk_size, dtype=tf.int32)
+#     idx = idx * tok_per_frame
+
 
 def to_train_input_and_target(cfg, x):
     inp = x.copy()

@@ -55,3 +55,11 @@ def von_mises(cfg, name="von_mises"):
     params = layers.Dense(2, name="params")(inputs)
 
     return von_mises_loss, von_mises_dist, von_mises_mean, von_mises_sample, Model(inputs=inputs, outputs=params, name=f"{name}_params")
+
+def query_decoder(cfg, name="query_decoder"):
+    inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
+
+    
+
+    params = layers.Dense(2, name="params")(inputs)
+    return Model(inputs=inputs, outputs=params, name=f"{name}_params")
