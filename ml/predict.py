@@ -23,6 +23,9 @@ def create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model):
         else:
             start_frame = frame_idxs[:, -1:] + 1
 
+        # use chunk size - 1 so that we stay in-distribution
+        n_chunk_toks = (cfg.chunk_size - 1) * cfg.n_hands * cfg.n_dof
+
         # tile a constant value to the batch dimension and len=1 seq dim
         def tile_batch_seq(x):
             return tf.tile(x[None, None], [batch_size, 1])
@@ -44,12 +47,14 @@ def create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model):
 
             hand_idxs = tf.concat([hand_idxs, tile_batch_seq(i_hand)], axis=-1)
             dof_idxs  = tf.concat([dof_idxs,  tile_batch_seq(i_dof)],  axis=-1)
-
+            
+            # use a fixed length context window to predict the next frame
+            start_idx = tf.math.maximum(0, tf.shape(frame_idxs)[1]-n_chunk_toks)
             inputs = {
-                "angles": angles,
-                "frame_idxs": frame_idxs,
-                "hand_idxs": hand_idxs,
-                "dof_idxs": dof_idxs,
+                "angles": angles[start_idx:],
+                "frame_idxs": frame_idxs[start_idx:],
+                "hand_idxs": hand_idxs[start_idx:],
+                "dof_idxs": dof_idxs[start_idx:],
             }
             params = model(inputs, training=False) # model outputs a sequence, but we only need the new token
             dist = dist_fn(params[:, -1:, :])
