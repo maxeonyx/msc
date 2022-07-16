@@ -4,8 +4,6 @@ import tensorflow as tf
 
 def angle_wrap(angles):
     angles = tf.math.atan2(tf.sin(angles), tf.cos(angles))
-    # angles = tf.where(angles < -np.pi, angles+np.pi*2, angles)
-    # angles = tf.where(angles > np.pi, angles-np.pi*2, angles)
     return angles
 
 def circular_mean(angles, axis=0):
@@ -17,12 +15,22 @@ def circular_mean(angles, axis=0):
     circular_means = tf.math.atan2(means_sin_a, means_cos_a)
     return circular_means
 
-def recluster(angles, frame_axis=0, circular_means=None):
+def recluster(angles, circular_means=None, frame_axis=0):
     if circular_means is None: 
-        # rotate the data so the circular mean is 0
         circular_means = circular_mean(angles, axis=frame_axis)
+
+    # rotate the data so the circular mean is 0
     angles = angles - tf.expand_dims(circular_means, axis=frame_axis)
     angles = angle_wrap(angles)
+    
+    return angles
+
+def unrecluster(angles, circular_means, frame_axis=0):
+    # assuming the mean is currently 0, rotate the data so the mean is
+    # back to the original given by `circular_means`
+    angles = angles + tf.expand_dims(circular_means, axis=frame_axis)
+    angles = angle_wrap(angles)
+
     return angles
 
 class WarmupLRSchedule(keras.optimizers.schedules.LearningRateSchedule):

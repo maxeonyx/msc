@@ -358,6 +358,15 @@ def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
     Write a new pair of animation files (left and right hands) from a single data array.
     """
 
+    if tf.is_tensor(data):
+        data = data.numpy()
+
+    assert len(data.shape) == 3, "data must be a 3D tensor with shape (n_frames, n_hands, n_dof)"
+    assert data.shape[0] >= 0, "data must have at least one frame"
+    assert data.shape[1] in [1, 2], "data must have 1 or 2 hands"
+    assert data.shape[2] == 23, "data must have 23 degrees of freedom"
+    print(f"data shape: {data.shape}")
+
     if convert_rad_to_deg:
         # convert back to degrees
         data = data / (2*np.pi) * 360
@@ -389,19 +398,19 @@ def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
             line = next(lines)
             print(line, file=out_file)
             
-            nums = []
+            dummy_nums = list(map(float, next(lines).strip().split(' ')))
             for i in range(data.shape[0]):
-                nums = list(map(float, next(lines).strip().split(' ')))
-
+                nums = [n for n in dummy_nums]
                 for col in range(len(USEFUL_COLUMNS)):
                     nums[USEFUL_COLUMNS[col]] = data[i, col]
                 
                 print(' '.join(str(n) for n in nums), file=out_file)
     
     left_filename = os.path.join(output_dir, name + '.left.generated.bvh')
-    right_filename = os.path.join(output_dir, name + '.right.generated.bvh')
-    write_file(left_hand, left_filename, data[0])
-    write_file(right_hand, right_filename, data[1])
+    write_file(left_hand, left_filename, data[:, 0])
+    if data.shape[1] == 2:
+        right_filename = os.path.join(output_dir, name + '.right.generated.bvh')
+        write_file(right_hand, right_filename, data[:, 1])
 
 
 if __name__ == "__main__":

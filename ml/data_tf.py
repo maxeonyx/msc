@@ -171,7 +171,7 @@ def make_decimate_fn(cfg):
         x["angles"] = decimate(x["angles"])
         return x
 
-    return decimate_map
+    return decimate, decimate_map
 
 
 def to_dict(filename, angles):
@@ -231,7 +231,7 @@ def tf_dataset(cfg):
         dataset = dataset.map(lambda x: recluster(x, circular_means))
     
     if cfg.decimate:
-        decimate = make_decimate_fn(cfg)
+        _, decimate = make_decimate_fn(cfg)
         dataset = dataset.map(decimate)
     
     dataset = dataset.map(add_idx_arrays)

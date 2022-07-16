@@ -5,6 +5,10 @@
 if test (which randomname)
     set PREV_BRANCH_NAME (git symbolic-ref --short HEAD)
     set -x RUN_NAME (randomname get)
+
+    function fish_title
+        echo "$RUN_NAME (train)"
+    end
     
     # hide useless tensorflow logs
     set -x TF_CPP_MIN_LOG_LEVEL 1
@@ -21,8 +25,20 @@ if test (which randomname)
     git checkout $PREV_BRANCH_NAME
 
     python train.py
-    and python create_animation.py
-    and echo Run $RUN_NAME complete!
+    if test $status -eq 0
+        function fish_title
+            echo "$RUN_NAME (anims)"
+        end
+        python create_animation.py
+        if test $status -eq 0
+            echo Run $RUN_NAME complete!
+        else
+            "$RUN_NAME anims failed."
+        end
+    else
+        echo "$RUN_NAME train failed."
+    end
+
 else
     echo "randomname not installed. run pip install"
 end

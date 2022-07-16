@@ -48,11 +48,12 @@ def create_model(cfg, encoder_type):
     params = decoder(latents)
     
     model = keras.Model(inputs=list(inputs.values()), outputs=params)
-    predict_fn = predict.create_predict_fn(cfg, dist_fn, mean_fn, sample_fn, model)
+    predict_mean_fn = predict.create_predict_fn(cfg, dist_fn, mean_fn, model)
+    predict_sample_fn = predict.create_predict_fn(cfg, dist_fn, sample_fn, model)
 
-    return loss_fn, predict_fn, model
+    return loss_fn, predict_mean_fn, predict_sample_fn, model
 
-loss_fn, predict_fn, model = create_model(cfg, "transformer")
+loss_fn, predict_mean_fn, predict_sample_fn, model = create_model(cfg, "transformer")
 
 model.summary(expand_nested=True)
 
@@ -63,10 +64,16 @@ if cfg.optimizer == "warmup_sgd":
 model.compile(loss=loss_fn, optimizer=optimizer, metrics=[utils.KerasLossWrapper(loss_fn)])
 
 log_dir = f"./runs/{run_name}"
-
-model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
-    viz.VizCallback(cfg, iter(d_test), predict_fn, log_dir + "/train"),
-    keras.callbacks.TensorBoard(log_dir=log_dir, update_freq=100),])
-print(f"Finished training '{run_name}'")
+try:
+    model.fit(d, steps_per_epoch=cfg.steps_per_epoch, epochs=cfg.steps//cfg.steps_per_epoch, callbacks=[
+        viz.VizCallback(cfg, iter(d_test), [predict_mean_fn, predict_sample_fn], log_dir + "/train"),
+        keras.callbacks.TensorBoard(log_dir=log_dir, update_freq=100),])
+    print()
+    print(f"Finished training '{run_name}'")
+    print()
+except KeyboardInterrupt:
+    print()
+    print(f"Exited training early for run '{run_name}'")
+    print()
 
 model.save(f"models/{run_name}")

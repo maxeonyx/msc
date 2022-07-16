@@ -3,10 +3,10 @@ from box import Box
 def get():
     return Box({
         "shuffle_buffer_size": 130,
-        "force": False,
+        "force": True,
         "convert_deg_to_rad": True,
         "cached_dataset_path": "./cache/tf_dataset",
-        "n_hands": 1,
+        "n_hands": 2,
         "n_dof": 23,
         "decimate": True,
         "decimate_threshold": 1.,
@@ -19,13 +19,13 @@ def get():
         # Chunk size is used for models that take a fixed input size.
         # It is a number of animation frames, and can be no larger than
         # the shortest animation in the dataset
-        "chunk_size": 5,
+        "chunk_size": 6,
         # predict frames is the number of frames to predict when
         # vizualizing after each epoch
         "predict_frames": 20,
         "test_batch_size": 3,
 
-        "batch_size": 32,
+        "batch_size": 16,
         "steps": 100000,
         "steps_per_epoch": 1000,
 
@@ -41,7 +41,7 @@ def get():
         },
 
         # Model config
-        "embd_dim": 128,
+        "embd_dim": 256,
 
         "mlp": {
             "hidden_dim": 1024,
@@ -58,7 +58,7 @@ def get():
         "transformer": {
             "initializer_range": 0.01,
             "n_layers": 3,
-            "ffl_dim": 512,
+            "ffl_dim": 1024,
             "n_heads": 4,
             "activation": "gelu",
             "dropout_rate": 0.1,
