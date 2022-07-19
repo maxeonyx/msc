@@ -160,12 +160,13 @@ def make_decimate_fn(cfg):
     ])
     def decimate(angles):
         angles = rearrange(angles, 'f h d -> f (h d)')
+        len_angles = tf.shape(angles)[0]
         new_angles = angles[:1, :]
-        for i in tf.range(1, angles.shape[0]):
+        for i in tf.range(1, len_angles):
             if tf.linalg.norm(angles[i] - new_angles[-1]) > cfg.decimate_threshold:
                 new_angles = tf.concat([new_angles, angles[i:i+1]], axis=0)
-        angles = rearrange(angles, 'f (h d) -> f h d', h=cfg.n_hands, d=cfg.n_dof)
-        return angles
+        new_angles = rearrange(new_angles, 'f (h d) -> f h d', h=cfg.n_hands, d=cfg.n_dof)
+        return new_angles
     
     def decimate_map(x):
         x["angles"] = decimate(x["angles"])
@@ -179,18 +180,6 @@ def to_dict(filename, angles):
         # "filename": filename,
         "angles": angles,
     }
-
-
-def add_frame_idxs(x):
-    x["frame_idxs"] = tf.range(tf.shape(x["angles"])[0])
-    return x
-
-
-def to_sin_cos(x):
-    sin = tf.sin(x["angles"])
-    cos = tf.cos(x["angles"])
-    x["angles"] = rearrange([sin, cos], 'sincos ... -> ... sincos')
-    return x
 
 
 def random_flat_vector_chunk(cfg, x):
@@ -224,15 +213,16 @@ def tf_dataset(cfg):
     dataset = tf.data.Dataset.from_tensor_slices((filenames, ragged_angles))
 
     dataset = dataset.map(to_dict)
-    dataset = dataset.map(lambda x: subset(cfg, x))
 
     if cfg.recluster:
-        circular_means = utils.circular_mean(all_angles, axis=0)[:cfg.n_hands, :cfg.n_dof]
+        circular_means = utils.circular_mean(all_angles, axis=0)
         dataset = dataset.map(lambda x: recluster(x, circular_means))
     
     if cfg.decimate:
         _, decimate = make_decimate_fn(cfg)
         dataset = dataset.map(decimate)
+
+    dataset = dataset.map(lambda x: subset(cfg, x))
     
     dataset = dataset.map(add_idx_arrays)
 

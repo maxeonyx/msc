@@ -3,13 +3,13 @@ from box import Box
 def get():
     return Box({
         "shuffle_buffer_size": 130,
-        "force": True,
+        "force": False,
         "convert_deg_to_rad": True,
         "cached_dataset_path": "./cache/tf_dataset",
         "n_hands": 2,
         "n_dof": 23,
         "decimate": True,
-        "decimate_threshold": 1.,
+        "decimate_threshold": 0.3,
         "recluster": True,
         "vector": False,
 
