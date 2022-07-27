@@ -17,3 +17,4 @@ ipympl ~= 0.9
 transformers ~= 4.19
 einops ~= 0.4
 pyqt5 ~= 5.15
+nvsmi ~= 0.4

@@ -41,7 +41,7 @@ def get():
         },
 
         # Model config
-        "embd_dim": 256,
+        "embd_dim": 512,
 
         "mlp": {
             "hidden_dim": 1024,
@@ -57,9 +57,9 @@ def get():
         },
         "transformer": {
             "initializer_range": 0.01,
-            "n_layers": 3,
-            "ffl_dim": 1024,
-            "n_heads": 4,
+            "n_layers": 6,
+            "ffl_dim": 4096,
+            "n_heads": 8,
             "activation": "gelu",
             "dropout_rate": 0.1,
         },

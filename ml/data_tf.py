@@ -66,11 +66,11 @@ def random_flat_chunk(cfg, size, x, aligned=False):
     shape = tf.shape(x["angles"])
     n_frames = shape[0]
     
-    x["angles"] = tf.reshape(x["angles"], [-1])
-    x["frame_idxs"] = tf.reshape(x["frame_idxs"], [-1])
-    x["hand_idxs"] = tf.reshape(x["hand_idxs"], [-1])
-    x["dof_idxs"] = tf.reshape(x["dof_idxs"], [-1])
-    
+    x["angles"] = rearrange(x["angles"], 'b, f, h, d -> b, f, (h, d)')
+    x["frame_idxs"] = rearrange(x["frame_idxs"], 'b, f, h, d -> b, f, (h, d)')
+    x["hand_idxs"] = rearrange(x["hand_idxs"], 'b, f, h, d -> b, f, (h, d)')
+    x["dof_idxs"] = rearrange(x["dof_idxs"], 'b, f, h, d -> b, f, (h, d)')
+
     tok_per_frame = cfg.n_hands * cfg.n_dof
     chunk_size = size
     chunk_toks = chunk_size * tok_per_frame

@@ -28,6 +28,7 @@ def create_model(cfg, encoder_type):
     cfg = cfg | cfg[encoder_type]
     # create model
     inputs = {
+        "vectors": Input(shape=[None], dtype=tf.float32, name="vectors"),
         "angles": Input(shape=[None], dtype=tf.float32, name="angles"),
         "frame_idxs": Input(shape=[None], dtype=tf.int32, name="frame_idxs"),
         "hand_idxs": Input(shape=[None], dtype=tf.int32, name="hand_idxs"),
