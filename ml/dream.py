@@ -1,8 +1,15 @@
 import einops as ein
 from einops.layers.keras import EinMix
 import tensorflow as tf
+import typing
+if typing.TYPE_CHECKING:
+    from tensorflow.python import keras
+    from tensorflow.python.keras import Input, Model, layers
+else:
+    from tensorflow import keras
+    from tensorflow.keras import Input, Model, layers
 import numpy as np
-from typing import Optional, Tuple, Union, List
+from typing import Any, Optional, Tuple, Union, List
 
 import deberta
 
@@ -69,7 +76,9 @@ class RelativePositionEmbedding(tf.keras.Layer):
 
     def __init__(self, max_N, D,  allow_negative=False):
         """
-        Size of 
+        If the computation only ever uses
+        relative attention in one direction (eg. incremental multi-query layers with causal masking),
+        then allow_negative can be set to false to halve memory use.
         """
         self.max_N = max_N
         if allow_negative:
@@ -109,28 +118,26 @@ class RelativePositionEmbedding(tf.keras.Layer):
         return self.embedding(indices)
 
 
-class RelativePositionProjection(tf.keras.Layer):
+class RelativePositionProjectionLookup(tf.keras.Layer):
 
-    def __init__(self, ein_expr, weight_shape, target_N, max_dist, D, QK, rpe):
-        self.target_N = target_N
-        self.max_dist = max_dist
-        self.rpe = rpe
+    def __init__(self, projection, relative_pos_embedding):
+        self.rpe = relative_pos_embedding
         # seq dim should be first axis for the tf.gather below
-        self.w = EinMix(ein_expr, weight_shape=weight_shape, d=D, qk=QK)
-        self.projections = None
+        self.projection = projection
+        self.cache = None
     
     def call(self, relative_pos):
-        if self.projections is None:
+        if self.cache is None:
             rel_embd = self.rpe.get_all_embeddings()
-            self.projections = self.w(rel_embd)
+            self.cache = self.projection(rel_embd)
         indices = self.rpe.get_indices(relative_pos)
-        rel_proj = tf.gather(self.projections, indices, axis=0)
+        rel_proj = tf.gather(self.cache, indices, axis=0)
         return rel_proj
 
 
 class IncrementalRelativeMultiQueryAttention(tf.Module):
 
-    def __init__(self, max_N, QK, V, D, H, rpe):
+    def __init__(self, QK, V, D, H, rpe):
         super().__init__()
 
         self.QK = QK
@@ -144,21 +151,26 @@ class IncrementalRelativeMultiQueryAttention(tf.Module):
         # k & v have m dimension first so they can be put into TensorArray
         self.wkc = EinMix('b m d -> m b qk', weight_shape='d qk', d=self.D, qk=self.QK)
 
-        self.wqp = RelativePositionProjection(
-            'b m d -> b h m n qk', # TODO: This is BIIIIG....
-            weight_shape='d h qk',
-            max_N=max_N,
-            D=D,
-            QK=QK,
-            rpe=rpe
+        self.wqp = RelativePositionProjectionLookup(
+            # TODO: This is BIIIIG....
+            projection=EinMix(
+                # ... is max_N
+                '... d -> ... h qk',
+                weight_shape='d h qk',
+                H=H,
+                D=D,
+                QK=QK,
+            ),
+            rpe=rpe,
         )
-        self.wkp = RelativePositionProjection(
-            'b m d -> b m n qk',
-            weight_shape='d qk',
-            max_N=max_N,
-            D=D,
-            QK=QK,
-            rpe=rpe
+        self.wkp = RelativePositionProjectionLookup(
+            projection=EinMix(
+                'n d -> n qk',
+                weight_shape='d qk',
+                D=D,
+                QK=QK,
+            ),
+            rpe=rpe,
         )
 
         self.wo = EinMix('b m h v -> b m d', weight_shape='h v d', v=self.V, h=self.H, d=self.D)
@@ -189,14 +201,20 @@ class IncrementalRelativeMultiQueryAttention(tf.Module):
         )
 
 
-    def call_incremental(self, zq_embd, zq_rel_embd, mask, training):
+    def call_incremental(self, embd, rel_pos, mask, training):
 
         # M is the number of new inputs this iteration. Might be M=N, or might be M=1.
         # N is the total number of inputs so far, including the current input. (so N >= M)
 
+        # embd is [B, M, D]
+        # rel_pos is [B, M, N] (int32)
+        # mask is [N, N]
+        # returns [B, M, D]
+        # and increases N_t to N_{t+1}= N_t + M
+
         i = self.k_cache.size()
 
-        v = self.wv(zq_embd)
+        v = self.wv(embd)
         self.v_cache.write(i, v)
         v = self.v_cache.concat()
 
@@ -204,42 +222,118 @@ class IncrementalRelativeMultiQueryAttention(tf.Module):
         scale = 1. / tf.sqrt(self.D * n_attn_types)
 
         # c2c
-        # c
-        qc = self.wqc(zq_embd)
-        # c
-        kc = self.wkc(zq_embd)
+        qc = self.wqc(embd)
+        kc = self.wkc(embd)
 
         self.kc_cache.write(i, kc)
         kc = self.kc_cache.concat()
 
-        c2c_attn_logits = tf.einsum('nbk,bhmk->bhmn', kc, qc)
+        c2c_attn_logits = tf.einsum('bhmk,bnk->bhmn', qc, kc)
 
         # p2c
-        # p
-        kp = self.wqp(zq_rel_embd)
+        qp = self.wqp(rel_pos)
+        # kc
+        # h second last in this one because of embedding lookup
+        p2c_attn_logits = tf.einsum('bmnhk,bnk->bhmn', qp, kc)
 
-        # c
-        c2c_attn_logits = tf.einsum('bmnk,bhmk->bhmn', kp, qc)
+        # c2p
+        # qc
+        kp = self.wkp(rel_pos)
+        c2p_attn_logits = tf.einsum('bhmk,bmnk->bhmn', qc, kp)
 
-
-        # p
-        kp = self.wkp()
-        vp = self.wvp(zq_embd)
-
-
-
-
-
-        c2c_attn_probs = self.softmax(c2c_attn_logits, mask)
         
+        attn_logits = (c2c_attn_logits + p2c_attn_logits + c2p_attn_logits) * scale
+        attn_logits = self.dropout(attn_logits, training=training)
+        attn_weights = self.softmax(attn_logits, mask)
+    
+        v_h = tf.einsum('bhmn,bnv->bhmv', attn_weights, v) # value-per-head
+        v_o = self.wo(v_h) # project to output dimension
+        return v_o
 
 
 
+class IRMQAT(tf.keras.layers.Layer):
+
+    def __init__(self, cfg, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        self.n_layers = cfg.n_layers
+        self.embd_dim = cfg.embd_dim
+        
+        self.embd_vecs = EinMix(
+            pattern='f h d s -> f e',
+            weight_shape='h d s e',
+            e=cfg.embd_dim,
+            h=cfg.n_hands,
+            d=cfg.n_dof,
+            s=2
+        )
+
+        self.rpe = RelativePositionEmbedding(
+            # maximum number of inputs.
+            # defines the size of the single "rel_embd" cache
+            # and n_layers "rel_proj" caches
+            max_N=cfg.max_N,
+            D=cfg.embd_dim,
+        )
+        
+        self.irmqa_layers = [
+            [
+                IncrementalRelativeMultiQueryAttention(
+                    QK=cfg.qk_dim,
+                    V=cfg.v_dim,
+                    D=cfg.d_dim,
+                    H=cfg.n_heads,
+                    rpe=self.rpe,
+                ),
+                deberta.TFDebertaIntermediate(
+                    intermediate_size=cfg.intermediate_size,
+                    initializer_range=cfg.initializer_range,
+                    hidden_act=cfg.hidden_act,
+                ),
+                deberta.TFDebertaOutput(
+                    initializer_range=cfg.initializer_range,
+                    hidden_size=cfg.hidden_size,
+                    hidden_dropout_prob=cfg.hidden_dropout_prob,
+                    layer_norm_eps=cfg.layer_norm_eps,
+                )
+            ]
+        ]
+    
+    def call(self, embd, rel_pos, mask, training):
+
+        for mqattn, interm, output in self.irmqa_layers:
+
+            embd = mqattn(embd, rel_pos, mask, training)
+            embd = interm(embd)
+            embd = output(embd)
+        
+        return embd
 
 
+def log_weights(n_max, n_samples, decay_by_d_every_power_of_b=(0.5, 10),):
+    
+    D, B = decay_by_d_every_power_of_b
 
-def embedder(x):
+    normalize = tf.linalg.normalize
+    logb1p = lambda b, x: tf.math.log1p(x)/tf.math.log(b)
+    powf = lambda b, x: tf.math.pow(tf.cast(b, tf.float32), x)
+    
+    weights = normalize(powf(D, logb1p(B, tf.range(n))))
 
-    angles = x["angles"]
+def embedder(cfg, x):
 
-def incremental_relative_multiquery_attention():
+    angles = Input(shape=[None, cfg.n_hands, cfg.n_dofs], name='angles')
+    angles = tf.ensure_shape(angles, [None, cfg.n_hands, cfg.n_dof])
+
+    n_frames = tf.shape(angles)[0]
+    n_hands = tf.shape(angles)[1]
+    n_dof = tf.shape(angles)[2]
+
+    sincos = ein.rearrange([tf.sin(angles), tf.cos(angles)], 's f h d -> f h d s')
+    
+    vec_idxs = tf.random.log_uniform_candidate_sampler(tf.range(n_frames), cfg.max_vec_inputs, )
+    n_hand_inputs = tf.random.uniform([], minval=0, maxval=2, dtype=tf.int32)
+    n_dof_inputs = tf.random.uniform([], minval=0, maxval=23, dtype=tf.int32)
+
+    vec_inputs = tf.random.

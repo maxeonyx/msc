@@ -120,3 +120,70 @@ class TFDebertaXSoftmax(tf.keras.layers.Layer):
         output = stable_softmax(output, self.axis)
         output = tf.where(rmask, 0.0, output)
         return output
+
+def get_initializer(initializer_range: float = 0.02) -> tf.initializers.TruncatedNormal:
+    """
+    Creates a `tf.initializers.TruncatedNormal` with the given range.
+    Args:
+        initializer_range (*float*, defaults to 0.02): Standard deviation of the initializer range.
+    Returns:
+        `tf.initializers.TruncatedNormal`: The truncated normal initializer.
+    """
+    return tf.keras.initializers.TruncatedNormal(stddev=initializer_range)
+
+ACT2FN = {
+    # "gelu_10": gelu_10,
+    # "gelu_fast": gelu_fast,
+    # "gelu_new": gelu_new,
+    # "glu": glu,
+    # "mish": mish,
+    # "quick_gelu": quick_gelu,
+    "gelu": tf.keras.activations.gelu,
+    "relu": tf.keras.activations.relu,
+    "sigmoid": tf.keras.activations.sigmoid,
+    "silu": tf.keras.activations.swish,
+    "swish": tf.keras.activations.swish,
+    "tanh": tf.keras.activations.tanh,
+}
+
+def get_tf_activation(activation_string):
+    if activation_string in ACT2FN:
+        return ACT2FN[activation_string]
+    else:
+        raise KeyError(f"function {activation_string} not found in ACT2FN mapping {list(ACT2FN.keys())}")
+
+class TFDebertaIntermediate(tf.keras.layers.Layer):
+    def __init__(self, intermediate_size, initializer_range, hidden_act, **kwargs):
+        super().__init__(**kwargs)
+
+        self.dense = tf.keras.layers.Dense(
+            units=intermediate_size, kernel_initializer=get_initializer(initializer_range), name="dense"
+        )
+
+        if isinstance(hidden_act, str):
+            self.intermediate_act_fn = get_tf_activation(hidden_act)
+        else:
+            self.intermediate_act_fn = hidden_act
+
+    def call(self, hidden_states: tf.Tensor) -> tf.Tensor:
+        hidden_states = self.dense(inputs=hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+
+        return hidden_states
+
+class TFDebertaOutput(tf.keras.layers.Layer):
+    def __init__(self, initializer_range, hidden_size, hidden_dropout_prob, layer_norm_eps, **kwargs):
+        super().__init__(**kwargs)
+
+        self.dense = tf.keras.layers.Dense(
+            units=hidden_size, kernel_initializer=get_initializer(initializer_range), name="dense"
+        )
+        self.LayerNorm = tf.keras.layers.LayerNormalization(epsilon=layer_norm_eps, name="LayerNorm")
+        self.dropout = TFDebertaStableDropout(hidden_dropout_prob, name="dropout")
+
+    def call(self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = False) -> tf.Tensor:
+        hidden_states = self.dense(inputs=hidden_states)
+        hidden_states = self.dropout(hidden_states, training=training)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+
+        return hidden_states
