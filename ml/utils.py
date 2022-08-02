@@ -1,6 +1,24 @@
 from tensorflow import keras
 import tensorflow as tf
 
+def multidim_indices(shape, flatten=True):
+    """
+    Uses tf.meshgrid to get the indices for a tensor of any rank
+    Returns an int32 tensor of shape [ product(shape), rank ]
+    """
+    indices = tf.meshgrid(*[tf.range(s) for s in shape])
+    indices = tf.stack(indices, axis=-1)
+    if flatten:
+        indices = tf.reshape(indices, [-1, len(shape)])
+    return indices
+
+def multidim_indices_of(tensor, flatten=True):
+    """
+    Uses tf.meshgrid to get the indices for a tensor of any rank
+    Returns an int32 tensor of shape [ product(shape), rank ]
+    """
+    shape = tf.shape(tensor)
+    return multidim_indices(shape, flatten=flatten)
 
 def angle_wrap(angles):
     angles = tf.math.atan2(tf.sin(angles), tf.cos(angles))

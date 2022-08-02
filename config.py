@@ -2,30 +2,41 @@ from box import Box
 
 def get():
     return Box({
+        
         "shuffle_buffer_size": 130,
         "force": False,
         "convert_deg_to_rad": True,
         "cached_dataset_path": "./cache/tf_dataset",
-        "n_hands": 2,
-        "n_dof": 23,
+
         "decimate": True,
         "decimate_threshold": 0.3,
         "recluster": True,
-        "vector": False,
 
-        "target_is_sequence": True,
-        "relative_frame_idxs": False,
-        "scale_to_1_1": False,
-        # Chunk size is used for models that take a fixed input size.
-        # It is a number of animation frames, and can be no larger than
-        # the shortest animation in the dataset
-        "chunk_size": 6,
+        "pre": {
+            "scale_to_1_1": False,
+            # Chunk size is used for models that take a fixed input size.
+            # It is a number of animation frames, and can be no larger than
+            # the shortest animation in the dataset
+            "chunk_size": 6,
+            "n_hands": 2,
+            "n_dof": 23,
+            "limit_columns": True,
+        },
+    
+        "dream": {
+            "n_chunk_frames": 50,
+            "batch_size": 16,
+            "n_hands": 2,
+            "n_joints": 15,
+            "representation": "euler",
+            "limit_columns": False,
+        },
+
         # predict frames is the number of frames to predict when
         # vizualizing after each epoch
         "predict_frames": 20,
         "test_batch_size": 3,
 
-        "batch_size": 16,
         "steps": 100000,
         "steps_per_epoch": 1000,
 

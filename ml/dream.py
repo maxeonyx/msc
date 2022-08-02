@@ -2,6 +2,8 @@ import einops as ein
 from einops.layers.keras import EinMix
 import tensorflow as tf
 import typing
+
+from ml import data_tf, encoders, utils
 if typing.TYPE_CHECKING:
     from tensorflow.python import keras
     from tensorflow.python.keras import Input, Model, layers
@@ -12,40 +14,6 @@ import numpy as np
 from typing import Any, Optional, Tuple, Union, List
 
 import deberta
-
-def random_foveal_context(cfg, n_frames, x):
-
-    shape = tf.shape(x["angles"])
-    n_total_frames = shape[0]
-    
-    x["angles"] = rearrange(x["angles"], 'b, f, h, d -> b, f, (h, d)')
-    x["frame_idxs"] = rearrange(x["frame_idxs"], 'b, f, h, d -> b, f, (h, d)')
-    x["hand_idxs"] = rearrange(x["hand_idxs"], 'b, f, h, d -> b, f, (h, d)')
-    x["dof_idxs"] = rearrange(x["dof_idxs"], 'b, f, h, d -> b, f, (h, d)')
-
-    tok_per_frame = cfg.n_hands * cfg.n_dof
-    chunk_size = size
-
-    if aligned:
-        # get a random index
-        idx = tf.random.uniform([], minval=0, maxval=n_frames-chunk_size, dtype=tf.int32)
-        idx = idx * tok_per_frame
-    else:
-        idx = tf.random.uniform([], minval=0, maxval=n_frames*tok_per_frame-chunk_toks, dtype=tf.int32)
-
-    x["angles"] = x["angles"][idx:idx+chunk_toks]
-
-    if cfg.relative_frame_idxs:
-        x["frame_idxs"] = frame_idxs_for(cfg, idx % tok_per_frame, chunk_toks)
-    else:
-        x["frame_idxs"] = x["frame_idxs"][idx:idx+chunk_toks]
-
-
-    x["hand_idxs"] = x["hand_idxs"][idx:idx+chunk_toks]
-    x["dof_idxs"] = x["dof_idxs"][idx:idx+chunk_toks]
-
-    return x
-
 
 def bucket_scale_fn(decay_power, step_power, clip=1000):
     """
@@ -72,14 +40,15 @@ def bucket_scale_fn(decay_power, step_power, clip=1000):
     return do_clip(make_symmetric(center(g)))
 
 
-class RelativePositionEmbedding(tf.keras.Layer):
+class RelativePositionEmbedding(layers.Layer):
 
-    def __init__(self, max_N, D,  allow_negative=False):
+    def __init__(self, max_N, D,  allow_negative=False, trainable=True, name="rel_embd", dtype=None, dynamic=False, **kwargs):
         """
         If the computation only ever uses
         relative attention in one direction (eg. incremental multi-query layers with causal masking),
         then allow_negative can be set to false to halve memory use.
         """
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
         self.max_N = max_N
         if allow_negative:
             self.embedding = tf.keras.layers.Embedding(self.max_N * 2 - 1, D)
@@ -118,13 +87,17 @@ class RelativePositionEmbedding(tf.keras.Layer):
         return self.embedding(indices)
 
 
-class RelativePositionProjectionLookup(tf.keras.Layer):
+class RelativePositionProjectionLookup(layers.Layer):
 
-    def __init__(self, projection, relative_pos_embedding):
-        self.rpe = relative_pos_embedding
-        # seq dim should be first axis for the tf.gather below
-        self.projection = projection
-        self.cache = None
+    # def __init__(self, projection, relative_pos_embedding):
+    #     self.rpe = relative_pos_embedding
+    #     # seq dim should be first axis for the tf.gather below
+    #     self.projection = projection
+    #     self.d
+    #     self.cache = None
+
+    def __init__(self, trainable=True, name="rel_projection", dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
     
     def call(self, relative_pos):
         if self.cache is None:
@@ -132,13 +105,29 @@ class RelativePositionProjectionLookup(tf.keras.Layer):
             self.cache = self.projection(rel_embd)
         indices = self.rpe.get_indices(relative_pos)
         rel_proj = tf.gather(self.cache, indices, axis=0)
+        
         return rel_proj
 
 
-class IncrementalRelativeMultiQueryAttention(tf.Module):
+class IRMQA(layers.Layer):
+    """
+    Incremental Relative Multi-Query Attention.
 
-    def __init__(self, QK, V, D, H, rpe):
-        super().__init__()
+    Multi-query (MQ) attention (as opposed to multi-head attention)
+    has a number of query projections but only single, shared key and value
+    projections. This means that key/value need not be re-computed when
+    performing auto-regressive inference, reducing the time complexity of
+    inference significantly.
+    
+    Caching the key and value projections is called incremental inference.
+
+    This layer also supports relative position encoding.
+    """
+
+
+    def __init__(self, QK, V, D, H, rpe, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+        self.supports_masking = True
 
         self.QK = QK
         self.V = V
@@ -151,27 +140,28 @@ class IncrementalRelativeMultiQueryAttention(tf.Module):
         # k & v have m dimension first so they can be put into TensorArray
         self.wkc = EinMix('b m d -> m b qk', weight_shape='d qk', d=self.D, qk=self.QK)
 
-        self.wqp = RelativePositionProjectionLookup(
-            # TODO: This is BIIIIG....
-            projection=EinMix(
-                # ... is max_N
-                '... d -> ... h qk',
-                weight_shape='d h qk',
-                H=H,
-                D=D,
-                QK=QK,
-            ),
-            rpe=rpe,
-        )
-        self.wkp = RelativePositionProjectionLookup(
-            projection=EinMix(
-                'n d -> n qk',
-                weight_shape='d qk',
-                D=D,
-                QK=QK,
-            ),
-            rpe=rpe,
-        )
+        if rpe is not None:
+            self.wqp = RelativePositionProjectionLookup(
+                # TODO: This is BIIIIG....
+                projection=EinMix(
+                    # ... is max_N
+                    '... d -> ... h qk',
+                    weight_shape='d h qk',
+                    H=H,
+                    D=D,
+                    QK=QK,
+                ),
+                rpe=rpe,
+            )
+            self.wkp = RelativePositionProjectionLookup(
+                projection=EinMix(
+                    'n d -> n qk',
+                    weight_shape='d qk',
+                    D=D,
+                    QK=QK,
+                ),
+                rpe=rpe,
+            )
 
         self.wo = EinMix('b m h v -> b m d', weight_shape='h v d', v=self.V, h=self.H, d=self.D)
 
@@ -201,73 +191,118 @@ class IncrementalRelativeMultiQueryAttention(tf.Module):
         )
 
 
-    def call_incremental(self, embd, rel_pos, mask, training):
+    def call(self, z_embd, rel_pos, q_embd=None):
 
-        # M is the number of new inputs this iteration. Might be M=N, or might be M=1.
-        # N is the total number of inputs so far, including the current input. (so N >= M)
+        # MZ is the number of new inputs this iteration, the results of which will be cached.
+        #    Might be M=N, or might be M=1.
+        # MQ is the number of queries this iteration.
+        # N is the total number of inputs so far, including any new inputs. (so N >= MZ)
 
-        # embd is [B, M, D]
-        # rel_pos is [B, M, N] (int32)
+        # z_embd is [B, MZ, D]
+        # rel_pos is [B, MQ, N] (int32)
+        # q_embd is [B, MQ, D]. If q_embd is None, it is assumed to be z_embd, so 
+        #                       MQ == MZ
         # mask is [N, N]
-        # returns [B, M, D]
-        # and increases N_t to N_{t+1}= N_t + M
+        # returns [B, MQ, D]
+        # and increases N_t to N_{t+1}= N_t + MZ
+
+        if q_embd is None:
+            q_embd = z_embd
 
         i = self.k_cache.size()
 
-        v = self.wv(embd)
+        v = self.wv(z_embd)
+        # add MZ new values to the cache
         self.v_cache.write(i, v)
         v = self.v_cache.concat()
 
-        n_attn_types = 3
-        scale = 1. / tf.sqrt(self.D * n_attn_types)
+        rel_pos = tf.ensure_shape(rel_pos, [q_embd.shape[0], q_embd.shape[1], v.shape[0]])
 
         # c2c
-        qc = self.wqc(embd)
-        kc = self.wkc(embd)
+        qc = self.wqc(q_embd)
+        kc = self.wkc(z_embd)
 
+        # add MZ new keys to the cache
         self.kc_cache.write(i, kc)
         kc = self.kc_cache.concat()
 
-        c2c_attn_logits = tf.einsum('bhmk,bnk->bhmn', qc, kc)
+        attn_logits = tf.einsum('bhmk,bnk->bhmn', qc, kc)
 
-        # p2c
-        qp = self.wqp(rel_pos)
-        # kc
-        # h second last in this one because of embedding lookup
-        p2c_attn_logits = tf.einsum('bmnhk,bnk->bhmn', qp, kc)
+        # if using relative positions, use disentangled attention
+        if rel_pos is not None:
+            n_attn_types = 3
 
-        # c2p
-        # qc
-        kp = self.wkp(rel_pos)
-        c2p_attn_logits = tf.einsum('bhmk,bmnk->bhmn', qc, kp)
+            # p2c
+            qp = self.wqp(rel_pos)
+            # kc
+            # h second last in this one because of embedding lookup
+            attn_logits += tf.einsum('bmnhk,bnk->bhmn', qp, kc)
 
+            # c2p
+            # qc
+            kp = self.wkp(rel_pos)
+            attn_logits += tf.einsum('bhmk,bmnk->bhmn', qc, kp)
+        else: 
+            n_attn_types = 1
         
-        attn_logits = (c2c_attn_logits + p2c_attn_logits + c2p_attn_logits) * scale
-        attn_logits = self.dropout(attn_logits, training=training)
-        attn_weights = self.softmax(attn_logits, mask)
+        scale = 1. / tf.sqrt(self.D * n_attn_types)
+        attn_logits *= scale
+        attn_logits = self.dropout(attn_logits)
+        attn_weights = self.softmax(attn_logits)
     
         v_h = tf.einsum('bhmn,bnv->bhmv', attn_weights, v) # value-per-head
         v_o = self.wo(v_h) # project to output dimension
         return v_o
 
+class IRMQALayer(layers.Layer):
+    """
+    MQA, Intermediate and Output parts.
+    """
 
+    def __init__(self, cfg, rpe, trainable=True, name="irmqa", dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+        self.supports_masking = True
 
-class IRMQAT(tf.keras.layers.Layer):
+        self.irmqa = IRMQA(
+            QK=cfg.qk_dim,
+            V=cfg.v_dim,
+            D=cfg.d_dim,
+            H=cfg.n_heads,
+            rpe=rpe,
+            name=f"{name}_attn"
+        )
+        self.intermediate = deberta.TFDebertaIntermediate(
+            intermediate_size=cfg.intermediate_size,
+            initializer_range=cfg.initializer_range,
+            hidden_act=cfg.hidden_act,
+            name=f"{name}_intermediate"
+        )
+        self.output = deberta.TFDebertaOutput(
+            initializer_range=cfg.initializer_range,
+            hidden_size=cfg.hidden_size,
+            hidden_dropout_prob=cfg.hidden_dropout_prob,
+            layer_norm_eps=cfg.layer_norm_eps,
+            name=f"{name}_output"
+        )
+    
+    def call(self, embd, rel_pos, mask, training, q_embd=None):
 
-    def __init__(self, cfg, **kwargs) -> None:
-        super().__init__(**kwargs)
+        embd = self.irmqa(embd, rel_pos, mask, training, q_embd=q_embd)
+        embd = self.intermediate(embd)
+        embd = self.output(embd)
+
+        return embd
+
+class HandEncoder(layers.Layer):
+    """
+    Encoder for the previous
+    """
+
+    def __init__(self, cfg, name="hand_enc", **kwargs) -> None:
+        super().__init__(name=name, **kwargs)
 
         self.n_layers = cfg.n_layers
         self.embd_dim = cfg.embd_dim
-        
-        self.embd_vecs = EinMix(
-            pattern='f h d s -> f e',
-            weight_shape='h d s e',
-            e=cfg.embd_dim,
-            h=cfg.n_hands,
-            d=cfg.n_dof,
-            s=2
-        )
 
         self.rpe = RelativePositionEmbedding(
             # maximum number of inputs.
@@ -275,65 +310,282 @@ class IRMQAT(tf.keras.layers.Layer):
             # and n_layers "rel_proj" caches
             max_N=cfg.max_N,
             D=cfg.embd_dim,
+            name=f"{name}_rel_embd"
         )
         
         self.irmqa_layers = [
-            [
-                IncrementalRelativeMultiQueryAttention(
-                    QK=cfg.qk_dim,
-                    V=cfg.v_dim,
-                    D=cfg.d_dim,
-                    H=cfg.n_heads,
-                    rpe=self.rpe,
-                ),
-                deberta.TFDebertaIntermediate(
-                    intermediate_size=cfg.intermediate_size,
-                    initializer_range=cfg.initializer_range,
-                    hidden_act=cfg.hidden_act,
-                ),
-                deberta.TFDebertaOutput(
-                    initializer_range=cfg.initializer_range,
-                    hidden_size=cfg.hidden_size,
-                    hidden_dropout_prob=cfg.hidden_dropout_prob,
-                    layer_norm_eps=cfg.layer_norm_eps,
-                )
-            ]
+            IRMQALayer(cfg.layer, name=f"{name}_irmqa_{i}") for i in range(self.n_layers)
         ]
     
-    def call(self, embd, rel_pos, mask, training):
+    def call(self, embd, rel_pos):
 
-        for mqattn, interm, output in self.irmqa_layers:
-
-            embd = mqattn(embd, rel_pos, mask, training)
-            embd = interm(embd)
-            embd = output(embd)
+        mask = encoders.all_attention_mask()
+        for layer in self.irmqa_layers:
+            embd = layer(embd, rel_pos, mask)
         
         return embd
 
+def random_joint_order():
+    """
+    Produce a random selection of joint indices, such that they
+    still obey the hierarchy of the hand skeleton. i.e. the
+    wrist pos must be produced first, then the joints of each
+    finger must be produced in order (although they might be
+    interspersed.)
 
-def log_weights(n_max, n_samples, decay_by_d_every_power_of_b=(0.5, 10),):
+    Uses tensorflow only in order to run in data pipeline.
+    """
+    use_wrist = tf.random.categorical(tf.math.log([0.1, 0.9]), 1, tf.int32)[0]
     
-    D, B = decay_by_d_every_power_of_b
+    joint_idxs = tf.constant([], dtype=tf.int32)
+    if tf.equal(use_wrist, 0):
+        return joint_idxs
 
-    normalize = tf.linalg.normalize
+    wrist_idx = tf.constant([0])
+    thumb_idxs = tf.constant([1, 2, 3, 4])
+    index_idxs = tf.constant([5, 6, 7])
+    middle_idxs = tf.constant([8, 9, 10])
+    ring_idxs = tf.constant([11, 12, 13])
+    pinky_idxs = tf.constant([14, 15, 16])
+    
+    joint_idxs = tf.concat([joint_idxs, wrist_idx], 0)
+    
+    n_thumb_joints = tf.random.categorical(tf.math.log([0.2, 0.2, 0.2, 0.2, 0.2]), 1)[0]
+    n_index_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
+    n_middle_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
+    n_ring_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
+    n_pinky_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
+
+    joint_order = tf.concat([
+        tf.repeat([0], n_thumb_joints),
+        tf.repeat([1], n_index_joints),
+        tf.repeat([2], n_middle_joints),
+        tf.repeat([3], n_ring_joints),
+        tf.repeat([4], n_pinky_joints),
+    ])
+    joint_order = tf.random.shuffle(joint_order)
+
+    i_thumb = 0
+    i_index = 0
+    i_middle = 0
+    i_ring = 0
+    i_pinky = 0
+    for i in joint_order:
+        if tf.equal(i, 0):
+            joint_idxs = tf.concat([joint_idxs, thumb_idxs[i_thumb]], 0)
+            i_thumb += 1
+        elif tf.equal(i, 1):
+            joint_idxs = tf.concat([joint_idxs, index_idxs[i_index]], 0)
+            i_index += 1
+        elif tf.equal(i, 2):
+            joint_idxs = tf.concat([joint_idxs, middle_idxs[i_middle]], 0)
+            i_middle += 1
+        elif tf.equal(i, 3):
+            joint_idxs = tf.concat([joint_idxs, ring_idxs[i_ring]], 0)
+            i_ring += 1
+        elif tf.equal(i, 4):
+            joint_idxs = tf.concat([joint_idxs, pinky_idxs[i_pinky]], 0)
+            i_pinky += 1
+    
+    return joint_idxs
+
+class MultiJointDecoder(layers.Layer):
+    """
+    Decodes all joints of a hand in any valid topological order.
+    """
+
+    def __init__(self, cfg, trainable=True, name="joint_decoder", dtype=None, dynamic=False, **kwargs):
+        
+        self.cfg = cfg
+
+        self.joint_query_embeddings = layers.Embedding(17, cfg.embd_dim, name="joint_query_embeddings")
+
+        self.decoder = IRMQALayer(cfg.layer, rpe=None, name="decoder")
+        
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+
+    
+    def call(self, hand_embd, joint_order, training, *args, **kwargs):
+
+        i = tf.constant(0)
+
+        batch_size = tf.shape(hand_embd)[0]
+        joint_embds = tf.zeros_like([batch_size, 0, self.cfg.embd_dim])
+
+        while_cond = lambda i: tf.less(i, tf.shape(joint_order)[0])
+        def while_body(i, joint_embds):
+            joint_idx = joint_order[i]
+            joint_query = self.joint_query_embeddings(joint_idx)
+            
+            mask = encoders.all_attention_mask(batch_size, 1, tf.shape(joint_embds)[1])
+            new_joint_embd = self.decoder(joint_embds, q_embd=joint_query, rel_pos=None, mask=mask, training=training)
+
+            joint_embds = tf.concat([joint_embds, new_joint_embd], 1)
+            i += 1
+            return i, joint_embds
+
+        _i, joint_embds = tf.while_loop(
+            while_cond,
+            while_body,
+            [i, joint_embds],
+            shape_invariants=[
+                tf.shape(i),
+                tf.TensorShape([batch_size, None, self.cfg.embd_dim]),
+            ],
+            maximum_iterations=17,
+        )
+
+        return joint_embds
+
+
+class EulerAngleDecoder(layers.Layer):
+    """
+    Decodes euler angles into latent vectors.
+    """
+    
+    def __init__(self, cfg, trainable=True, name="euler_decoder", dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+        
+        self.euler_query_embeddings = layers.Embedding(3, cfg.embd_dim, name="euler_query_embeddings")
+
+        self.decoder = IRMQALayer(cfg.layer, rpe=None, name=f"{name}_irmqa")
+
+    
+    def call(self, joint_embds, *args, **kwargs):
+
+        batch_size = tf.shape(joint_embds)[0]
+
+        kv_embd = joint_embds
+
+        mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
+        euler_a = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+        kv_embd = tf.concat([kv_embd, euler_a], 1)
+
+        mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
+        euler_b = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+        kv_embd = tf.concat([kv_embd, euler_b], 1)
+
+        mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
+        euler_c = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+
+        return tf.concat([euler_a, euler_b, euler_c], 1)
+
+class Embedder(layers.Layer):
+
+    def __init__(self, cfg, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+
+        self.begin_token = layers.Embedding(1, cfg.embd_dim, name='begin_token_embd')
+        self.dof_embd = layers.Embedding(cfg.n_dof, cfg.embd_dim, name='dof_embd')
+        self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim, name='hand_embd')
+        self.frame_angles_embd = layers.Dense(cfg.embd_dim, name='frame_angle_embd')
+        self.single_angle_embd = layers.Dense(cfg.embd_dim, name='single_angle_embd')
+
+    def call(self, inputs):
+        full_frames = inputs["full_frames"]
+        partial_inputs = inputs["partial_inputs"]
+        partial_input_idxs = inputs["partial_input_idxs"]
+
+        frame_embd = self.frame_angles_embd(full_frames)
+
+        hand_idxs = partial_input_idxs[..., 0]
+        dof_idxs = partial_input_idxs[..., 1]
+        single_embd = self.single_angle_embd(partial_inputs) + self.hand_embd(hand_idxs) + self.dof_embd(dof_idxs)
+
+        return {
+            "full_frame_embd": frame_embd,
+            "full_frame_idxs": inputs["full_frame_idxs"],
+            "partial_embd": single_embd,
+            "partial_frame_idxs": inputs["partial_frame_idxs"]
+        }
+
+
+def random_subset(options, n, seed=None):
+    options = tf.random.shuffle(options, seed=seed)
+    return options[:n]
+
+def weighted_random_n(n_max, D=2., B=10., seed=None):
+    """
+    Picks random indices from [0, n_max) with skewed distribution
+    towards the lower numbers.
+    p(index i) = 1/D * p(index Di) = 1/D**2 * p(index D**2i)
+    The probability of each index decreases by D every power of b
+    """
     logb1p = lambda b, x: tf.math.log1p(x)/tf.math.log(b)
-    powf = lambda b, x: tf.math.pow(tf.cast(b, tf.float32), x)
-    
-    weights = normalize(powf(D, logb1p(B, tf.range(n))))
+    # probabilities
+    # probabilities = l1_norm(powf(D, -logb1p(B, tf.range(n_max))))
+    # log probabilities base e
+    log_probabilities = -logb1p(B, tf.range(n_max))*tf.math.log(D)
 
-def embedder(cfg, x):
+    return tf.random.categorical(log_probabilities[None, :], 1, seed=seed)[0, 0]
 
-    angles = Input(shape=[None, cfg.n_hands, cfg.n_dofs], name='angles')
+def hierarchical_batched_random_chunk(cfg, x, seed=None):
+
+    angles = x["angles"]
     angles = tf.ensure_shape(angles, [None, cfg.n_hands, cfg.n_dof])
 
     n_frames = tf.shape(angles)[0]
     n_hands = tf.shape(angles)[1]
-    n_dof = tf.shape(angles)[2]
+    n_joints = tf.shape(angles)[2]
+    n_dof = tf.shape(angles)[3]
 
-    sincos = ein.rearrange([tf.sin(angles), tf.cos(angles)], 's f h d -> f h d s')
+    batch_size = cfg.batch_size
+
+    sincos = ein.rearrange([tf.sin(angles), tf.cos(angles)], 's f h d -> (f h) j d s', d=3, j=17)
+
+    frame_idxs = tf.map_fn(
+        lambda: random_subset(tf.range(n_frames), cfg.n_chunk_frames, seed=seed),
+        tf.range(batch_size)
+    )
+    n_full_frames = weighted_random_n(cfg.n_chunk_frames, D=100., B=cfg.n_chunk_frames, seed=seed) # 100 times more likely to have 0 than 50
+    full_frame_idxs = frame_idxs[:, :n_full_frames]
+    partial_frame_idxs = frame_idxs[:, n_full_frames:]
+
+    full_frames = tf.gather(sincos, full_frame_idxs)
     
-    vec_idxs = tf.random.log_uniform_candidate_sampler(tf.range(n_frames), cfg.max_vec_inputs, )
-    n_hand_inputs = tf.random.uniform([], minval=0, maxval=2, dtype=tf.int32)
-    n_dof_inputs = tf.random.uniform([], minval=0, maxval=23, dtype=tf.int32)
+    n_partial_frame_inputs = weighted_random_n(n_hands*n_dof, D=10., B=n_hands*n_dof, seed=seed)
 
-    vec_inputs = tf.random.
+    batch_frame_idxs = utils.multidim_indices_of(partial_frame_idxs, flatten=False)
+    flat_b_f_i = ein.rearrange(batch_frame_idxs, 'b f i -> (b f) i')
+    hand_dof_idxs = utils.multidim_indices([n_hands, n_dof], flatten=True)
+    partial_input_idxs = tf.map_fn(
+        lambda i_b, i_f: random_subset(hand_dof_idxs, n_partial_frame_inputs, seed=seed),
+        flat_b_f_i,
+    )
+    # add frame idxs to partial input idxs
+    partial_frame_input_idxs = tf.concat([partial_frame_idxs, partial_input_idxs], axis=-1)
+    partial_inputs = tf.gather_nd(sincos, partial_frame_input_idxs)
+
+    return {
+        "full_frames": full_frames,
+        "full_frame_idxs": full_frame_idxs,
+        "partial_inputs": partial_inputs,
+        "partial_frame_idxs": partial_frame_idxs,
+        "partial_input_idxs": partial_input_idxs,
+    }
+
+def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset):
+    
+    # train input isn't always frame aligned
+    train_dataset.map(lambda x: hierarchical_batched_random_chunk(cfg, x))
+    train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
+
+    # test input is always frame-aligned
+    # take fixed size chunks from the tensor at random frame indices
+    test_dataset = test_dataset.repeat(100) # N = 100 repeats * 12 examples = 1200 test examples
+    train_dataset.map(lambda x: hierarchical_batched_random_chunk(cfg, x, seed=1234))
+
+    return train_dataset, test_dataset
+
+
+def train(cfg):
+
+    d_train, d_test = data_tf.tf_dataset(cfg, dream_dataset)
+
+    # 
+    # model
+    #  - embedder
+    #  - encoder
+    #  - decoder
+    # 
+    # 

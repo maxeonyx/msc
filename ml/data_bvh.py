@@ -34,10 +34,10 @@ def extract_bvh_file(file_content):
     while True:
         if re.match('MOTION', next(lines)):
             break
-    
+
     n_frames = int(re.match('Frames: (.+)', next(lines).strip()).group(1))
     frame_time_s = float(re.match('Frame Time: (.+)', next(lines).strip()).group(1))
-    
+
     nums = []
     for i in range(n_frames):
         nums.append(list(map(float, next(lines).strip().split(' '))))
@@ -84,8 +84,40 @@ def bvh_is_hand(file_content):
 
 """
 The columns that we are extracting to predict hand motion on.
+
+Includes all DOF from all joints, but not the *location* of the hand.
 """
-USEFUL_COLUMNS = [
+COL_ALL_JOINTS = [
+    3,  4,  5, # Wrist
+
+    6,  7,  8,  # THUMB_CMC_FE
+    9,  10, 11, # THUMB_CMC_AA
+    12, 13, 14, # THUMB_MCP_FE
+    15, 16, 17, # THUMB_IP_FE
+
+    18, 19, 20, # INDEX_MCP
+    21, 22, 23, # INDEX_PIP_FE
+    24, 25, 26, # INDEX_DIP_FE
+
+    27, 28, 29, # MIDDLE_MCP
+    30, 31, 32, # MIDDLE_PIP_FE
+    33, 34, 35, # MIDDLE_DIP_FE
+
+    36, 37, 38, # RING_MCP
+    39, 40, 41, # RING_PIP_FE
+    42, 43, 44, # RING_DIP_FE
+
+    45, 46, 47, # PINKY_MCP
+    48, 49, 50, # PINKY_PIP_FE
+    51, 52, 53, # PINKY_DIP_FE
+]
+
+"""
+The columns that we are extracting to predict hand motion on.
+
+Includes only the DOF that vary.
+"""
+COL_USEFUL = [
     3, 4, 5, # Wrist
 
     8,  # THUMB_CMC_FE  Z-rot
@@ -114,22 +146,24 @@ USEFUL_COLUMNS = [
     53, # PINKY_DIP_FE  Z-rot
 ]
 
-def extract_useful_columns(bvh_data):
+def extract_columns(bvh_data, cols):
     """
     Extract the degrees of freedom useful for my experiments.
 
     >>> extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data.shape
     (1, 54)
-    >>> extract_useful_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data).shape
+    >>> extract_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data, COL_USEFUL).shape
     (1, 23)
-    >>> extract_useful_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data)[0, 0]
+    >>> extract_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data, COL_ALL_JOINTS).shape
+    (1, 51)
+    >>> extract_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data, COL_USEFUL)[0, 0]
     36.32338
-    >>> extract_useful_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data)[0, 2]
+    >>> extract_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data, COL_USEFUL)[0, 2]
     24.17694
-    >>> extract_useful_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data)[0, 4]
+    >>> extract_columns(extract_bvh_file(TEMPLATE_LEFT_HAND_BVH).data, COL_USEFUL)[0, 4]
     1.964441
     """
-    return bvh_data[:, USEFUL_COLUMNS]
+    return bvh_data[:, cols]
 
 
 def all_bvh_files(path):
@@ -164,10 +198,10 @@ def chunk(g, n):
         except StopIteration:
             break
 
-def get_bvh_data(bvh_dir=None, convert_deg_to_rad=True):
+def get_bvh_data(bvh_dir=None, limit_columns=True, convert_deg_to_rad=True):
     """
     Get a list of all the BVH data in the manipnet dataset.
-    
+
     Returns list of (filename, obj) pairs where obj.data has shape (n_frames, n_deg_of_free)
 
     Example below based on the number of files in the manipnet database as of the time of writing.
@@ -177,11 +211,11 @@ def get_bvh_data(bvh_dir=None, convert_deg_to_rad=True):
 
     """
     for (l_fname, l_text), (r_fname, r_text) in chunk(read_hand_bvh_files(bvh_dir or DEFAULT_BVH_DIR), 2):
-        
+
         if "left" in r_fname.lower() and "right" in l_fname.lower():
             l_fname, r_fname = r_fname, l_fname
             l_text, r_text = r_text, l_text
-        
+
         assert "left" in l_fname.lower(), f"Filename {l_fname} does not fit the pattern."
         assert "right" in r_fname.lower(), f"Filename {l_fname} does not fit the pattern."
         assert l_fname.lower().replace("left", "right") == r_fname.lower()
@@ -192,21 +226,26 @@ def get_bvh_data(bvh_dir=None, convert_deg_to_rad=True):
         assert l_obj.data.shape == r_obj.data.shape
         assert l_obj.frame_time_s == r_obj.frame_time_s
 
-        # limit columns to useful ones
-        l_obj.data = extract_useful_columns(l_obj.data)
-        r_obj.data = extract_useful_columns(r_obj.data)
+        if limit_columns:
+            cols = COL_USEFUL
+        else:
+            cols = COL_ALL_JOINTS
+
+        # extract a subset of the columns
+        l_obj.data = extract_columns(l_obj.data, cols)
+        r_obj.data = extract_columns(r_obj.data, cols)
 
         name = os.path.commonprefix([l_fname, r_fname])
 
         # axes are [frame, hand, dof]
         data = np.stack([l_obj.data, r_obj.data], axis=1)
-        
+
         if convert_deg_to_rad:
             data = data / 360 * (2*np.pi)
-        
+
         yield name, data, data.shape[0]
 
-def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True):
+def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, limit_columns=True):
     """
     Get a numpy dataset of all the BVH data in the manipnet dataset.
 
@@ -235,7 +274,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True):
     else:
         print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
 
-    data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
+    data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad, limit_columns=limit_columns)]
     data.sort(key=lambda x: x[0])
     # sort by filename
     filenames, angles, n_frames = [], [], []
@@ -249,7 +288,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True):
 
     return filenames, angles, n_frames
 
-def np_dataset(force=False, convert_deg_to_rad=True):
+def np_dataset(force=False, convert_deg_to_rad=True, limit_columns=True):
     """
     Get a numpy dataset of all the BVH data in the manipnet dataset.
 
@@ -275,7 +314,7 @@ def np_dataset(force=False, convert_deg_to_rad=True):
     else:
         print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
 
-    data = [(f, d, n) for f, d, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad)]
+    data = [(f, d, n) for f, d, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad, limit_columns=limit_columns)]
     data.sort(key=lambda x: x[0])
     # sort by filename
     data = np.array(data, dtype=object)
@@ -296,7 +335,7 @@ def dataset_means():
         d = np_dataset()
         dd = np.concatenate(d[:, 1])
         dataset_means_cache = utils.circular_mean(dd, axis=0)
-    
+
     return dataset_means_cache
 
 def reclustered_dataset(dataset=None):
@@ -306,7 +345,7 @@ def reclustered_dataset(dataset=None):
     means = dataset_means()
     for i in range(dataset.shape[0]):
         dataset[i, 1] = utils.recluster(dataset[i, 1], frame_axis=0, circular_means=means)
-    
+
     return dataset
 
 def np_decimated_time_dim(datasets=None, force=False, norm_diff=1.0):
@@ -334,9 +373,9 @@ def np_decimated_time_dim(datasets=None, force=False, norm_diff=1.0):
                 new_track.append(prev_d)
                 prev_rc = curr
                 prev_d = d_track[i_frame]
-        
+
         d[i_example, 1] = np.array(new_track)
-    
+
     return d
 
 def load_one_bvh_file(filename, convert_deg_to_rad=True):
@@ -346,14 +385,14 @@ def load_one_bvh_file(filename, convert_deg_to_rad=True):
     with open(filename, 'r') as f:
         content = f.read()
     obj = extract_bvh_file(content)
-    obj.data = extract_useful_columns(obj.data)
+    obj.data = extract_columns(obj.data)
     if convert_deg_to_rad:
         # convert back to degrees
         obj.data = obj.data /  360 * (2*np.pi)
     return obj.data
 
 
-def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
+def write_bvh_files(data, name, limit_columns=True, output_dir=None, convert_rad_to_deg=True):
     """
     Write a new pair of animation files (left and right hands) from a single data array.
     """
@@ -371,14 +410,20 @@ def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
         # convert back to degrees
         data = data / (2*np.pi) * 360
 
+
+    if limit_columns:
+        column_map = USEFUL_COLUMNS
+    else:
+        column_map = list(range(54))
+
     output_dir = output_dir or DEFAULT_OUTPUT_BVH_DIR
 
     left_hand = TEMPLATE_LEFT_HAND_BVH
     right_hand = TEMPLATE_RIGHT_HAND_BVH
-    
+
     def write_file(content, filename, data):
         with open(filename, 'w') as out_file:
-            
+
             lines = content.split('\n')
             lines = iter(lines)
 
@@ -388,7 +433,7 @@ def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
                 print(line, file=out_file)
                 if re.match('MOTION', line):
                     break
-            
+
             # write new frame count
             line = next(lines)
             n_frames = int(re.match('Frames: (.+)', line.strip()).group(1))
@@ -397,15 +442,15 @@ def write_bvh_files(data, name, output_dir=None, convert_rad_to_deg=True):
             # echo frame time
             line = next(lines)
             print(line, file=out_file)
-            
+
             dummy_nums = list(map(float, next(lines).strip().split(' ')))
             for i in range(data.shape[0]):
                 nums = [n for n in dummy_nums]
-                for col in range(len(USEFUL_COLUMNS)):
-                    nums[USEFUL_COLUMNS[col]] = data[i, col]
-                
+                for col in range(len(column_map)):
+                    nums[column_map[col]] = data[i, col]
+
                 print(' '.join(str(n) for n in nums), file=out_file)
-    
+
     left_filename = os.path.join(output_dir, name + '.left.generated.bvh')
     write_file(left_hand, left_filename, data[:, 0])
     if data.shape[1] == 2:

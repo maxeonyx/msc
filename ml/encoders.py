@@ -1,5 +1,6 @@
 import tensorflow as tf
-from tensorflow.keras import layers, Model, Input
+from tensorflow.python import keras
+from tensorflow.python.keras import layers, Model, Input
  
 def conv(cfg, name="conv"):
     inputs = Input(shape=(None, cfg.embd_dim))
@@ -25,6 +26,12 @@ def mlp(cfg, name="mlp"):
     outputs = embd
 
     return Model(inputs, outputs, name=name)
+
+def all_attention_mask(batch_size, n_dest, n_src, dtype):
+    """
+    Allow attention to flow between any two tokens.
+    """
+    return tf.ones([batch_size, n_dest, n_src], dtype=dtype)
 
 def causal_attention_mask(batch_size, n_dest, n_src, dtype):
     """

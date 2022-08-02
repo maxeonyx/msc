@@ -196,7 +196,7 @@ def random_flat_vector_chunk(cfg, x):
 
 
 # take np BVH dataset and return angles, hand idxs, frame idxs, and dof idxs
-def tf_dataset(cfg):
+def tf_dataset(cfg, finish_fn):
     """
     Takes a np BVH dataset, of type []
     returns a model-agnostic tf.data.Dataset pipeline, which can be further transformed.
@@ -228,18 +228,18 @@ def tf_dataset(cfg):
 
     dataset = dataset.snapshot(cfg.cached_dataset_path, compression=None)
     dataset = dataset.cache()
-    dataset = dataset.repeat()
-    dataset = dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
+    dataset = dataset.shuffle(seed=1234) # keep seed the same for reproducibility of test error
+    test_dataset = dataset.take(12) # take 12 to test
+    train_dataset = dataset.skip(12) # all except first 12
+    train_dataset = train_dataset.repeat()
+    train_dataset = train_dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
     
-    if cfg.vector:
-        return tf_dataset_vector(cfg, dataset)
-    else:
-        return tf_dataset_scalar(cfg, dataset)
+    return finish_fn(cfg, train_dataset, test_dataset)
 
-def tf_dataset_scalar(cfg, dataset):
+def pre_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset):
     
     # train input isn't always frame aligned
-    train_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
+    train_dataset = train_dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))
     train_dataset = train_dataset.batch(cfg.batch_size)
     # split into input and target, with 1 token offset
     train_dataset = train_dataset.map(lambda x: to_train_input_and_target(cfg, x))
@@ -247,30 +247,10 @@ def tf_dataset_scalar(cfg, dataset):
 
     # test input is always frame-aligned
     # take fixed size chunks from the tensor at random frame indices
-    test_dataset = dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size + cfg.predict_frames, x, aligned=True))
+    test_dataset = test_dataset.repeat(100) # N = 100 repeats * 12 examples = 1200 chunks
+    test_dataset = test_dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size + cfg.predict_frames, x, aligned=True, seed=1234))
     test_dataset = test_dataset.map(lambda x: to_test_input_and_target(cfg, x))
     # test dataset doesn't need to be split
     test_dataset = test_dataset.batch(cfg.test_batch_size)
-
-    return train_dataset, test_dataset
-    
-
-def tf_dataset_vector(cfg, dataset):
-    
-    # ignore hand_idxs and dof_idxs
-    dataset = dataset.map(lambda x: {"angles": x["angles"], "frame_idxs": x["frame_idxs"]})
-
-    dataset = dataset.map(lambda x: random_flat_vector_chunk(cfg, x))
-    dataset = dataset.map(to_sin_cos)
-
-    train_dataset = dataset.batch(cfg.batch_size)
-    # split into input and target, with 1 token offset
-    train_dataset = train_dataset.map(lambda x: to_train_input_and_target(cfg, x))
-    train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
-
-    # test input is always frame-aligned
-    test_dataset = test_dataset.map(lambda x: to_test_input_and_target(cfg, x))
-    # test dataset doesn't need to be split
-    test_dataset = test_dataset.batch(1)
 
     return train_dataset, test_dataset

@@ -21,6 +21,8 @@ limitations under the License.
 """
 
 import tensorflow as tf
+from tensorflow.python import keras
+from tensorflow.python.keras import layers, Model, Input
 import numpy as np
 from typing import Optional, Tuple, Union, List
 
@@ -152,11 +154,11 @@ def get_tf_activation(activation_string):
     else:
         raise KeyError(f"function {activation_string} not found in ACT2FN mapping {list(ACT2FN.keys())}")
 
-class TFDebertaIntermediate(tf.keras.layers.Layer):
+class TFDebertaIntermediate(layers.Layer):
     def __init__(self, intermediate_size, initializer_range, hidden_act, **kwargs):
         super().__init__(**kwargs)
 
-        self.dense = tf.keras.layers.Dense(
+        self.dense = layers.Dense(
             units=intermediate_size, kernel_initializer=get_initializer(initializer_range), name="dense"
         )
 
@@ -171,14 +173,14 @@ class TFDebertaIntermediate(tf.keras.layers.Layer):
 
         return hidden_states
 
-class TFDebertaOutput(tf.keras.layers.Layer):
+class TFDebertaOutput(layers.Layer):
     def __init__(self, initializer_range, hidden_size, hidden_dropout_prob, layer_norm_eps, **kwargs):
         super().__init__(**kwargs)
 
-        self.dense = tf.keras.layers.Dense(
+        self.dense = layers.Dense(
             units=hidden_size, kernel_initializer=get_initializer(initializer_range), name="dense"
         )
-        self.LayerNorm = tf.keras.layers.LayerNormalization(epsilon=layer_norm_eps, name="LayerNorm")
+        self.LayerNorm = layers.LayerNormalization(epsilon=layer_norm_eps, name="LayerNorm")
         self.dropout = TFDebertaStableDropout(hidden_dropout_prob, name="dropout")
 
     def call(self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = False) -> tf.Tensor:

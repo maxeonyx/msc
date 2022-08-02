@@ -1,7 +1,13 @@
 import math
+import typing
 
 import tensorflow as tf
-from tensorflow.keras import layers, Model, Input
+if typing.TYPE_CHECKING:
+    from tensorflow.python import keras
+    from tensorflow.python.keras import Input, Model, layers
+else:
+    from tensorflow import keras
+    from tensorflow.keras import Input, Model, layers
 import einops
 
 from ml import utils
