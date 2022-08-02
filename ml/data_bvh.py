@@ -392,7 +392,7 @@ def load_one_bvh_file(filename, convert_deg_to_rad=True):
     return obj.data
 
 
-def write_bvh_files(data, name, limit_columns=True, output_dir=None, convert_rad_to_deg=True):
+def write_bvh_files(data, name, column_map, output_dir=None, convert_rad_to_deg=True):
     """
     Write a new pair of animation files (left and right hands) from a single data array.
     """
@@ -409,12 +409,6 @@ def write_bvh_files(data, name, limit_columns=True, output_dir=None, convert_rad
     if convert_rad_to_deg:
         # convert back to degrees
         data = data / (2*np.pi) * 360
-
-
-    if limit_columns:
-        column_map = USEFUL_COLUMNS
-    else:
-        column_map = list(range(54))
 
     output_dir = output_dir or DEFAULT_OUTPUT_BVH_DIR
 

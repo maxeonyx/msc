@@ -1,4 +1,4 @@
-from tensorflow import keras
+from tensorflow.python import keras
 import tensorflow as tf
 
 def multidim_indices(shape, flatten=True):

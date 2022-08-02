@@ -1,5 +1,6 @@
 import tensorflow as tf
-from tensorflow.keras import layers, Model, Input
+from tensorflow.python import keras
+from tensorflow.python.keras import layers, Model, Input
 import tensorflow_probability as tfp
 from tensorflow_probability import distributions as tfd
 
@@ -58,8 +59,6 @@ def von_mises(cfg, name="von_mises"):
 
 def query_decoder(cfg, name="query_decoder"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
-
-    
 
     params = layers.Dense(2, name="params")(inputs)
     return Model(inputs=inputs, outputs=params, name=f"{name}_params")

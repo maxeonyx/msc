@@ -2,8 +2,8 @@ from cmath import e
 import os
 
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, Model, Input
+from tensorflow.python import keras
+from tensorflow.python.keras import layers, Model, Input
 
 import config
 from ml import data_tf, predict, utils, viz, embedders, encoders, decoders

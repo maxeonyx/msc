@@ -1,17 +1,9 @@
 import einops as ein
 from einops.layers.keras import EinMix
 import tensorflow as tf
-import typing
-
 from ml import data_tf, encoders, utils
-if typing.TYPE_CHECKING:
-    from tensorflow.python import keras
-    from tensorflow.python.keras import Input, Model, layers
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
-import numpy as np
-from typing import Any, Optional, Tuple, Union, List
+from tensorflow.python import keras
+from tensorflow.python.keras import Input, Model, layers
 
 import deberta
 
@@ -303,23 +295,37 @@ class HandEncoder(layers.Layer):
 
         self.n_layers = cfg.n_layers
         self.embd_dim = cfg.embd_dim
-
-        self.rpe = RelativePositionEmbedding(
-            # maximum number of inputs.
-            # defines the size of the single "rel_embd" cache
-            # and n_layers "rel_proj" caches
-            max_N=cfg.max_N,
-            D=cfg.embd_dim,
-            name=f"{name}_rel_embd"
-        )
         
         self.irmqa_layers = [
-            IRMQALayer(cfg.layer, name=f"{name}_irmqa_{i}") for i in range(self.n_layers)
+            IRMQALayer(cfg, name=f"{name}_irmqa_{i}") for i in range(self.n_layers)
         ]
     
     def call(self, embd, rel_pos):
 
-        mask = encoders.all_attention_mask()
+        batch_size = tf.shape(embd)[0]
+        mask = encoders.all_attention_mask(batch_size, embd.shape[1], embd.shape[2])
+        for layer in self.irmqa_layers:
+            embd = layer(embd, rel_pos, mask)
+        
+        return embd
+
+class HandDecoder(layers.Layer):
+    """
+    Decodes target hands, specified by embeddings and relative positions.
+    """
+
+    def __init__(self, cfg, rpe, name="hand_dec", **kwargs) -> None:
+        super().__init__(name=name, **kwargs)
+        self.hand_query_embedding = layers.Embedding(2, cfg.embd_dim, name=f"{name}/query_embedding")
+        self.decoder = IRMQALayer(cfg, rpe, name=f"{name}/irmqa")
+    
+    def call(self, kv_embd, q_hand_idxs, rel_pos):
+
+        batch_size = tf.shape(embd)[0]
+        mask = encoders.all_attention_mask(batch_size, q_hand_idxs.shape[1], kv_embd.shape[2])
+
+        q_embds = self.hand_query_embedding(q_hand_idxs)
+
         for layer in self.irmqa_layers:
             embd = layer(embd, rel_pos, mask)
         
@@ -398,9 +404,9 @@ class MultiJointDecoder(layers.Layer):
         
         self.cfg = cfg
 
-        self.joint_query_embeddings = layers.Embedding(17, cfg.embd_dim, name="joint_query_embeddings")
+        self.joint_query_embeddings = layers.Embedding(17, cfg.embd_dim, name=f"{name}/query_embeddings")
 
-        self.decoder = IRMQALayer(cfg.layer, rpe=None, name="decoder")
+        self.decoder = IRMQALayer(cfg.layer, rpe=None, name=f"{name}/irmqa")
         
         super().__init__(trainable, name, dtype, dynamic, **kwargs)
 
@@ -470,34 +476,58 @@ class EulerAngleDecoder(layers.Layer):
 
         return tf.concat([euler_a, euler_b, euler_c], 1)
 
-class Embedder(layers.Layer):
+class HierarchicalHandPredictor(layers.Layer):
 
-    def __init__(self, cfg, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+    def __init__(self, cfg, trainable=True, name="hhp", dtype=None, dynamic=False, **kwargs):
         super().__init__(trainable, name, dtype, dynamic, **kwargs)
 
-        self.begin_token = layers.Embedding(1, cfg.embd_dim, name='begin_token_embd')
-        self.dof_embd = layers.Embedding(cfg.n_dof, cfg.embd_dim, name='dof_embd')
-        self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim, name='hand_embd')
-        self.frame_angles_embd = layers.Dense(cfg.embd_dim, name='frame_angle_embd')
-        self.single_angle_embd = layers.Dense(cfg.embd_dim, name='single_angle_embd')
+        self.rpe = RelativePositionEmbedding(
+            # maximum number of inputs.
+            # defines the size of the single "rel_embd" cache
+            # and n_layers "rel_proj" caches
+            max_N=cfg.max_N,
+            D=cfg.embd_dim,
+            name=f"{name}/rel_embd"
+        )
 
-    def call(self, inputs):
+        # token to represent 'empty' conditioning info
+        self.empty_token = layers.Embedding(1, cfg.embd_dim, name=f'{name}/begin_token_embd')
+        self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim, name=f'{name}/hand_embd')
+        self.joint_embd = layers.Embedding(cfg.n_joints, cfg.embd_dim, name=f'{name}/joint_embd')
+        self.euler_embd = layers.Embedding(3, cfg.embd_dim, name=f'{name}/euler_embd')
+
+        self.frame_angles_embd = layers.Dense(cfg.embd_dim, name=f'{name}/frame_angle_embd')
+        self.single_angle_embd = layers.Dense(cfg.embd_dim, name=f'{name}/single_angle_embd')
+
+        self.hand_encoder = HandEncoder(cfg.hand_encoder, name=f"{name}/hand_encoder")
+        self.hand_decoder = HandDecoder(cfg.hand_decoder, name=f"{name}/hand_decoder")
+        self.joint_decoder = MultiJointDecoder(cfg.joint_decoder, name=f"{name}/joint_decoder")
+        self.dof_decoder = EulerAngleDecoder(cfg.dof_decoder, name=f"{name}/dof_decoder")
+
+    def reset_cache(self):
+
+
+    
+    def call(self, inputs, *args, **kwargs):
+
         full_frames = inputs["full_frames"]
+        full_frame_idxs = inputs["full_frame_idxs"]
+        partial_frame_idxs = inputs["partial_frame_idxs"]
+        partial_frame_idxs = inputs["partial_input_idxs"]
         partial_inputs = inputs["partial_inputs"]
-        partial_input_idxs = inputs["partial_input_idxs"]
 
-        frame_embd = self.frame_angles_embd(full_frames)
+        if tf.equal(tf.shape(full_frames)[1], 0):
+            # if there's no conditioning info, return a batch of the "empty" token
+            frame_embd = self.empty_token(tf.zeros([tf.shape(full_frames)[0], 1], dtype=tf.int32))
+        else:
+            frame_idxs = full_frame_idxs[..., 0]
+            hand_idxs = full_frame_idxs[..., 1]
+            frame_embd = self.frame_angles_embd(full_frames) + self.hand_embd(hand_idxs)
+        
+        full_rel_pos = full_frame_idxs[..., None, :] - full_frame_idxs[..., :, None]
+        frame_embd = self.hand_encoder(frame_embd, full_rel_pos)
 
-        hand_idxs = partial_input_idxs[..., 0]
-        dof_idxs = partial_input_idxs[..., 1]
-        single_embd = self.single_angle_embd(partial_inputs) + self.hand_embd(hand_idxs) + self.dof_embd(dof_idxs)
-
-        return {
-            "full_frame_embd": frame_embd,
-            "full_frame_idxs": inputs["full_frame_idxs"],
-            "partial_embd": single_embd,
-            "partial_frame_idxs": inputs["partial_frame_idxs"]
-        }
+        hand_query_embd = 
 
 
 def random_subset(options, n, seed=None):
@@ -581,6 +611,8 @@ def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dat
 def train(cfg):
 
     d_train, d_test = data_tf.tf_dataset(cfg, dream_dataset)
+
+    
 
     # 
     # model
