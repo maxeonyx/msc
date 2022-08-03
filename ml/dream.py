@@ -183,7 +183,7 @@ class IRMQA(layers.Layer):
         )
 
 
-    def call(self, z_embd, rel_pos, q_embd=None):
+    def call(self, kv_embd, q_embd=None, rel_pos=None):
 
         # MZ is the number of new inputs this iteration, the results of which will be cached.
         #    Might be M=N, or might be M=1.
@@ -198,21 +198,20 @@ class IRMQA(layers.Layer):
         # returns [B, MQ, D]
         # and increases N_t to N_{t+1}= N_t + MZ
 
+        # if q_embd is not specified then do self-attention
         if q_embd is None:
-            q_embd = z_embd
+            q_embd = kv_embd
 
         i = self.k_cache.size()
 
-        v = self.wv(z_embd)
+        v = self.wv(kv_embd)
         # add MZ new values to the cache
         self.v_cache.write(i, v)
         v = self.v_cache.concat()
 
-        rel_pos = tf.ensure_shape(rel_pos, [q_embd.shape[0], q_embd.shape[1], v.shape[0]])
-
         # c2c
         qc = self.wqc(q_embd)
-        kc = self.wkc(z_embd)
+        kc = self.wkc(kv_embd)
 
         # add MZ new keys to the cache
         self.kc_cache.write(i, kc)
@@ -224,6 +223,8 @@ class IRMQA(layers.Layer):
         if rel_pos is not None:
             n_attn_types = 3
 
+            rel_pos = tf.ensure_shape(rel_pos, [q_embd.shape[0], q_embd.shape[1], v.shape[0]])
+
             # p2c
             qp = self.wqp(rel_pos)
             # kc
@@ -234,7 +235,7 @@ class IRMQA(layers.Layer):
             # qc
             kp = self.wkp(rel_pos)
             attn_logits += tf.einsum('bhmk,bmnk->bhmn', qc, kp)
-        else: 
+        else:
             n_attn_types = 1
         
         scale = 1. / tf.sqrt(self.D * n_attn_types)
@@ -277,9 +278,12 @@ class IRMQALayer(layers.Layer):
             name=f"{name}_output"
         )
     
-    def call(self, embd, rel_pos, mask, training, q_embd=None):
+    def reset_cache(self, batch_size, max_N):
+        self.irmqa.reset_cache(batch_size=batch_size, max_N=max_N)
+    
+    def call(self, kv_embd, q_embd=None, rel_pos=None):
 
-        embd = self.irmqa(embd, rel_pos, mask, training, q_embd=q_embd)
+        embd = self.irmqa(kv_embd, q_embd=q_embd, rel_pos=rel_pos)
         embd = self.intermediate(embd)
         embd = self.output(embd)
 
@@ -300,6 +304,10 @@ class HandEncoder(layers.Layer):
             IRMQALayer(cfg, name=f"{name}_irmqa_{i}") for i in range(self.n_layers)
         ]
     
+    def reset_cache(self, batch_size, max_N):
+        for layer in self.irmqa_layers:
+            layer.reset_cache(batch_size, max_N)
+    
     def call(self, embd, rel_pos):
 
         batch_size = tf.shape(embd)[0]
@@ -316,32 +324,30 @@ class HandDecoder(layers.Layer):
 
     def __init__(self, cfg, rpe, name="hand_dec", **kwargs) -> None:
         super().__init__(name=name, **kwargs)
-        self.hand_query_embedding = layers.Embedding(2, cfg.embd_dim, name=f"{name}/query_embedding")
         self.decoder = IRMQALayer(cfg, rpe, name=f"{name}/irmqa")
     
-    def call(self, kv_embd, q_hand_idxs, rel_pos):
+    def reset_cache(self, batch_size, max_N):
+        self.decoder.reset_cache(batch_size, max_N)
+    
+    def call(self, kv_embd, q_embd, rel_pos):
 
-        batch_size = tf.shape(embd)[0]
-        mask = encoders.all_attention_mask(batch_size, q_hand_idxs.shape[1], kv_embd.shape[2])
-
-        q_embds = self.hand_query_embedding(q_hand_idxs)
-
-        for layer in self.irmqa_layers:
-            embd = layer(embd, rel_pos, mask)
+        batch_size = tf.shape(kv_embd)[0]
+        mask = encoders.all_attention_mask(batch_size, q_embd.shape[1], kv_embd.shape[2])
+        new_hand_embd = self.decoder(kv_embd, rel_pos, q_embd=q_embd, mask=mask)
         
-        return embd
+        return new_hand_embd
 
-def random_joint_order():
+def random_joint_order(n, seed=None):
     """
-    Produce a random selection of joint indices, such that they
+    Produce a random selection of N joint indices, such that they
     still obey the hierarchy of the hand skeleton. i.e. the
     wrist pos must be produced first, then the joints of each
     finger must be produced in order (although they might be
     interspersed.)
 
-    Uses tensorflow only in order to run in data pipeline.
+    Uses tensorflow only, in order to run in data pipeline.
     """
-    use_wrist = tf.random.categorical(tf.math.log([0.1, 0.9]), 1, tf.int32)[0]
+    use_wrist = tf.random.categorical(tf.math.log([0.1, 0.9]), 1, tf.int32, seed=seed)[0]
     
     joint_idxs = tf.constant([], dtype=tf.int32)
     if tf.equal(use_wrist, 0):
@@ -356,11 +362,11 @@ def random_joint_order():
     
     joint_idxs = tf.concat([joint_idxs, wrist_idx], 0)
     
-    n_thumb_joints = tf.random.categorical(tf.math.log([0.2, 0.2, 0.2, 0.2, 0.2]), 1)[0]
-    n_index_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
-    n_middle_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
-    n_ring_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
-    n_pinky_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1)[0]
+    n_thumb_joints = tf.random.categorical(tf.math.log([0.2, 0.2, 0.2, 0.2, 0.2]), 1, seed=seed)[0]
+    n_index_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1, seed=seed)[0]
+    n_middle_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1, seed=seed)[0]
+    n_ring_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1, seed=seed)[0]
+    n_pinky_joints = tf.random.categorical(tf.math.log([0.25, 0.25, 0.25, 0.25]), 1, seed=seed)[0]
 
     joint_order = tf.concat([
         tf.repeat([0], n_thumb_joints),
@@ -369,15 +375,17 @@ def random_joint_order():
         tf.repeat([3], n_ring_joints),
         tf.repeat([4], n_pinky_joints),
     ])
-    joint_order = tf.random.shuffle(joint_order)
+    joint_order = tf.random.shuffle(joint_order, seed=seed)
 
     i_thumb = 0
     i_index = 0
     i_middle = 0
     i_ring = 0
     i_pinky = 0
-    for i in joint_order:
-        if tf.equal(i, 0):
+    i = 0
+    while tf.less(i, n):
+        joint = joint_order[i]
+        if tf.equal(joint, 0):
             joint_idxs = tf.concat([joint_idxs, thumb_idxs[i_thumb]], 0)
             i_thumb += 1
         elif tf.equal(i, 1):
@@ -392,6 +400,7 @@ def random_joint_order():
         elif tf.equal(i, 4):
             joint_idxs = tf.concat([joint_idxs, pinky_idxs[i_pinky]], 0)
             i_pinky += 1
+        i += 1
     
     return joint_idxs
 
@@ -455,24 +464,33 @@ class EulerAngleDecoder(layers.Layer):
         self.euler_query_embeddings = layers.Embedding(3, cfg.embd_dim, name="euler_query_embeddings")
 
         self.decoder = IRMQALayer(cfg.layer, rpe=None, name=f"{name}_irmqa")
+    
+    def reset_cache(self):
+        self.decoder.reset_cache()
 
     
-    def call(self, joint_embds, *args, **kwargs):
+    def call(self, joint_embds):
 
         batch_size = tf.shape(joint_embds)[0]
 
         kv_embd = joint_embds
 
+        euler_queries = self.euler_query_embeddings(tf.constant([0, 1, 2], tf.int32))
+        euler_queries = tf.tile(euler_queries, [batch_size, 1, 1])
+
+        query = euler_queries[:, 0]
         mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
-        euler_a = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+        euler_a = self.decoder(z_embd=kv_embd, q_embd=query, rel_pos=None, mask=mask)
         kv_embd = tf.concat([kv_embd, euler_a], 1)
 
+        query = euler_queries[:, 1]
         mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
-        euler_b = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+        euler_b = self.decoder(z_embd=kv_embd, q_embd=query, rel_pos=None, mask=mask)
         kv_embd = tf.concat([kv_embd, euler_b], 1)
 
+        query = euler_queries[:, 2]
         mask = encoders.all_attention_mask(batch_size, 1, kv_embd.shape[1], tf.bool)
-        euler_c = self.decoder(z_embd=joint_embds, rel_pos=None, mask=mask)
+        euler_c = self.decoder(z_embd=kv_embd, q_embd=query, rel_pos=None, mask=mask)
 
         return tf.concat([euler_a, euler_b, euler_c], 1)
 
@@ -496,38 +514,72 @@ class HierarchicalHandPredictor(layers.Layer):
         self.joint_embd = layers.Embedding(cfg.n_joints, cfg.embd_dim, name=f'{name}/joint_embd')
         self.euler_embd = layers.Embedding(3, cfg.embd_dim, name=f'{name}/euler_embd')
 
-        self.frame_angles_embd = layers.Dense(cfg.embd_dim, name=f'{name}/frame_angle_embd')
-        self.single_angle_embd = layers.Dense(cfg.embd_dim, name=f'{name}/single_angle_embd')
+        self.hand_angles_embd = layers.Dense(cfg.embd_dim, name=f'{name}/frame_angle_embd')
+        self.joint_angles_embd = layers.Dense(cfg.embd_dim, name=f'{name}/single_angle_embd')
 
         self.hand_encoder = HandEncoder(cfg.hand_encoder, name=f"{name}/hand_encoder")
         self.hand_decoder = HandDecoder(cfg.hand_decoder, name=f"{name}/hand_decoder")
         self.joint_decoder = MultiJointDecoder(cfg.joint_decoder, name=f"{name}/joint_decoder")
         self.dof_decoder = EulerAngleDecoder(cfg.dof_decoder, name=f"{name}/dof_decoder")
 
+        self.dof_to_sincos = EinMix('b fh j d e -> b fh j d 2', 'e 2', name=f"{name}/dof_to_sincos")
+
     def reset_cache(self):
-
-
+        self.rpe.reset_cache()
+        self.hand_encoder.reset_cache()
+        self.hand_decoder.reset_cache()
+        self.joint_decoder.reset_cache()
+        self.dof_decoder.reset_cache()
     
     def call(self, inputs, *args, **kwargs):
 
-        full_frames = inputs["full_frames"]
-        full_frame_idxs = inputs["full_frame_idxs"]
-        partial_frame_idxs = inputs["partial_frame_idxs"]
-        partial_frame_idxs = inputs["partial_input_idxs"]
-        partial_inputs = inputs["partial_inputs"]
+        full_cond = inputs["full_frames"]
+        full_cond_idxs = inputs["full_frame_idxs"]
+        partial_cond_fh_idxs = inputs["partial_frame_idxs"]
+        partial_cond_jd_idxs = inputs["partial_input_idxs"]
+        partial_cond = inputs["partial_inputs"]
 
-        if tf.equal(tf.shape(full_frames)[1], 0):
+        batch_size = tf.shape(full_cond)[0]
+
+        if tf.equal(tf.shape(full_cond)[1], 0):
             # if there's no conditioning info, return a batch of the "empty" token
-            frame_embd = self.empty_token(tf.zeros([tf.shape(full_frames)[0], 1], dtype=tf.int32))
+            hand_embd = self.empty_token(tf.zeros([tf.shape(full_cond)[0], 1], dtype=tf.int32))
+            cond_frame_idxs = tf.constant([0], dtype=tf.int32)
+            cond_frame_idxs = tf.tile(cond_frame_idxs, [batch_size, 1])
         else:
-            frame_idxs = full_frame_idxs[..., 0]
-            hand_idxs = full_frame_idxs[..., 1]
-            frame_embd = self.frame_angles_embd(full_frames) + self.hand_embd(hand_idxs)
-        
-        full_rel_pos = full_frame_idxs[..., None, :] - full_frame_idxs[..., :, None]
-        frame_embd = self.hand_encoder(frame_embd, full_rel_pos)
+            cond_frame_idxs = full_cond_idxs[..., 0]
+            cond_hand_idxs = full_cond_idxs[..., 1]
+            hand_embd = self.hand_angles_embd(full_cond) + self.hand_embd(cond_hand_idxs)
 
-        hand_query_embd = 
+        # hand encoder
+        enc_rel_pos = cond_frame_idxs[..., None, :] - cond_frame_idxs[..., :, None]
+        encoded_hand_embd = self.hand_encoder(hand_embd, enc_rel_pos)
+
+        # hand decoder
+        query_frame_idxs = query_fh_idxs[..., 0]
+        query_hand_idxs = query_fh_idxs[..., 1]
+        dec_rel_pos = query_frame_idxs[..., None, :] - cond_frame_idxs[..., :, None]
+        hand_query_embd = self.hand_embd(query_hand_idxs)
+        new_hand_embd = self.hand_decoder(kv_embd=encoded_hand_embd, q_embd=hand_query_embd, rel_pos=dec_rel_pos)
+
+        # joint decoder
+        part_cond_joint_idxs = partial_cond_jd_idxs[..., 0]
+        joint_cont_embd = self.joint_embd(part_cond_joint_idxs)
+        joint_query_embd = self.joint_embd(query_joint_idxs)
+        kv_embds = tf.concat([new_hand_embd[:, :, None, :], joint_cont_embd], axis=2)
+        new_joint_embds = self.joint_decoder(kv_embd=kv_embds, q_embd=joint_query_embd)
+
+
+        # euler angle decoder
+        n_hand_embds = tf.shape(new_hand_embd)[1]
+        n_joint_embds = tf.shape(new_joint_embds)[2]
+        dof_query_idxs = tf.constant([0, 1, 2], dtype=tf.int32)
+        dof_query_idxs = tf.tile(dof_query_idxs[None, None, None, :], [batch_size, n_hand_embds, n_joint_embds, 1])
+        dof_query_embd = self.euler_embd(dof_query_idxs)
+        kv_embds = tf.concat([new_joint_embds[:, :, :, None, :], dof_query_embd])
+        new_euler_embds = self.dof_decoder(kv_embd=new_joint_embds, q_embd=dof_query_embd)
+
+        angles_sincos = self.dof_to_sincos(new_euler_embds)
 
 
 def random_subset(options, n, seed=None):
@@ -555,23 +607,30 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
     angles = tf.ensure_shape(angles, [None, cfg.n_hands, cfg.n_dof])
 
     n_frames = tf.shape(angles)[0]
-    n_hands = tf.shape(angles)[1]
-    n_joints = tf.shape(angles)[2]
-    n_dof = tf.shape(angles)[3]
+    n_hands = 
+    n_joints = 
+    n_dof = 
 
     batch_size = cfg.batch_size
 
-    sincos = ein.rearrange([tf.sin(angles), tf.cos(angles)], 's f h d -> (f h) j d s', d=3, j=17)
-
-    frame_idxs = tf.map_fn(
-        lambda: random_subset(tf.range(n_frames), cfg.n_chunk_frames, seed=seed),
+    sincos = ein.rearrange([tf.sin(angles), tf.cos(angles)], 's b f h d -> b f h j d s', d=3, j=17)
+    
+    fh_idxs = utils.multidim_indices([n_frames, cfg.n_hand_per_frame], flatten=True)
+    
+    jd_idxs = utils.multidim_indices([cfg.n_joints_per_hand, cfg.n_dof_per_joint], flatten=False)
+    select_fh_idxs = tf.map_fn(
+        lambda: random_subset(fh_idxs, cfg.n_chunk_frames, seed=seed),
         tf.range(batch_size)
     )
-    n_full_frames = weighted_random_n(cfg.n_chunk_frames, D=100., B=cfg.n_chunk_frames, seed=seed) # 100 times more likely to have 0 than 50
-    full_frame_idxs = frame_idxs[:, :n_full_frames]
-    partial_frame_idxs = frame_idxs[:, n_full_frames:]
+    n_cond_frames = weighted_random_n(cfg.n_chunk_frames, D=100., B=cfg.n_chunk_frames, seed=seed) # 100 times more likely to have 0 than 50
+    cond_fh_idxs = select_fh_idxs[:, :n_cond_frames]
+    query_fh_idxs = select_fh_idxs[:, n_cond_frames:]
+    
+    select_jd_idxs = tf.map_fn(
+        lambda: random_joint_order(seed=seed),
+    )
 
-    full_frames = tf.gather(sincos, full_frame_idxs)
+    cond_frames = tf.gather(sincos, cond_fh_idxs)
     
     n_partial_frame_inputs = weighted_random_n(n_hands*n_dof, D=10., B=n_hands*n_dof, seed=seed)
 
