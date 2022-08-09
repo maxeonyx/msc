@@ -25,6 +25,7 @@ if test (which randomname)
     git checkout $PREV_BRANCH_NAME
 
     python train.py
+    
     if test $status -eq 0
         function fish_title
             echo "$RUN_NAME (anims)"

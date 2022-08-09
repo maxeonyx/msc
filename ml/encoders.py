@@ -1,6 +1,6 @@
 import tensorflow as tf
-from tensorflow.python import keras
-from tensorflow.python.keras import layers, Model, Input
+from tensorflow import keras
+from tensorflow.keras import layers, Model, Input
  
 def conv(cfg, name="conv"):
     inputs = Input(shape=(None, cfg.embd_dim))
@@ -27,13 +27,13 @@ def mlp(cfg, name="mlp"):
 
     return Model(inputs, outputs, name=name)
 
-def all_attention_mask(batch_size, n_dest, n_src, dtype):
+def all_attention_mask(batch_size, n_dest, n_src, dtype=tf.bool):
     """
     Allow attention to flow between any two tokens.
     """
     return tf.ones([batch_size, n_dest, n_src], dtype=dtype)
 
-def causal_attention_mask(batch_size, n_dest, n_src, dtype):
+def causal_attention_mask(batch_size, n_dest, n_src, dtype=tf.bool):
     """
     Mask the upper half of the dot product matrix in self attention.
     This prevents flow of information from future tokens to current token.
@@ -55,7 +55,7 @@ def transformer_block(cfg, name="transformer_block"):
     input_shape = tf.shape(inputs)
     batch_size = input_shape[0]
     seq_len = input_shape[1]
-    causal_mask = causal_attention_mask(batch_size, seq_len, seq_len, tf.bool)
+    causal_mask = causal_attention_mask(batch_size, seq_len, seq_len)
     attention_output = layers.MultiHeadAttention(cfg.n_heads, cfg.embd_dim)(inputs, inputs, attention_mask=causal_mask)
     attention_output = layers.Dropout(cfg.dropout_rate)(attention_output)
     out1 = layers.LayerNormalization(epsilon=1e-6)(inputs + attention_output)

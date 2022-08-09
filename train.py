@@ -2,11 +2,13 @@ from cmath import e
 import os
 
 import tensorflow as tf
-from tensorflow.python import keras
-from tensorflow.python.keras import layers, Model, Input
+from tensorflow import keras
+from tensorflow.keras import layers, Model, Input
 
 import config
 from ml import data_tf, predict, utils, viz, embedders, encoders, decoders
+
+from ml import dream
 
 try:
     run_name = os.environ["RUN_NAME"]
@@ -21,6 +23,12 @@ if len(tf.config.list_physical_devices('GPU')) > 0:
 
 cfg = config.get()
 cfg.force = False
+
+
+dream.train(cfg, run_name)
+print("Done.")
+exit()
+
 d, d_test = data_tf.tf_dataset(cfg)
 
 def create_model(cfg, encoder_type):

@@ -1,12 +1,12 @@
 import tensorflow as tf
-from tensorflow.python import keras
-from tensorflow.python.keras import layers, Model, Input
+from tensorflow import keras
+from tensorflow.keras import layers, Model, Input
 import tensorflow_probability as tfp
 from tensorflow_probability import distributions as tfd
 
-def von_mises_fisher_dist(p):
-    mean_direction, _norm = tf.linalg.normalize(p[..., 0:2], axis=-1) # normalize mean_direction
-    concentration = tf.nn.softplus(p[..., 2])
+def von_mises_fisher_dist(p) -> tfd.VonMisesFisher:
+    mean_direction = p[..., 0:2]
+    concentration = p[..., 2]
     return tfd.VonMisesFisher(mean_direction=mean_direction, concentration=concentration)
 
 def von_mises_fisher_sample(d):
@@ -19,10 +19,6 @@ def von_mises_fisher_mean(d):
     angles = tf.atan2(vecs[..., 1], vecs[..., 0])
     return angles
 
-@tf.function(jit_compile=True, input_signature=[
-    tf.TensorSpec(shape=[None, None], dtype=tf.float32),
-    tf.TensorSpec(shape=[None, None, 3], dtype=tf.float32),
-])
 def von_mises_fisher_loss(targets, p):
     d = von_mises_fisher_dist(p)
     sin = tf.math.sin(targets)
@@ -30,11 +26,19 @@ def von_mises_fisher_loss(targets, p):
     targets = tf.stack([sin, cos], axis=-1)
     return -tf.reduce_mean(d.log_prob(targets))
 
-def von_mises_fisher(cfg, name="von_mises_fisher"):
+def make_von_mises_fisher_decoder(cfg, name="vmf_decoder"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
+    
     params = layers.Dense(3, name="params")(inputs)
+    mean_direction, _norm = tf.linalg.normalize(params[..., 0:2], axis=-1) # normalize mean_direction
+    concentration = tf.nn.softplus(params[..., 2:])
+    params = tf.concat([mean_direction, concentration], axis=-1)
 
-    return von_mises_fisher_loss, von_mises_fisher_dist, von_mises_fisher_mean, von_mises_fisher_sample, Model(inputs=inputs, outputs=params, name=f"{name}_params")
+    return Model(inputs=inputs, outputs=params, name=name)
+
+def von_mises_fisher(cfg, name="von_mises_fisher"):
+    vmf_decoder = make_von_mises_fisher_decoder(cfg, name=f"{name}_decoder")
+    return von_mises_fisher_loss, von_mises_fisher_dist, von_mises_fisher_mean, von_mises_fisher_sample, vmf_decoder
 
 def von_mises_dist(p):
     loc = p[: , :, 0]

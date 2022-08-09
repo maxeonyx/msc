@@ -2,8 +2,8 @@ import math
 import typing
 
 import tensorflow as tf
-from tensorflow.python import keras
-from tensorflow.python.keras import Input, Model, layers
+from tensorflow import keras
+from tensorflow.keras import Input, Model, layers
 import einops
 
 from ml import utils

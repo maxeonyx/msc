@@ -11,5 +11,8 @@ anims/*
 models/*
 cache/*
 runs/*
+logs/*
 
 !**/.gitkeep
+
+**/*.ignore*

@@ -21,10 +21,11 @@ limitations under the License.
 """
 
 import tensorflow as tf
-from tensorflow.python import keras
-from tensorflow.python.keras import layers, Model, Input
+from tensorflow import keras
+from tensorflow.keras import layers, Model, Input
 import numpy as np
 from typing import Optional, Tuple, Union, List
+from tensorflow_probability import distributions as tfd
 
 def shape_list(tensor: Union[tf.Tensor, np.ndarray]) -> List[int]:
     """
@@ -48,7 +49,7 @@ def shape_list(tensor: Union[tf.Tensor, np.ndarray]) -> List[int]:
 
 def get_mask(input, dropout):
     mask = tf.cast(
-        1 - tf.compat.v1.distributions.Bernoulli(probs=1 - dropout).sample(sample_shape=shape_list(input)), tf.bool
+        1 - tfd.Bernoulli(probs=1 - dropout).sample(sample_shape=shape_list(input)), tf.bool
     )
     return mask, dropout
 
@@ -156,7 +157,7 @@ def get_tf_activation(activation_string):
 
 class TFDebertaIntermediate(layers.Layer):
     def __init__(self, intermediate_size, initializer_range, hidden_act, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(name="deberta_intermediate", **kwargs)
 
         self.dense = layers.Dense(
             units=intermediate_size, kernel_initializer=get_initializer(initializer_range), name="dense"
@@ -175,7 +176,7 @@ class TFDebertaIntermediate(layers.Layer):
 
 class TFDebertaOutput(layers.Layer):
     def __init__(self, initializer_range, hidden_size, hidden_dropout_prob, layer_norm_eps, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(name="deberta_output", **kwargs)
 
         self.dense = layers.Dense(
             units=hidden_size, kernel_initializer=get_initializer(initializer_range), name="dense"

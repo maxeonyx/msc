@@ -198,7 +198,7 @@ def chunk(g, n):
         except StopIteration:
             break
 
-def get_bvh_data(bvh_dir=None, limit_columns=True, convert_deg_to_rad=True):
+def get_bvh_data(columns, bvh_dir=None, convert_deg_to_rad=True):
     """
     Get a list of all the BVH data in the manipnet dataset.
 
@@ -226,10 +226,12 @@ def get_bvh_data(bvh_dir=None, limit_columns=True, convert_deg_to_rad=True):
         assert l_obj.data.shape == r_obj.data.shape
         assert l_obj.frame_time_s == r_obj.frame_time_s
 
-        if limit_columns:
+        if columns == "useful":
             cols = COL_USEFUL
-        else:
+        elif columns == "all":
             cols = COL_ALL_JOINTS
+        else:
+            raise ValueError(f"Unknown 'columns' config value: {columns}")
 
         # extract a subset of the columns
         l_obj.data = extract_columns(l_obj.data, cols)
@@ -245,7 +247,7 @@ def get_bvh_data(bvh_dir=None, limit_columns=True, convert_deg_to_rad=True):
 
         yield name, data, data.shape[0]
 
-def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, limit_columns=True):
+def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None):
     """
     Get a numpy dataset of all the BVH data in the manipnet dataset.
 
@@ -274,7 +276,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, limit_column
     else:
         print(f'Forcing generation of a fresh dataset to "{ds_path}" ...', file=sys.stderr)
 
-    data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad, limit_columns=limit_columns)]
+    data = [(f, a, n) for f, a, n in get_bvh_data(convert_deg_to_rad=convert_deg_to_rad, columns=columns)]
     data.sort(key=lambda x: x[0])
     # sort by filename
     filenames, angles, n_frames = [], [], []

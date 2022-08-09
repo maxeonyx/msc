@@ -153,10 +153,10 @@ def recluster(x, circular_means):
     return x
 
 
-def make_decimate_fn(cfg):
+def make_decimate_fn(cfg, n_hands, n_dof):
     
     @tf.function(input_signature=[
-        tf.TensorSpec(shape=[None, cfg.n_hands, cfg.n_dof], dtype=tf.float32),
+        tf.TensorSpec(shape=[None, n_hands, n_dof], dtype=tf.float32),
     ])
     def decimate(angles):
         angles = rearrange(angles, 'f h d -> f (h d)')
@@ -165,7 +165,7 @@ def make_decimate_fn(cfg):
         for i in tf.range(1, len_angles):
             if tf.linalg.norm(angles[i] - new_angles[-1]) > cfg.decimate_threshold:
                 new_angles = tf.concat([new_angles, angles[i:i+1]], axis=0)
-        new_angles = rearrange(new_angles, 'f (h d) -> f h d', h=cfg.n_hands, d=cfg.n_dof)
+        new_angles = rearrange(new_angles, 'f (h d) -> f h d', h=n_hands, d=n_dof)
         return new_angles
     
     def decimate_map(x):
@@ -205,10 +205,12 @@ def tf_dataset(cfg, finish_fn):
     each with shape (n_hands, n_frames, n_dof)
     """
 
-    filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(cfg.force)
+    filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(force=cfg.force, columns=cfg.columns)
     filenames = tf.constant(filenames)
     all_angles = tf.concat(angles, axis=0)
     n_frames = tf.constant(n_frames)
+    orig_n_hands = all_angles.shape[1]
+    orig_n_dof = all_angles.shape[2]
     ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
     dataset = tf.data.Dataset.from_tensor_slices((filenames, ragged_angles))
 
@@ -219,24 +221,25 @@ def tf_dataset(cfg, finish_fn):
         dataset = dataset.map(lambda x: recluster(x, circular_means))
     
     if cfg.decimate:
-        _, decimate = make_decimate_fn(cfg)
+        _, decimate = make_decimate_fn(cfg, orig_n_hands, orig_n_dof)
         dataset = dataset.map(decimate)
 
     dataset = dataset.map(lambda x: subset(cfg, x))
     
     dataset = dataset.map(add_idx_arrays)
 
-    dataset = dataset.snapshot(cfg.cached_dataset_path, compression=None)
+    # dataset = dataset.snapshot(cfg.cached_dataset_path, compression=None)
     dataset = dataset.cache()
-    dataset = dataset.shuffle(seed=1234) # keep seed the same for reproducibility of test error
+    dataset = dataset.shuffle(buffer_size=len(filenames), seed=1234) # keep seed the same for reproducibility of test error
     test_dataset = dataset.take(12) # take 12 to test
-    train_dataset = dataset.skip(12) # all except first 12
+    val_dataset = dataset.skip(12).take(12) # take next 12 for val
+    train_dataset = dataset.skip(24) # all except first 24
     train_dataset = train_dataset.repeat()
     train_dataset = train_dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
     
-    return finish_fn(cfg, train_dataset, test_dataset)
+    return finish_fn(cfg, train_dataset, test_dataset, val_dataset)
 
-def pre_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset):
+def pre_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
     
     # train input isn't always frame aligned
     train_dataset = train_dataset.map(lambda x: random_flat_chunk(cfg, cfg.chunk_size, x))

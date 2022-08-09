@@ -1,7 +1,20 @@
-from box import Box
+from dataclasses import dataclass
+from box import Box as box
 
 def get():
-    return Box({
+
+    irmqa_cfg = box({
+        "qk_dim": 19, # 16w * 8h = 128 ~= 102
+        "v_dim": 102,
+        "n_heads": 7,
+        "intermediate_size": 2048,
+        "initializer_range": 0.02,
+        "hidden_act": "gelu",
+        "hidden_dropout_prob": 0.1,
+        "layer_norm_eps": 1e-7,
+    })
+
+    return box({
         
         "shuffle_buffer_size": 130,
         "force": False,
@@ -20,16 +33,36 @@ def get():
             "chunk_size": 6,
             "n_hands": 2,
             "n_dof": 23,
-            "limit_columns": True,
+            "columns": "useful",
         },
     
         "dream": {
-            "n_chunk_frames": 50,
+            "n_hands": 1,
+            "n_dof": 3,
+            "n_joints_per_hand": 1,
+            "n_dof_per_joint": 3,
+            "columns": "all",
+            "contiguous": True,
+            "n_hand_vecs": 50,
             "batch_size": 16,
-            "n_hands": 2,
-            "n_joints": 15,
-            "representation": "euler",
-            "limit_columns": False,
+            
+            "embd_dim": 102,
+            "model": {
+                "max_rel_embd": 1000,
+                "hand_encoder": {
+                    "n_layers": 3,
+                    **irmqa_cfg,
+                },
+                "hand_decoder": {
+                    **irmqa_cfg,
+                },
+                "joint_decoder": {
+                    **irmqa_cfg,
+                },
+                "dof_decoder": {
+                    **irmqa_cfg,
+                },
+            },
         },
 
         # predict frames is the number of frames to predict when
