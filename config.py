@@ -43,8 +43,8 @@ def get():
             "n_dof_per_joint": 3,
             "columns": "all",
             "contiguous": True,
-            "n_hand_vecs": 50,
-            "batch_size": 16,
+            "n_hand_vecs": 8,
+            "batch_size": 5,
             
             "embd_dim": 102,
             "model": {

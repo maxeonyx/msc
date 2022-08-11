@@ -1,3 +1,4 @@
+from curses import erasechar
 from functools import reduce
 from http.client import INSUFFICIENT_STORAGE
 from mimetypes import init
@@ -80,7 +81,7 @@ class MeinMix(tf.Module):
 class RelativePositionEmbedding(tf.Module):
 
     @tf_scope
-    def __init__(self, max_rel_embd, D,  allow_negative=False, name="rel_embd"):
+    def __init__(self, max_rel_embd, D, name="rel_embd"):
         """
         If the computation only ever uses
         relative attention in one direction (eg. incremental multi-query layers with causal masking),
@@ -88,12 +89,8 @@ class RelativePositionEmbedding(tf.Module):
         """
         super().__init__(name=name)
         self.max_rel_embd = max_rel_embd
-        if allow_negative:
-            self.embedding = tf.keras.layers.Embedding(
-                self.max_rel_embd * 2 - 1, D)
-        else:
-            self.embedding = tf.keras.layers.Embedding(self.max_rel_embd, D)
-        self.allow_negative = allow_negative
+        self.embedding = tf.keras.layers.Embedding(
+            self.max_rel_embd * 2 - 1, D)
 
         # every power of ten, double the width of the buckets.
         # starts at 1 bucket per 1 distance
@@ -102,33 +99,10 @@ class RelativePositionEmbedding(tf.Module):
         self.bucket_scale_fn = bucket_scale_fn(
             decay_power=2., step_power=10., clip=(self.max_rel_embd-1))
 
-    def __call__(self, relative_pos):
-        if self.allow_negative:
-            indices = self.bucket_scale_fn(
-                relative_pos) + self.max_rel_embd - 1
-        else:
-            indices = self.bucket_scale_fn(relative_pos)
+    @tf_scope
+    def embeddings(self):
+        indices = tf.range(self.max_rel_embd * 2 - 1)
         return self.embedding(indices)
-
-    @tf_scope
-    def get_indices(self, relative_pos):
-        """
-        Log-bucketing of relative position embeddings.
-        Buckets are small near 0, and grow larger with distance:
-            @ x = 0, there is 1 bucket (index) per 1 distance
-            @ x = 10, there is 1 bucket (index) per 2 distance
-            @ x = 100, there is 1 bucket (index) per 4 distance
-            etc.
-        """
-        return indices
-
-    @tf_scope
-    def get_all_embeddings(self):
-        if self.allow_negative:
-            indices = tf.range(self.max_rel_embd * 2 - 1)
-        else:
-            indices = tf.range(self.max_rel_embd)
-        return 
 
 
 class RelativePositionProjectionLookup(tf.Module):
@@ -138,22 +112,23 @@ class RelativePositionProjectionLookup(tf.Module):
         super().__init__(name=name)
         self.rpe = rpe
         self.projection = projection
-        self.cache = None
-
-    def reset_cache(self):
 
     def __call__(self, relative_pos):
-        if self.cache is None:
-            self.reset_cache()
-
-        indices = self.rpe.get_indices(relative_pos)
-        rel_embd = self.rpe.get_all_embeddings()
+        rel_embd = self.rpe.embeddings()
         projection = self.projection(rel_embd)
-        rel_proj = tf.gather(self.cache, indices, axis=0)
+        rel_proj = tf.gather(projection, relative_pos, axis=0)
 
         return rel_proj
 
-
+def nested_tensorshape(state):
+    if tf.is_tensor(state):
+        return tf.TensorShape([state.shape[0], None, state.shape[2]])
+    elif isinstance(state, list):
+        return [nested_tensorshape(v) for v in state]
+    elif isinstance(state, dict):
+        return {k: nested_tensorshape(v) for k, v in state.items()}
+    else:
+        raise ValueError(f"Unsupported type {type(state)}")
 class IRMQA(tf.Module):
     """
     Incremental Relative Multi-Query Attention.
@@ -212,8 +187,6 @@ class IRMQA(tf.Module):
             name="wkc"
         )
 
-        self.v_cache = None
-
         self.using_relative_position = rpe is not None
         if self.using_relative_position:
 
@@ -251,45 +224,23 @@ class IRMQA(tf.Module):
                 name="wkp",
             )
 
-    def reset_cache(self, batch_size):
+    def create_state(self, batch_size):
+        state = {
+            "v_state": tf.zeros([batch_size, 0, self.V], name="v_state"),
+            "kc_state": tf.zeros([batch_size, 0, self.QK], name="kc_state"),
+        }
         if self.using_relative_position:
-            self.wqp.reset_cache()
-            self.wkp.reset_cache()
+            state = state | {
+                "ki_state": tf.zeros([batch_size, 0], name="ki_state"),
+            }
+        return state
 
     @tf_scope
     def __call__(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
 
-        if state and not hasattr(self, 'v_cache'):
-            raise Exception(
-                "Must call build before calling calling with state=True")
-
         if self.using_relative_position and (kv_idxs is None or q_idxs is None):
             raise Exception(
                 "Must provide kv_idxs and q_idxs when using relative position encoding")
-
-        if state and self.v_cache is None:
-            self.v_cache = tf.TensorArray(
-                dtype=tf.float32,
-                size=0,
-                dynamic_size=True,
-                clear_after_read=False,
-                element_shape=[None, None, self.V],
-            )
-            self.kc_cache = tf.TensorArray(
-                dtype=tf.float32,
-                size=0,
-                dynamic_size=True,
-                clear_after_read=False,
-                element_shape=[None, None, self.QK],
-            )
-            if self.using_relative_position:
-                self.ki_cache = tf.TensorArray(
-                    dtype=tf.int32,
-                    size=0,
-                    dynamic_size=True,
-                    clear_after_read=False,
-                    element_shape=[None, None],
-                )
 
         # Mkv is the number of new inputs this iteration, the results of which will be cached.
         #    Might be M=N, or might be M=1.
@@ -309,19 +260,12 @@ class IRMQA(tf.Module):
 
         i = tf.constant(0, tf.int32)
 
-        if state:
-            # v = ein.rearrange(v, 'b n v -> n b v')
-            v = tf.transpose(v, perm=[1, 0, 2])
-            # kc = ein.rearrange(kc, 'b n qk -> n b qk')
-            kc = tf.transpose(kc, perm=[1, 0, 2])
-            self.v_cache = self.v_cache.write(i, v)
-            self.kc_cache = self.kc_cache.write(i, kc)
-            v = self.v_cache.concat()
-            kc = self.kc_cache.concat()
-            # v = ein.rearrange(v, 'n b v -> b n v')
-            v = tf.transpose(v, perm=[1, 0, 2])
-            # kc = ein.rearrange(kc, 'n b qk -> b n qk')
-            kc = tf.transpose(kc, perm=[1, 0, 2])
+        if state is not None:
+            kc = tf.concat([state["kc_state"], kc], axis=1)
+            v = tf.concat([state["v_state"], v], axis=1)
+            if write_state:
+                state["kc_state"] = kc
+                state["v_state"] = v
 
         # c2c
         qc = self.wqc(q_embd)
@@ -332,13 +276,10 @@ class IRMQA(tf.Module):
         # if using relative positions, use disentangled attention
         if self.using_relative_position:
 
-            if state:
-                # kv_idxs = ein.rearrange(kv_idxs, 'b n -> n b')
-                kv_idxs = tf.transpose(kv_idxs, perm=[1, 0])
-                self.ki_cache = self.ki_cache.write(i, kv_idxs)
-                kv_idxs = self.ki_cache.concat()
-                # kv_idxs = ein.rearrange(kv_idxs, 'n b -> b n')
-                kv_idxs = tf.transpose(kv_idxs, perm=[1, 0])
+            if state is not None:
+                kv_idxs = tf.concat([state["ki_state"], kv_idxs], axis=1)
+                if write_state:
+                    state["ki_state"] = kv_idxs
 
             rel_pos = q_idxs[:, :, None] - kv_idxs[:, None, :]
 
@@ -380,7 +321,7 @@ class IRMQA(tf.Module):
         # v has batch dim second because of tensor array
         v_h = tf.einsum('bmhn,bnv->bmhv', attn_weights, v)  # value-per-head
         v_o = self.wo(v_h)  # project to output dimension
-        return v_o
+        return state, v_o
 
 
 class IRMQALayer(tf.Module):
@@ -409,19 +350,14 @@ class IRMQALayer(tf.Module):
             hidden_dropout_prob=cfg.hidden_dropout_prob,
             layer_norm_eps=cfg.layer_norm_eps,
         )
-        self.using_relative_position = rpe is not None
 
-    def reset_cache(self, batch_size):
-        self.irmqa.reset_cache(batch_size)
+    def create_state(self, batch_size):
+        return self.irmqa.create_state(batch_size)
 
     @tf_scope
     def __call__(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
 
-        if self.using_relative_position and (kv_idxs is None or q_idxs is None):
-            raise Exception(
-                "If using relative attention, must provide both kv_idxs and q_idxs.")
-
-        embd = self.irmqa(
+        state, embd = self.irmqa(
             kv_embd=kv_embd,
             q_embd=q_embd,
             kv_idxs=kv_idxs,
@@ -433,7 +369,7 @@ class IRMQALayer(tf.Module):
         embd = self.intermediate(embd)
         embd = self.output_layer(embd, q_embd)
 
-        return embd
+        return state, embd
 
 
 class IRMQAEncoder(tf.Module):
@@ -452,80 +388,35 @@ class IRMQAEncoder(tf.Module):
             IRMQALayer(cfg, rpe, name=f"irmqa_{i}") for i in range(self.n_layers)
         ]
     
-    def get_config(self):
-        return self.cfg
-
-    def reset_cache(self, batch_size):
-        for layer in self.irmqa_layers:
-            layer.reset_cache(batch_size)
+    def create_state(self, batch_size):
+        return [layer.create_state(batch_size) for layer in self.irmqa_layers]
 
     @tf_scope
     def __call__(self, embd, idxs, mask_type, state, write_state):
 
-        for layer in self.irmqa_layers:
-            embd = layer(
+        for i in range(self.n_layers):
+
+            if state is None:
+                s = None
+            else:
+                s = state[i]
+
+            s, embd = self.irmqa_layers[i](
                 kv_embd=embd,
                 q_embd=embd,
                 kv_idxs=idxs,
                 q_idxs=idxs,
                 mask_type=mask_type,
-                state=state,
+                state=s,
                 write_state=write_state,
             )
 
-        return embd
+            if state is not None:
+                s[i] = s
+
+        return state, embd
 
 
-@tf_scope
-def random_joint_order(n_joints_per_hand, seed=None):
-    """
-    Produce a random selection of N joint indices, such that they
-    still obey the hierarchy of the hand skeleton. i.e. the
-    wrist pos must be produced first, then the joints of each
-    finger must be produced in order (although they might be
-    interspersed.)
-
-    Uses tensorflow only, in order to run in data pipeline.
-    """
-
-    joint_idxs = tf.ragged.constant([
-        [0],  # wrist
-        [1, 2, 3, 4],
-        [5, 6, 7],
-        [8, 9, 10],
-        [11, 12, 13],
-        [14, 15, 16],
-    ])
-    finger_order = tf.TensorArray(tf.int32, size=n_joints_per_hand)
-    finger_order = finger_order.write(0, 0)  # wrist
-
-    i_finger = 1  # skip wrist
-    i_joint = 0
-    while i_finger < 6 and i_joint < n_joints_per_hand:
-        n_joints_this_finger = len(joint_idxs[i_finger])
-        i = 0
-        while i < n_joints_this_finger and i_joint < n_joints_per_hand:
-            finger_order.write(i_joint, i_finger)
-            i_joint += 1
-            i += 1
-
-    finger_order = finger_order.stack()
-    finger_order = tf.random.shuffle(finger_order, seed=seed)
-    n_fingers = tf.shape(finger_order)[0]
-
-    per_finger_i = tf.TensorArray(tf.int32, n_fingers, element_shape=[])
-    joint_order = tf.TensorArray(tf.int32, n_joints_per_hand)
-    i = 0
-    for finger in finger_order:
-        i_knuckle = per_finger_i.read(finger)
-        joint_order = joint_order.write(i, joint_idxs[finger, i_knuckle])
-        i += 1
-        per_finger_i = per_finger_i.write(finger, i_knuckle + 1)
-
-    joint_order = joint_order.stack()
-    joint_order = tf.ensure_shape(joint_order, [n_joints_per_hand])
-
-    return joint_order
 
 
 class MultiJointDecoder(tf.Module):
@@ -547,66 +438,50 @@ class MultiJointDecoder(tf.Module):
         batch_size = tf.shape(hand_embd)[0]
         query_seq_len = tf.shape(query_joint_embd)[1]
 
-        self.decoder.reset_cache(batch_size)
-
-        state = None
-        joint_embds = tf.TensorArray(tf.float32, size=query_seq_len, element_shape=[None, batch_size, self.cfg.embd_dim])
-        for i in tf.range(query_seq_len):
-            state, joint_embd = self.decoder(
-                kv_embd=hand_embd,
+        def cond(i, _decoder_state, _joint_embds):
+            return tf.less(i, query_seq_len)
+        
+        def body(i, decoder_state, joint_embds):
+            decoder_state, joint_embd = self.decoder(
+                kv_embd=joint_embds[:, -1:, :],
                 q_embd=query_joint_embd[:, i:i+1, :],
                 kv_idxs=None,
                 q_idxs=None,
                 mask_type="none",
-                state=state,
+                state=decoder_state,
                 write_state=True,
             )
-            joint_embd = tf.transpose(joint_embd, [1, 0, 2])
-            joint_embds = joint_embds.write(i, joint_embd)
+            joint_embds = tf.concat([joint_embds, joint_embd], axis=1)
+            return i+1, decoder_state, joint_embds
 
-        new_joint_embds = joint_embds.concat()
-        new_joint_embds = tf.transpose(new_joint_embds, [1, 0, 2])
-        # def while_cond(i, _n, _joint_embd, _all_joint_embd):
-        #     return tf.less(i, query_seq_len)
+        decoder_state = self.decoder.create_state(batch_size)
+        initial_kv = tf.concat([hand_embd, cond_joint_embd], axis=1) # start with kv as hand embd
 
-        # @tf_scope
-        # def while_body(i, n, prev_joint_embd, all_joint_embd):
-        #     joint_query = query_joint_embd[:, i:i+1, :]
+        decoder_state, joint_embds = self.decoder(
+            kv_embd=initial_kv,
+            q_embd=query_joint_embd[:, :1, :],
+            kv_idxs=None,
+            q_idxs=None,
+            mask_type="none",
+            state=decoder_state,
+            write_state=True,
+        )
+        _i, _states, joint_embds = tf.while_loop(
+            cond,
+            body,
+            [
+                1,
+                decoder_state,
+                joint_embds
+            ], 
+            shape_invariants=[
+                tf.TensorShape([]),
+                nested_tensorshape(decoder_state),
+                tf.TensorShape([None, None, self.cfg.embd_dim]),
+            ],
+        )
 
-        #     n = n + tf.shape(prev_joint_embd)[1]
-        #     new_joint_embd = self.decoder(
-        #         kv_embd=prev_joint_embd,
-        #         q_embd=joint_query,
-        #         state=True,
-        #         write_state=True,
-        #         mask_type="none"
-        #     )
-
-        #     all_joint_embd = tf.concat(
-        #         [all_joint_embd, new_joint_embd], axis=1)
-        #     return [i+1, n, new_joint_embd, all_joint_embd]
-
-        # _i, _n, _joint_embds, new_joint_embds = tf.while_loop(
-        #     cond=while_cond,
-        #     body=while_body,
-        #     loop_vars=[
-        #         tf.constant(0),
-        #         tf.constant(0),
-        #         tf.concat([hand_embd, cond_joint_embd], axis=1),
-        #         tf.zeros([batch_size, 0, self.cfg.embd_dim]),
-        #     ],
-        #     shape_invariants=[
-        #         tf.TensorShape([]),
-        #         tf.TensorShape([]),
-        #         tf.TensorShape([None, None, self.cfg.embd_dim]),
-        #         tf.TensorShape([None, None, self.cfg.embd_dim]),
-        #     ],
-        #     maximum_iterations=17,
-        # )
-
-        # new_joint_embds = tf.ensure_shape(new_joint_embds, [batch_size, query_joint_embd.shape[1], self.cfg.embd_dim])
-
-        return state, new_joint_embds
+        return joint_embds
 
 
 class EulerAngleDecoder(tf.Module):
@@ -623,42 +498,35 @@ class EulerAngleDecoder(tf.Module):
     def __call__(self, joint_embd, euler_query_embd):
 
         batch_size = tf.shape(joint_embd)[0]
-        self.decoder.reset_cache(batch_size)
-
-        # tf.ensure_shape(self.decoder.irmqa.v_cache, [0, batch_size, 102])
+        
+        state = self.decoder.create_state(batch_size)
 
         query = euler_query_embd[:, 0:1]
-        euler_a = self.decoder(
+        state, euler_a = self.decoder(
             kv_embd=joint_embd,
             q_embd=query,
-            state=True,
+            state=state,
             write_state=True,
             mask_type="none",
         )
-
-        # tf.ensure_shape(self.decoder.irmqa.v_cache, [1, batch_size, 102])
 
         query = euler_query_embd[:, 1:2]
-        euler_b = self.decoder(
+        state, euler_b = self.decoder(
             kv_embd=euler_a,
             q_embd=query,
-            state=True,
+            state=state,
             write_state=True,
             mask_type="none",
         )
 
-        # tf.ensure_shape(self.decoder.irmqa.v_cache, [2, batch_size, 102])
-
         query = euler_query_embd[:, 2:3]
-        euler_c = self.decoder(
+        _state, euler_c = self.decoder(
             kv_embd=euler_b,
             q_embd=query,
-            state=True,
+            state=state,
             write_state=False,
             mask_type="none",
         )
-
-        # tf.ensure_shape(self.decoder.irmqa.v_cache, [3, batch_size, 102])
 
         return tf.concat([euler_a, euler_b, euler_c], 1)
 
@@ -706,22 +574,13 @@ class HierarchicalHandPredictor(Model):
 
         self.dof_to_params = decoder
     
-    def get_config(self):
-        return self.cfg
+    def create_state(self, batch_size):
+        return {
+            "hand_enc_state": self.hand_encoder.create_state(batch_size),
+            "hand_dec_state": self.hand_decoder.create_state(batch_size),
+        }
 
-    @tf_scope
-    def reset_cache(self, batch_size):
-        self.hand_encoder.reset_cache(batch_size)
-        self.hand_decoder.reset_cache(batch_size)
-    
-    def compute_output_shape(self, input_shapes):
-        return [
-            input_shapes["query_j_idxs"][0],
-            input_shapes["query_j_idxs"][1] * input_shapes["query_j_idxs"][2] * self.cfg.n_dof_per_joint,
-            self.cfg.embd_dim
-        ]
-
-    def __call__(self, inputs, training, state=None, write_state=False):
+    def call(self, inputs, state=None, write_state=False):
 
         cond_hand_vecs = inputs["cond_hand_vecs"]
         cond_fh_idxs = inputs["cond_fh_idxs"]
@@ -753,12 +612,19 @@ class HierarchicalHandPredictor(Model):
             cond_frame_idxs,
         ], axis=1)
 
+        if state is None:
+            hand_enc_state = None
+            hand_dec_state = None
+        else:
+            hand_enc_state = state["hand_enc_state"]
+            hand_dec_state = state["hand_dec_state"]
+
         # hand encoder
-        encoded_hand_embd = self.hand_encoder(
+        hand_enc_state, encoded_hand_embd = self.hand_encoder(
             embd=hand_embd,
             idxs=cond_frame_idxs,
             mask_type=self.mask_type,
-            state=state,
+            state=hand_enc_state,
             write_state=write_state,
         )
 
@@ -766,24 +632,25 @@ class HierarchicalHandPredictor(Model):
         query_frame_idxs = query_fh_idxs[..., 0]
         query_hand_idxs = query_fh_idxs[..., 1]
         hand_query_embd = self.hand_embd(query_hand_idxs)
-        new_hand_embd = self.hand_decoder(
+        hand_dec_state, new_hand_embd = self.hand_decoder(
             kv_embd=encoded_hand_embd,
             kv_idxs=cond_frame_idxs,
             q_embd=hand_query_embd,
             q_idxs=query_frame_idxs,
             mask_type=self.mask_type,
-            state=state,
+            state=hand_dec_state,
             write_state=write_state,
         )
 
+        if state is not None:
+            state["hand_enc_state"] = hand_enc_state
+            state["hand_dec_state"] = hand_dec_state
+
         # joint decoder
-        joint_cond_embd = self.joint_angles_embd(
-            cond_joint_vecs) + self.joint_embd(cond_j_idxs)
-        joint_cond_embd = ein.rearrange(
-            joint_cond_embd, 'b fh j e -> (b fh) j e')
+        joint_cond_embd = self.joint_angles_embd(cond_joint_vecs) + self.joint_embd(cond_j_idxs)
+        joint_cond_embd = ein.rearrange(joint_cond_embd, 'b fh j e -> (b fh) j e')
         joint_query_embd = self.joint_embd(query_j_idxs)
-        joint_query_embd = ein.rearrange(
-            joint_query_embd, 'b fh j e -> (b fh) j e')
+        joint_query_embd = ein.rearrange(joint_query_embd, 'b fh j e -> (b fh) j e')
         new_hand_embd = ein.rearrange(new_hand_embd, 'b fh e -> (b fh) 1 e')
 
         new_joint_embds = self.joint_decoder(
@@ -836,7 +703,7 @@ class HierarchicalHandPredictor(Model):
 
         output_params = self.dof_to_params(output_embd)
 
-        return output_params
+        return state, output_params
 
 
 def random_subset(options, n, seed=None):
@@ -864,7 +731,58 @@ def weighted_random_n(n_max, D=2., B=10., seed=None):
 
     return tf.random.categorical(log_probabilities[None, :], 1, seed=seed)[0, 0]
 
+@tf_scope
+def random_joint_order(n_joints_per_hand, seed=None):
+    """
+    Produce a random selection of N joint indices, such that they
+    still obey the hierarchy of the hand skeleton. i.e. the
+    wrist pos must be produced first, then the joints of each
+    finger must be produced in order (although they might be
+    interspersed.)
 
+    Uses tensorflow only, in order to run in data pipeline.
+    """
+
+    joint_idxs = tf.ragged.constant([
+        [0],  # wrist
+        [1, 2, 3, 4],
+        [5, 6, 7],
+        [8, 9, 10],
+        [11, 12, 13],
+        [14, 15, 16],
+    ])
+    finger_order = tf.TensorArray(tf.int32, size=n_joints_per_hand)
+    finger_order = finger_order.write(0, 0)  # wrist
+
+    i_finger = 1  # skip wrist
+    i_joint = 1
+    while i_finger < 6 and i_joint < n_joints_per_hand:
+        n_joints_this_finger = len(joint_idxs[i_finger])
+        i = 0
+        while i < n_joints_this_finger and i_joint < n_joints_per_hand:
+            finger_order.write(i_joint, i_finger)
+            i_joint += 1
+            i += 1
+
+    finger_order = finger_order.stack()
+    finger_order = tf.random.shuffle(finger_order, seed=seed)
+    n_fingers = i_finger
+
+    per_finger_i = tf.TensorArray(tf.int32, n_fingers, element_shape=[])
+    joint_order = tf.TensorArray(tf.int32, n_joints_per_hand, element_shape=[])
+    i = 0
+    for finger in finger_order:
+        i_knuckle = per_finger_i.read(finger)
+        joint_order = joint_order.write(i, joint_idxs[finger, i_knuckle])
+        i += 1
+        per_finger_i = per_finger_i.write(finger, i_knuckle + 1)
+
+    joint_order = joint_order.stack()
+    joint_order = tf.ensure_shape(joint_order, [n_joints_per_hand])
+
+    return joint_order
+
+@tf.function
 @tf_scope
 def hierarchical_batched_random_chunk(cfg, x, seed=None):
 
@@ -895,8 +813,11 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
                           cfg.n_dof_per_joint], dtype=tf.float32),
             tf.TensorSpec(shape=[None, 2], dtype=tf.int32),
         ),
+        name="hand_map",
+        parallel_iterations=10,
     )
     if cfg.contiguous:
+        assert cfg.n_hand_vecs % 2 == 0, "n_hand_vecs must be even if cfg.contiguous"
         n_cond_hand_vecs = cfg.n_hand_vecs//2
     else:
         # 100 times more likely to have 0 than 50
@@ -913,6 +834,8 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
     j_idxs = tf.map_fn(
         lambda _i: random_joint_order(cfg.n_joints_per_hand, seed=seed),
         tf.range(cfg.batch_size * n_query_hands),
+        name="joint_map",
+        parallel_iterations=10,
     )
     tf.ensure_shape(
         j_idxs, [cfg.batch_size * n_query_hands, cfg.n_joints_per_hand])
@@ -927,6 +850,9 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
             max_n_cond_joints, D=10., B=cfg.n_joints_per_hand, seed=seed)
     cond_j_idxs = j_idxs[:, :, :n_cond_joint_vecs]
     query_j_idxs = j_idxs[:, :, n_cond_joint_vecs:]
+
+    tf.ensure_shape(cond_j_idxs, [cfg.batch_size, n_query_hands, n_cond_joint_vecs])
+    tf.ensure_shape(query_j_idxs, [cfg.batch_size, n_query_hands, cfg.n_joints_per_hand - n_cond_joint_vecs])
 
     cond_joint_vecs = tf.gather(target_hands, cond_j_idxs, batch_dims=2)
     target_joint_vecs = tf.gather(target_hands, query_j_idxs, batch_dims=2)
@@ -951,7 +877,7 @@ def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dat
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
     train_dataset = train_dataset.map(
         lambda x: hierarchical_batched_random_chunk(cfg, x))
-    train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    # train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     # test input is always frame-aligned
     # take fixed size chunks from the tensor at random frame indices
@@ -1004,33 +930,68 @@ def train(cfg, run_name):
     # }
     model = HierarchicalHandPredictor(cfg | cfg.model, vmf_decoder)
     optimizer = tf.keras.optimizers.Adam(cfg.adam.lr)
-    train_loop(model, vmf_loss, optimizer, cfg.steps, cfg.steps_per_epoch, d_train, d_test, d_val)
 
-def train_loop(model, loss_fn, optimizer, n_steps, n_steps_per_epoch, d_train, d_test, d_val):
+    # ignore 'state' return val in training
+    loss_fn = lambda y_true, y_pred: vmf_loss(y_true, y_pred[1])
     
-    n_chunk_steps = 10
+    n_chunk_steps = 5
+
+    @tf.function
+    def step_fn():
+        inputs, targets = next(iter(d_train))
+        with tf.GradientTape() as tape:
+            outputs = model(inputs, training=True)
+            loss = loss_fn(targets, outputs)
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        return loss
     
-    def chunk_fn():
+    @tf.function
+    def train_fn():
         """
         Run a small number of steps in a loop to improve
-        execution speed.
+        execution trhoughput.
         """
-        for _ in range(n_chunk_steps):
-            inputs, targets = next(iter(d_train))
-            with tf.GradientTape() as tape:
-                outputs = model(inputs, training=True)
-                loss = loss_fn(targets, outputs)
-                grads = tape.gradient(loss, model.trainable_variables)
-                optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        
-        return loss
+        losses = tf.map_fn(
+            lambda _: step_fn(),
+            tf.range(n_chunk_steps),
+            fn_output_signature=tf.TensorSpec(shape=(), dtype=tf.float32)
+        )
+        return losses
 
     i = 0
-    while i < n_steps:
-        if i % n_steps_per_epoch == 0:
-            epoch = i // n_steps_per_epoch
-            print(f"epoch {epoch}")
-        loss = chunk_fn()
-        i += n_chunk_steps
-        print(f"step: {i}, loss: {loss}")
-        
+    epoch_losses = []
+    with tf.profiler.experimental.Profile(f"./logs/{run_name}/profiler") as profiler:
+        while i < cfg.steps:
+            try:
+                if i % cfg.steps_per_epoch == 0:
+                    epoch = i // cfg.steps_per_epoch
+                    print(f"epoch {epoch}")
+                with tf.profiler.experimental.Trace('train', step_num=i, _r=1):
+                    losses = train_fn()
+                mean_loss = tf.reduce_mean(losses)
+                epoch_losses.append(losses)
+                i += n_chunk_steps
+                print(f"  step: {i}, loss: {mean_loss}")
+                if i % cfg.steps_per_epoch == 0:
+                    epoch = i // cfg.steps_per_epoch
+                    epoch_mean_loss = tf.reduce_mean(epoch_losses)
+                    print()
+                    print(f"epoch {epoch-1} loss: {epoch_mean_loss}")
+                    print()
+                    print()
+            except KeyboardInterrupt:
+                print()
+                print()
+                print("Stopped training early.")
+                print()
+                exit_code = 1
+                break
+        else:
+            print()
+            print()
+            print("Training completed successfully.")
+            print()
+            exit_code = 0
+    
+    exit(exit_code)
