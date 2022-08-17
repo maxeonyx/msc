@@ -231,13 +231,44 @@ def tf_dataset(cfg, finish_fn):
     # dataset = dataset.snapshot(cfg.cached_dataset_path, compression=None)
     dataset = dataset.cache()
     dataset = dataset.shuffle(buffer_size=len(filenames), seed=1234) # keep seed the same for reproducibility of test error
-    test_dataset = dataset.take(12) # take 12 to test
-    val_dataset = dataset.skip(12).take(12) # take next 12 for val
-    train_dataset = dataset.skip(24) # all except first 24
-    train_dataset = train_dataset.repeat()
-    train_dataset = train_dataset.shuffle(buffer_size=cfg.shuffle_buffer_size)
+
+    test_dataset = (
+        dataset
+        .take(12) # take 12 (~10%) to test
+        .repeat()
+    )
+    val_dataset = (
+        dataset
+        .skip(12)
+        .take(12) # take the next 12 (~10%) to validation
+        .repeat()
+    )
+    train_dataset = (
+        dataset
+        .skip(24)
+        .repeat()
+        .shuffle(buffer_size=cfg.shuffle_buffer_size)
+    )
     
-    return finish_fn(cfg, train_dataset, test_dataset, val_dataset)
+    train_dataset, test_dataset, val_dataset = finish_fn(cfg, train_dataset, test_dataset, val_dataset)
+
+    train_dataset = (
+        train_dataset
+        .take(cfg.steps)
+        .prefetch(tf.data.experimental.AUTOTUNE)
+    )
+    test_dataset = (
+        test_dataset
+        .take(cfg.test_steps)
+        .prefetch(tf.data.experimental.AUTOTUNE)
+    )
+    val_dataset = (
+        val_dataset
+        .take(cfg.test_steps)
+        .prefetch(tf.data.experimental.AUTOTUNE)
+    )
+
+    return train_dataset, test_dataset, val_dataset
 
 def pre_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
     

@@ -8,7 +8,7 @@ import tensorflow as tf
 from tensorflow import keras
 from matplotlib import pyplot as plt
 
-from ml import predict, decoders, utils
+from ml import predict, prediction_heads, utils
 
 import config
 
@@ -21,8 +21,8 @@ except KeyError:
 
 model = keras.models.load_model(f"models/{run_name}", compile=False)
 cfg = config.get()
-predict_mean_fn = predict.create_predict_fn(cfg, decoders.von_mises_dist, decoders.von_mises_mean, model)
-predict_sample_fn = predict.create_predict_fn(cfg, decoders.von_mises_dist, decoders.von_mises_sample, model)
+predict_mean_fn = predict.create_predict_fn(cfg, prediction_heads.von_mises_dist, prediction_heads.von_mises_mean, model)
+predict_sample_fn = predict.create_predict_fn(cfg, prediction_heads.von_mises_dist, prediction_heads.von_mises_sample, model)
 
 from ml import data_bvh, data_tf
 

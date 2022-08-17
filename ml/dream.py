@@ -1,19 +1,21 @@
-from curses import erasechar
+import abc
 from functools import reduce
-from http.client import INSUFFICIENT_STORAGE
-from mimetypes import init
-from ntpath import join
+import math
 from pprint import pprint
-from box import Box
+from re import S
+import typing
 import einops as ein
-from einops.layers.keras import EinMix
 import tensorflow as tf
-from ml import data_tf, decoders, encoders, utils, deberta
-from tensorflow import keras
-from tensorflow.keras import Input, Model, layers
+from ml import data_tf, encoders, prediction_heads, utils, deberta
+if typing.TYPE_CHECKING:
+    from tensorflow.python import keras
+    from tensorflow.python.keras import Input, Model, layers
+else:
+    from tensorflow import keras
+    from tensorflow.keras import Input, Model, layers
 from tensorflow_probability import distributions as tfd
 from ml.utils import tf_scope
-
+import enlighten
 
 @tf_scope
 def bucket_scale_fn(decay_power, step_power, clip=1000):
@@ -44,7 +46,7 @@ def bucket_scale_fn(decay_power, step_power, clip=1000):
     return int_float_int(do_clip(make_symmetric(center(g))))
 
 
-class MeinMix(tf.Module):
+class MeinMix(layers.Layer):
 
     """
     Hacky keras-specfic impl of EinMix
@@ -67,7 +69,7 @@ class MeinMix(tf.Module):
         self.dense = layers.Dense(
             self.out_shape_len, use_bias=False, name=name)
 
-    def __call__(self, embd):
+    def call(self, embd):
 
         embd = ein.rearrange(embd, self.in_rearrange, **self.in_shape)
 
@@ -78,7 +80,7 @@ class MeinMix(tf.Module):
         return embd
 
 
-class RelativePositionEmbedding(tf.Module):
+class RelativePositionEmbedding(layers.Layer):
 
     @tf_scope
     def __init__(self, max_rel_embd, D, name="rel_embd"):
@@ -105,7 +107,7 @@ class RelativePositionEmbedding(tf.Module):
         return self.embedding(indices)
 
 
-class RelativePositionProjectionLookup(tf.Module):
+class RelativePositionProjectionLookup(layers.Layer):
 
     @tf_scope
     def __init__(self, rpe: RelativePositionEmbedding, projection: MeinMix, name="rel_projection"):
@@ -113,7 +115,7 @@ class RelativePositionProjectionLookup(tf.Module):
         self.rpe = rpe
         self.projection = projection
 
-    def __call__(self, relative_pos):
+    def call(self, relative_pos):
         rel_embd = self.rpe.embeddings()
         projection = self.projection(rel_embd)
         rel_proj = tf.gather(projection, relative_pos, axis=0)
@@ -129,7 +131,7 @@ def nested_tensorshape(state):
         return {k: nested_tensorshape(v) for k, v in state.items()}
     else:
         raise ValueError(f"Unsupported type {type(state)}")
-class IRMQA(tf.Module):
+class IRMQA(layers.Layer):
     """
     Incremental Relative Multi-Query Attention.
 
@@ -236,7 +238,7 @@ class IRMQA(tf.Module):
         return state
 
     @tf_scope
-    def __call__(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
+    def call(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
 
         if self.using_relative_position and (kv_idxs is None or q_idxs is None):
             raise Exception(
@@ -324,7 +326,7 @@ class IRMQA(tf.Module):
         return state, v_o
 
 
-class IRMQALayer(tf.Module):
+class IRMQALayer(layers.Layer):
     """
     MQA, Intermediate and Output parts.
     """
@@ -355,7 +357,7 @@ class IRMQALayer(tf.Module):
         return self.irmqa.create_state(batch_size)
 
     @tf_scope
-    def __call__(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
+    def call(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
 
         state, embd = self.irmqa(
             kv_embd=kv_embd,
@@ -372,7 +374,7 @@ class IRMQALayer(tf.Module):
         return state, embd
 
 
-class IRMQAEncoder(tf.Module):
+class IRMQAEncoder(layers.Layer):
     """
     Multi-layer self-attention encoder for IRMQA layers.
     """
@@ -392,7 +394,7 @@ class IRMQAEncoder(tf.Module):
         return [layer.create_state(batch_size) for layer in self.irmqa_layers]
 
     @tf_scope
-    def __call__(self, embd, idxs, mask_type, state, write_state):
+    def call(self, embd, idxs, mask_type, state, write_state):
 
         for i in range(self.n_layers):
 
@@ -419,7 +421,7 @@ class IRMQAEncoder(tf.Module):
 
 
 
-class MultiJointDecoder(tf.Module):
+class MultiJointDecoder(layers.Layer):
     """
     Decodes all joints of a hand in any valid topological order.
     """
@@ -433,7 +435,7 @@ class MultiJointDecoder(tf.Module):
         self.decoder = IRMQALayer(cfg, rpe=None)
 
     @tf_scope
-    def __call__(self, hand_embd, cond_joint_embd, query_joint_embd):
+    def call(self, hand_embd, cond_joint_embd, query_joint_embd):
 
         batch_size = tf.shape(hand_embd)[0]
         query_seq_len = tf.shape(query_joint_embd)[1]
@@ -484,7 +486,7 @@ class MultiJointDecoder(tf.Module):
         return joint_embds
 
 
-class EulerAngleDecoder(tf.Module):
+class EulerAngleDecoder(layers.Layer):
     """
     Decodes euler angles into latent vectors.
     """
@@ -495,7 +497,7 @@ class EulerAngleDecoder(tf.Module):
         self.decoder = IRMQALayer(cfg, rpe=None)
 
     @tf_scope
-    def __call__(self, joint_embd, euler_query_embd):
+    def call(self, joint_embd, euler_query_embd):
 
         batch_size = tf.shape(joint_embd)[0]
         
@@ -534,7 +536,7 @@ class EulerAngleDecoder(tf.Module):
 class HierarchicalHandPredictor(Model):
 
     @tf_scope
-    def __init__(self, cfg, decoder, name="hhp"):
+    def __init__(self, cfg, prediction_head, name="hhp"):
         super().__init__(name=name)
 
         self.cfg = cfg
@@ -572,7 +574,7 @@ class HierarchicalHandPredictor(Model):
         self.joint_decoder = MultiJointDecoder(cfg | cfg.joint_decoder)
         self.dof_decoder = EulerAngleDecoder(cfg | cfg.dof_decoder)
 
-        self.dof_to_params = decoder
+        self.prediction_head = prediction_head
     
     def create_state(self, batch_size):
         return {
@@ -580,6 +582,7 @@ class HierarchicalHandPredictor(Model):
             "hand_dec_state": self.hand_decoder.create_state(batch_size),
         }
 
+    @tf.function
     def call(self, inputs, state=None, write_state=False):
 
         cond_hand_vecs = inputs["cond_hand_vecs"]
@@ -701,9 +704,61 @@ class HierarchicalHandPredictor(Model):
         #     e=self.embd_dim,
         # )
 
-        output_params = self.dof_to_params(output_embd)
+        output_params = self.prediction_head(output_embd)
 
-        return state, output_params
+        return {
+            "state": state,
+            "output": output_params
+        }
+
+class IRMQADecoder(layers.Layer):
+
+    def __init__(self, cfg, rpe, name="irmqa_dec") -> None:
+        super().__init__(name=name)
+
+        self.irmqa_layers = [
+            IRMQALayer(cfg, rpe, name=f"irmqa_layers_{i}")
+            for i in range(cfg.n_layers)
+        ]
+    
+    def call(self, embd, idxs):
+        for layer in self.irmqa_layers:
+            _state, embd = layer(embd, embd, "causal", state=None, write_state=None, kv_idxs=idxs, q_idxs=idxs)
+        return None, embd
+
+class DecoderOnly(tf.keras.Model):
+
+    @tf_scope
+    def __init__(self, cfg, prediction_head, name="decoder_only"):
+        super().__init__(name=name)
+        self.cfg = cfg
+        
+        self.prediction_head = prediction_head
+        self.angle_embd = layers.Dense(cfg.embd_dim, name="angle_embd")
+        self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim)
+        self.rpe = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
+        self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd")
+        self.decoder = IRMQADecoder(cfg | cfg.decoder, self.rpe, name="dec")
+
+    def call(self, inputs):
+
+        angles = inputs["input"]
+        idxs = inputs["input_idxs"]
+
+        frame_idxs = idxs[:, :, 0]
+        hand_idxs = idxs[:, :, 1]
+
+        embd = self.angle_embd(angles) + self.hand_embd(hand_idxs)
+
+        _, embd = self.decoder(embd, frame_idxs)
+
+        latents = self.angle_unembd(embd)
+
+        latents = ein.rearrange(latents, 'b fh (j d e) -> b (fh j d) e', j=self.cfg.n_joints_per_hand, d=self.cfg.n_dof_per_joint)
+
+        return {
+            "output": self.prediction_head(latents),
+        }
 
 
 def random_subset(options, n, seed=None):
@@ -782,31 +837,82 @@ def random_joint_order(n_joints_per_hand, seed=None):
 
     return joint_order
 
+
+
+@tf_scope
+def get_chunk(cfg, angles, chunk_mode, seed=None):
+    angles = angles
+
+    angles = ein.rearrange(
+        angles, 'f h (j d) -> f h j d', j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
+    n_frames = tf.shape(angles)[0]
+    fh_idxs = utils.multidim_indices([n_frames, cfg.n_hands], flatten=True)
+    if chunk_mode == "overlapping":
+        i = tf.random.uniform(
+            [], minval=0, maxval=n_frames-cfg.n_hand_vecs, seed=seed, dtype=tf.int32)
+        idxs = tf.concat([fh_idxs[i:i+cfg.n_hand_vecs//2],
+                            fh_idxs[i+1:i+cfg.n_hand_vecs//2+1]], axis=0)
+    elif chunk_mode == "simple":
+        i = tf.random.uniform(
+            [], minval=0, maxval=n_frames-cfg.n_hand_vecs, seed=seed, dtype=tf.int32)
+        idxs = fh_idxs[i:i+cfg.n_hand_vecs]
+    else:
+        idxs = random_subset(fh_idxs, cfg.n_hand_vecs, seed=seed)
+    hands = tf.gather_nd(angles, idxs)
+
+    return hands, idxs
+
+@tf_scope
+def flat_vector_batched_random_chunk(cfg, x, seed=None):
+
+    vecs, idxs = tf.map_fn(
+        lambda a: get_chunk(cfg, a, chunk_mode="simple", seed=seed),
+        x["angles"],
+        fn_output_signature=(
+            tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
+                          cfg.n_dof_per_joint], dtype=tf.float32),
+            tf.TensorSpec(shape=[None, 2], dtype=tf.int32),
+        ),
+        name="hand_map",
+        parallel_iterations=10,
+    )
+    # for the input, produce a bunch of rotations of the angles
+    n = 5
+    scale = (math.tau / 4.) * (1. / n)
+    offset = tf.range(n, dtype=tf.float32) * tf.constant([scale])
+    input_vecs = vecs[:, :, :, :, None] + offset[None, None, None, None, :]
+    input_vecs = tf.stack([tf.cos(input_vecs), tf.sin(input_vecs)], axis=-1)
+
+    input = input_vecs[:, :-1, :, :, :, :]
+    input_idxs = idxs[:, :-1, :]
+    target = vecs[:, 1:, :, :]
+    target_idxs = idxs[:, 1:, :]
+
+    input = ein.rearrange(input, 'b fh j d r s -> b fh (j d r s)')
+    target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
+
+    return (
+        {
+            "input": input,
+            "input_idxs": input_idxs,
+            "target_idxs": target_idxs,
+        },
+        {
+            "target_output": target,
+        },
+    )
+
 @tf.function
 @tf_scope
 def hierarchical_batched_random_chunk(cfg, x, seed=None):
 
-    @tf_scope
-    def get_chunk(angles):
-        angles = angles
-
-        angles = ein.rearrange(
-            angles, 'f h (j d) -> f h j d', j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
-        n_frames = tf.shape(angles)[0]
-        fh_idxs = utils.multidim_indices([n_frames, cfg.n_hands], flatten=True)
-        if cfg.contiguous:
-            i = tf.random.uniform(
-                [], minval=0, maxval=n_frames-cfg.n_hand_vecs, seed=seed, dtype=tf.int32)
-            idxs = tf.concat([fh_idxs[i:i+cfg.n_hand_vecs//2],
-                             fh_idxs[i+1:i+cfg.n_hand_vecs//2+1]], axis=0)
-        else:
-            idxs = random_subset(fh_idxs, cfg.n_hand_vecs, seed=seed)
-        hands = tf.gather_nd(angles, idxs)
-
-        return hands, idxs
+    if cfg.contiguous:
+        chunk_mode = "overlapping"
+    else:
+        chunk_mode = "random"
 
     hands, fh_idxs = tf.map_fn(
-        get_chunk,
+        lambda a: get_chunk(cfg, a, chunk_mode, seed),
         x["angles"],
         fn_output_signature=(
             tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
@@ -866,32 +972,24 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
             "cond_j_idxs": cond_j_idxs,
             "query_j_idxs": query_j_idxs,
         },
-        target_joint_vecs,
+        {
+            "target_output": target_joint_vecs,
+        },
     )
 
 
 def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
 
-    # train input isn't always frame aligned
     train_dataset = train_dataset.apply(
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
     train_dataset = train_dataset.map(
         lambda x: hierarchical_batched_random_chunk(cfg, x))
-    # train_dataset = train_dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
-    # test input is always frame-aligned
-    # take fixed size chunks from the tensor at random frame indices
-    # N = 100 repeats * 12 examples = 1200 test examples
-    test_dataset = test_dataset.repeat(100)
     test_dataset = test_dataset.apply(
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.test_batch_size))
     test_dataset = test_dataset.map(
         lambda x: hierarchical_batched_random_chunk(cfg, x, seed=1234))
 
-    # val input is always frame-aligned
-    # take fixed size chunks from the tensor at random frame indices
-    # N = 100 repeats * 12 examples = 1200 test examples
-    val_dataset = val_dataset.repeat(10)
     val_dataset = val_dataset.apply(
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
     val_dataset = val_dataset.map(
@@ -899,99 +997,327 @@ def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dat
 
     return train_dataset, test_dataset, val_dataset
 
+def decoder_only_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
+
+    train_dataset = train_dataset.apply(
+        tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
+    train_dataset = train_dataset.map(
+        lambda x: flat_vector_batched_random_chunk(cfg, x))
+
+    test_dataset = test_dataset.apply(
+        tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.test_batch_size))
+    test_dataset = test_dataset.map(
+        lambda x: flat_vector_batched_random_chunk(cfg, x, seed=1234))
+
+    val_dataset = val_dataset.apply(
+        tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
+    val_dataset = val_dataset.map(
+        lambda x: flat_vector_batched_random_chunk(cfg, x, seed=1234))
+
+    return train_dataset, test_dataset, val_dataset
+
+class MyMetric(abc.ABC, layers.Layer):
+
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    @abc.abstractmethod
+    def reset(self):
+        pass
+
+    @abc.abstractmethod
+    def result(self):
+        pass
+
+    @abc.abstractmethod
+    def update_state(self, i, inputs):
+        pass
+
+class RunningMean(MyMetric):
+    
+    @tf_scope
+    def __init__(self, fn, element_shape=[], dtype=tf.float32, name="running_mean"):
+        super().__init__(name=name)
+        self.total = tf.Variable(initial_value=tf.zeros(element_shape, dtype=dtype), name="total", trainable=False)
+        self.count = tf.Variable(0., dtype=tf.float32, name="count", trainable=False)
+        self.fn = fn
+    
+    def reset(self):
+        self.total.assign(tf.zeros_like(self.total))
+        self.count.assign(0.)
+
+    @tf_scope
+    def result(self):
+        return self.total / self.count
+
+    @tf_scope
+    def update_state(self, inputs):
+        val = self.fn(inputs)
+        self.total.assign_add(val),
+        self.count.assign_add(1.)
+
+class Rolling(MyMetric):
+
+    @tf_scope
+    def __init__(self, length, fn, element_shape=[], dtype=tf.float32, reduction_fn=tf.reduce_mean, name="rolling"):
+        super().__init__(name=name)
+        self.length = length
+        self.reduction_fn = reduction_fn
+        self.fn = fn
+        self.buffer = tf.Variable(
+            initial_value=tf.zeros(shape=[length] + element_shape, dtype=dtype),
+            name="history",
+            trainable=False,
+            aggregation=tf.VariableAggregation.SUM,
+            synchronization=tf.VariableSynchronization.ON_READ,
+        )
+        self.index = tf.Variable(
+            initial_value=tf.constant(0, dtype=tf.int64),
+            name="index",
+            trainable=False,
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+            synchronization=tf.VariableSynchronization.ON_READ,
+        )
+    
+    def reset(self):
+        self.index.assign(0)
+        self.buffer.assign(tf.zeros_like(self.buffer))
+
+    @tf_scope
+    def update_state(self, inputs):
+        self.index.assign_add(1)
+        i = self.index % self.length
+        val = self.fn(inputs)
+        self.buffer[i].assign(val)
+    
+    @tf_scope
+    def result(self):
+        i = tf.math.minimum(self.index, self.length)
+        return self.reduction_fn(self.buffer[:i])
 
 def train(cfg, run_name):
 
     cfg = cfg | cfg.dream
 
-    pprint(dict(cfg))
+    # d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_heirarchical, dream_dataset)
+    d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_flat, decoder_only_dataset)
 
-    d_train, d_test, d_val = data_tf.tf_dataset(cfg, dream_dataset)
-
-    vmf_loss, vmf_dist, vmf_mean, vmf_sample, vmf_decoder = decoders.von_mises_fisher(
-        cfg, name="vmf")
-
-    inp, tar = next(iter(d_train))
-
-    inp_shape = {k: v.shape for k, v in inp.items()}
-    print()
-    pprint(inp_shape)
-    inp_dtype = {k: v.dtype for k, v in inp.items()}
-    pprint(inp_dtype)
+    print("Initializing datasets...")
+    _, _ = next(iter(d_train))
+    _, _ = next(iter(d_test))
+    _, _ = next(iter(d_val))
+    print("... Done.")
     print()
 
-    # inputs = {
-    #     "cond_hand_vecs": Input(shape=[None, cfg.n_joints_per_hand * cfg.n_dof_per_joint], dtype=tf.float32, name="cond_hand_vecs"),
-    #     "cond_fh_idxs": Input(shape=[None, 2], dtype=tf.int32, name="cond_fh_idxs"),
-    #     "query_fh_idxs": Input(shape=[None, 2], dtype=tf.int32, name="query_fh_idxs"),
-    #     "cond_joint_vecs": Input(shape=[None, None, cfg.n_dof_per_joint], dtype=tf.float32, name="cond_joint_vecs"),
-    #     "cond_j_idxs": Input(shape=[None, None], dtype=tf.int32, name="cond_j_idxs"),
-    #     "query_j_idxs": Input(shape=[None, None], dtype=tf.int32, name="query_j_idxs"),
-    # }
-    model = HierarchicalHandPredictor(cfg | cfg.model, vmf_decoder)
-    optimizer = tf.keras.optimizers.Adam(cfg.adam.lr)
+    # loss_fn, stat_fns, prediction_head = decoders.von_mises_fisher(cfg, name="vmf")
+    loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
 
-    # ignore 'state' return val in training
-    loss_fn = lambda y_true, y_pred: vmf_loss(y_true, y_pred[1])
-    
-    n_chunk_steps = 5
+    def loss_fn_wrapper(inp):
+        return tf.reduce_mean(loss_fn(inp["targets"]["target_output"], inp["outputs"]["output"]))
 
-    @tf.function
-    def step_fn():
-        inputs, targets = next(iter(d_train))
+    # model = HierarchicalHandPredictor(cfg | cfg.model_heirarchical, prediction_head=prediction_head)
+    model = DecoderOnly(cfg | cfg.model_decoder_only, prediction_head=prediction_head)
+
+    optimizer = keras.optimizers.Adam(cfg.adam.lr)
+
+    with enlighten.get_manager() as manager:
+        eval_fn = make_exec_loop(
+            "Validation",
+            model,
+            d_val,
+            loss_fn,
+            optimizer,
+            training=False,
+            metrics=[
+                {
+                    "name": "Val Loss",
+                    "metric": RunningMean(loss_fn_wrapper, name="mean_val_loss"),
+                }
+            ]
+        )
+        
+        train_fn = make_exec_loop(
+            "Training",
+            model,
+            d_train,
+            loss_fn,
+            optimizer,
+            training=True,
+            metrics=[
+                {
+                    "name": "Loss (10)",
+                    "metric": Rolling(10, loss_fn_wrapper, name="train_loss_10"),
+                },
+                {
+                    "name": "Loss (100)",
+                    "metric": Rolling(100, loss_fn_wrapper, name="train_loss_100"),
+                },
+                {
+                    "name": "Loss (1000)",
+                    "metric": Rolling(1000, loss_fn_wrapper, name="train_loss_1000"),
+                },
+            ],
+            callbacks=[
+                {
+                    "name": "Steps until evaluate",
+                    "every": 1000,
+                    
+                    # first metric is mean loss over validation set
+                    "fn": lambda i: eval_fn(manager)[1][0],
+                },
+                {
+                    "name": "Steps until checkpoint",
+                    "every": 1000,
+                    "fn": lambda i: model.save(f"models/{run_name}/checkpoint_{i}"),
+                },
+            ],
+        )
+
+
+        print()
+        print(f"Training model '{run_name}'")
+        print("  ...")
+        print()
+        stopped_early, metric_results = train_fn(manager)
+
+        print()
+        print()
+        if stopped_early:
+            print("Stopped training early.")
+        else:
+            print("Training completed successfully!")
+        print()
+
+
+def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[], callbacks=[], n_fuse_steps=10):
+
+    use_metrics = len(metrics) > 0
+    use_callbacks = len(callbacks) > 0
+
+    def train_step_fn(batch):
+        i, (inputs, targets) = batch
         with tf.GradientTape() as tape:
             outputs = model(inputs, training=True)
-            loss = loss_fn(targets, outputs)
+            loss = loss_fn(targets["target_output"], outputs["output"])
             grads = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        return loss
+        if use_metrics:
+            for metric in metrics:
+                metric["metric"].update_state({
+                    "inputs": inputs,
+                    "targets": targets,
+                    "outputs": outputs,
+                    "loss": loss,
+                    "grads": grads,
+                })
     
-    @tf.function
-    def train_fn():
-        """
-        Run a small number of steps in a loop to improve
-        execution trhoughput.
-        """
-        losses = tf.map_fn(
-            lambda _: step_fn(),
-            tf.range(n_chunk_steps),
-            fn_output_signature=tf.TensorSpec(shape=(), dtype=tf.float32)
-        )
-        return losses
+    def eval_step_fn(batch):
+        i, (inputs, targets) = batch
+        outputs = model(inputs, training=False)
+        loss = loss_fn(targets["target_output"], outputs["output"])
+        if use_metrics:
+            for metric in metrics:
+                metric["metric"].update_state({
+                    "inputs": inputs,
+                    "targets": targets,
+                    "outputs": outputs,
+                    "loss": loss,
+                })
 
-    i = 0
-    epoch_losses = []
-    with tf.profiler.experimental.Profile(f"./logs/{run_name}/profiler") as profiler:
-        while i < cfg.steps:
-            try:
-                if i % cfg.steps_per_epoch == 0:
-                    epoch = i // cfg.steps_per_epoch
-                    print(f"epoch {epoch}")
-                with tf.profiler.experimental.Trace('train', step_num=i, _r=1):
-                    losses = train_fn()
-                mean_loss = tf.reduce_mean(losses)
-                epoch_losses.append(losses)
-                i += n_chunk_steps
-                print(f"  step: {i}, loss: {mean_loss}")
-                if i % cfg.steps_per_epoch == 0:
-                    epoch = i // cfg.steps_per_epoch
-                    epoch_mean_loss = tf.reduce_mean(epoch_losses)
-                    print()
-                    print(f"epoch {epoch-1} loss: {epoch_mean_loss}")
-                    print()
-                    print()
-            except KeyboardInterrupt:
-                print()
-                print()
-                print("Stopped training early.")
-                print()
-                exit_code = 1
-                break
-        else:
-            print()
-            print()
-            print("Training completed successfully.")
-            print()
-            exit_code = 0
+    # add indexes to the dataset
+    dataset = dataset.enumerate()
+
+    if training:
+        step_fn = train_step_fn
+    else:
+        step_fn = eval_step_fn
     
-    exit(exit_code)
+    print()
+    print(f"Compiling {name.lower()} step function...")
+    compiled_step_fn = tf.function(
+        step_fn,
+        input_signature=[
+            dataset.element_spec,
+        ],
+        reduce_retracing=True,
+        # jit_compile=True,
+    )
+    step_fn = compiled_step_fn
+
+    _ = step_fn(next(iter(dataset)))
+    print("... Done.")
+    print()
+
+    def exec_loop(manager):
+
+        if use_metrics:
+            for metric in metrics:
+                metric["metric"].reset()
+
+            metric_column_length = max(len(metric["name"]) for metric in metrics)
+            metric_header_text = " | ".join(
+                "{name:^{length}}".format(name=metric["name"], length=metric_column_length)
+                for metric in metrics
+            )
+            metric_status_text = lambda: "| " + " | ".join(
+                "{value: > {length}.{sf}e}".format(value=metric["metric"].result(), length=metric_column_length, sf=metric.get("sf", 4))
+                for metric in metrics
+            ) + " |"
+            metric_header_bar = manager.status_bar(metric_header_text, leave=False, min_delta=0.01)
+            metric_status_bar = manager.status_bar(metric_status_text(), leave=False, min_delta=0.01)
+
+        n_steps = dataset.cardinality().numpy()
+        if n_steps == tf.data.INFINITE_CARDINALITY or n_steps == tf.data.UNKNOWN_CARDINALITY:
+            raise ValueError("Dataset has unknown cardinality.")
+        
+        steps_counter = manager.counter(
+            total=n_steps,
+            desc=f"{name} progress",
+            unit="steps",
+            color='skyblue',
+            leave=False,
+            min_delta=0.01,
+        )
+
+        if use_callbacks:
+            longest_name = max(len(callback["name"]) for callback in callbacks)
+            for callback in callbacks:
+                callback["counter"] = manager.counter(
+                    total=callback["every"],
+                    desc=f"{callback['name']:<{longest_name}}",
+                    unit=callback.get("unit", "steps"),
+                    color=callback.get("color", "sandybrown"),
+                    leave=False,
+                    min_delta=0.01,
+                )
+        try:
+            for i, batch in dataset:
+                step_fn((i, batch))
+                if use_metrics:
+                    metric_header_bar.update(metric_header_text)
+                    metric_status_bar.update(metric_status_text())
+                if use_callbacks:
+                    for callback in callbacks:
+                        if i % callback["every"] == 0:
+                            callback["fn"](i)
+                            callback["counter"].count = 0
+                        callback["counter"].update()
+                steps_counter.update()
+            stopped_early = False
+        except KeyboardInterrupt:
+            stopped_early = True
+        
+        if use_callbacks:
+            for callback in callbacks:
+                callback["counter"].close()
+        
+        if use_metrics:
+            metric_status_bar.close()
+            metric_header_bar.close()
+        
+        steps_counter.close()
+        
+        return stopped_early, [metric["metric"].result() for metric in metrics]
+    
+    return exec_loop
+            

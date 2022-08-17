@@ -14,6 +14,8 @@ def get():
         "layer_norm_eps": 1e-7,
     })
 
+
+
     return box({
         
         "shuffle_buffer_size": 130,
@@ -37,17 +39,24 @@ def get():
         },
     
         "dream": {
+            "n_hand_vecs": 18,
+            "batch_size": 11,
+
             "n_hands": 1,
             "n_dof": 3,
+            "columns": "all",
             "n_joints_per_hand": 1,
             "n_dof_per_joint": 3,
-            "columns": "all",
-            "contiguous": True,
-            "n_hand_vecs": 8,
-            "batch_size": 5,
             
             "embd_dim": 102,
-            "model": {
+
+            "ds_flat": {
+            },
+            "ds_heirarchical": {
+                "contiguous": True,
+            },
+
+            "model_heirarchical": {
                 "max_rel_embd": 1000,
                 "hand_encoder": {
                     "n_layers": 3,
@@ -63,6 +72,24 @@ def get():
                     **irmqa_cfg,
                 },
             },
+
+            "model_decoder_only": {
+                "max_rel_embd": 1000,
+                "decoder": {
+                    "n_layers": 3,
+                    **irmqa_cfg,
+                },
+            },
+        },
+
+        "decoder_only": {
+            "n_hands": 1,
+            "n_dof": 3,
+            "n_joints_per_hand": 1,
+            "n_dof_per_joint": 3,
+            "columns": "all",
+            "n_hand_vecs": 18,
+            "batch_size": 11,
         },
 
         # predict frames is the number of frames to predict when
@@ -71,6 +98,8 @@ def get():
         "test_batch_size": 3,
 
         "steps": 100000,
+        "test_steps": 1000,
+        "val_steps": 1000,
         "steps_per_epoch": 1000,
 
         "optimizer": "warmup_sgd",

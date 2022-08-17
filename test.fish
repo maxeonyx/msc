@@ -1,6 +1,6 @@
 #!/usr/bin/fish
 
-. env/bin/activate.fish
+source env/bin/activate.fish
 
 if test (which randomname)
     set PREV_BRANCH_NAME (git symbolic-ref --short HEAD)
@@ -15,6 +15,7 @@ if test (which randomname)
 
     # fix for CUDA on archlinux
     set -x XLA_FLAGS --xla_gpu_cuda_data_dir=/opt/cuda/
+    set -x TF_XLA_FLAGS --tf_xla_auto_jit=2 --tf_xla_cpu_global_jit
 
     mkdir -p runs/$RUN_NAME
     # create a new commit with the current state of the working directory on a new branch

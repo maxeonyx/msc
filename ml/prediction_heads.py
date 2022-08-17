@@ -49,20 +49,49 @@ def von_mises_loss(targets, p):
     d = von_mises_dist(p)
     return -tf.reduce_mean(d.log_prob(targets))
 
-def von_mises_mean(d):
+def von_mises_mean(p):
+    d = von_mises_dist(p)
     return d.mean()
 
-def von_mises_sample(d):
+def von_mises_sample(p):
+    d = von_mises_dist(p)
     return d.sample()
 
 def von_mises(cfg, name="von_mises"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
     params = layers.Dense(2, name="params")(inputs)
 
-    return von_mises_loss, von_mises_dist, von_mises_mean, von_mises_sample, Model(inputs=inputs, outputs=params, name=f"{name}_params")
+    return von_mises_loss, [von_mises_mean, von_mises_sample], Model(inputs=inputs, outputs=params, name=f"{name}_params")
 
 def query_decoder(cfg, name="query_decoder"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
 
     params = layers.Dense(2, name="params")(inputs)
     return Model(inputs=inputs, outputs=params, name=f"{name}_params")
+
+@tf.function(
+    input_signature=[
+        tf.TensorSpec(shape=[None, None], dtype=tf.float32),
+        tf.TensorSpec(shape=[None, None, None], dtype=tf.float32),
+    ]
+)
+def angular_squared_error(targets, p):
+    """
+    Angular squared error between targets in [-pi, pi) and p in <[-1, 1), [-1, 1)>
+    """
+    target_sin = tf.sin(targets)
+    target_cos = tf.cos(targets)
+    p_sin = p[..., 0]
+    p_cos = p[..., 1]
+    
+    return tf.square(target_sin - p_sin) + tf.square(target_cos - p_cos)
+
+def to_angle(p):
+    return tf.atan2(p[..., 1], p[..., 0])
+
+def angular(cfg, name="angular"):
+    inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
+    params = layers.Dense(2, name="sincos")(inputs)
+    decoder = Model(inputs=inputs, outputs=params, name=f"{name}_decoder")
+
+    return angular_squared_error, [to_angle], decoder
