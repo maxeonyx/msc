@@ -4,7 +4,7 @@ import inspect
 from operator import is_
 from tensorflow import keras
 import tensorflow as tf
-
+from math import pi, tau
 
 def multidim_indices(shape, flatten=True):
     """
@@ -28,7 +28,11 @@ def multidim_indices_of(tensor, flatten=True):
 
 
 def angle_wrap(angles):
-    angles = tf.math.atan2(tf.sin(angles), tf.cos(angles))
+    """
+    Wrap angle in radians to [-pi, pi] range
+    """
+    angles = (angles + pi) % tau - pi
+    # angles = tf.math.atan2(tf.sin(angles), tf.cos(angles))
     return angles
 
 

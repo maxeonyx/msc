@@ -87,7 +87,7 @@ def angular_squared_error(targets, p):
     return tf.square(target_sin - p_sin) + tf.square(target_cos - p_cos)
 
 def to_angle(p):
-    return tf.atan2(p[..., 1], p[..., 0])
+    return tf.atan2(p[..., 0], p[..., 1])
 
 def angular(cfg, name="angular"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")

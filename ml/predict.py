@@ -1,4 +1,72 @@
 import tensorflow as tf
+import tensorflow.keras as keras
+import einops as ein
+from ml import utils, data_tf
+from matplotlib import pyplot as plt
+from box import Box as box
+from math import pi, tau
+
+def create_predict_fn_v2(cfg, model, get_angle_fns):
+
+    if type(model) is str:
+        model = keras.models.load_model(model)
+
+    def showimgs(data):
+        n_imgs = len(data)
+        batch_size = data[0].shape[0]
+        n_tracks_per_img = cfg.n_hands * cfg.n_joints_per_hand * cfg.n_dof_per_joint
+        for i in range(batch_size):
+            fig, axes = plt.subplots(n_imgs, figsize=(20,2))
+            for j in range(n_imgs):
+                axes[j].imshow(tf.transpose(tf.reshape(data[j][i], [-1, n_tracks_per_img]))[:, :200], vmin=-pi, vmax=pi)
+            fig.tight_layout()
+        plt.show()
+
+    @tf.function
+    def predict_fn(seed_input, idxs, outp_var):
+        n_stats = len(get_angle_fns)
+        seed_len = seed_input.shape[1]
+        # tile seed input across number of statistics we will generate (eg. mean() and sample())
+        seed_input = ein.repeat(seed_input, 'b fh j d -> b s fh j d', s=n_stats)
+        outp_var[:, :, :seed_len].assign(seed_input)
+        n = outp_var.shape[2]
+        for i in tf.range(seed_len, n): # converted to tf.while_loop
+            inp = ein.rearrange(outp_var[:, :, :i], "b stat fh j d -> (b stat) fh j d")
+            inputs = {
+                "input": inp,
+                "input_idxs": idxs[:, :i],
+                "target_idxs": idxs[:, i:i+1]
+            }
+            output = model(inputs, training=False)
+            output = output["output"]
+            output = ein.rearrange(output, '(b n_stats) (fh j d) sincos -> b n_stats fh j d sincos', n_stats=n_stats, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint, sincos=2)
+            for j in range(len(get_angle_fns)): # not converted, adds ops to graph
+                outp_var[:, j, i, :, :].assign(get_angle_fns[j](output[:, j, -1, :, :, :]))
+        return outp_var
+
+    def make_seed_data(data, seed_len):
+        return data["input"], data["input"][:, :seed_len], data["input_idxs"]
+
+    def predict_wrapper(n_frames, seed_input, idxs):
+        n_stats = len(get_angle_fns)
+        batch_size = seed_input.shape[0]
+        outp_var = tf.Variable(tf.zeros([batch_size, n_stats, n_frames * cfg.n_hands, cfg.n_joints_per_hand, cfg.n_dof_per_joint]))
+        return predict_fn(seed_input, idxs, outp_var)
+
+    def predict(data, n_frames, seed_len=8):
+        target, seed_input, idxs = make_seed_data(data, seed_len)
+        return predict_wrapper(n_frames, seed_input, idxs)
+
+    def predict_and_show(data, n_frames, seed_len=8):
+        target, seed_input, idxs = make_seed_data(data, seed_len)
+        outp = predict_wrapper(n_frames, seed_input, idxs)
+        showimgs([
+            target,
+            seed_input,
+            *[outp[:, i, ...] for i in range(len(get_angle_fns))]
+        ])
+
+    return predict, predict_and_show
 
 def create_predict_fn(cfg, dist_fn, get_angle_fn, model):
     """

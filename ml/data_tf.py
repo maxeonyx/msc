@@ -3,10 +3,11 @@ Takes a np BVH dataset and returns a model-agnostic tf.data.Dataset pipeline, wh
 """
 
 import sys
-import math
+from math import pi, tau
 
 import numpy as np
 import tensorflow as tf
+import einops as ein
 from einops import rearrange, reduce, repeat
 
 from ml import utils
@@ -139,18 +140,18 @@ def to_test_input_and_target(cfg, x):
     return (inp, tar)
 
 
-def subset(cfg, x):
+def subset(cfg, angles):
     """
     Slice just some of the data.
     """
-    x["angles"] = x["angles"][:, :cfg.n_hands, :cfg.n_dof]
+    angles = angles[:, :cfg.n_hands, :cfg.n_dof]
 
-    return x
+    return angles
 
 
-def recluster(x, circular_means):
-    x["angles"] = utils.recluster(x["angles"], frame_axis=0, circular_means=circular_means)
-    return x
+def recluster(angles, circular_means):
+    angles = utils.recluster(angles, frame_axis=0, circular_means=circular_means)
+    return angles
 
 
 def make_decimate_fn(cfg, n_hands, n_dof):
@@ -167,20 +168,8 @@ def make_decimate_fn(cfg, n_hands, n_dof):
                 new_angles = tf.concat([new_angles, angles[i:i+1]], axis=0)
         new_angles = rearrange(new_angles, 'f (h d) -> f h d', h=n_hands, d=n_dof)
         return new_angles
-    
-    def decimate_map(x):
-        x["angles"] = decimate(x["angles"])
-        return x
 
-    return decimate, decimate_map
-
-
-def to_dict(filename, angles):
-    return {
-        # "filename": filename,
-        "angles": angles,
-    }
-
+    return decimate
 
 def random_flat_vector_chunk(cfg, x):
     """
@@ -195,8 +184,73 @@ def random_flat_vector_chunk(cfg, x):
     return x
 
 
+def synthetic_data(cfg, seed=1234):
+    """
+    Create a synthetic dataset compatible with the BVH one.
+    """
+
+    tf.random.set_seed(seed)
+
+    n_examples = cfg.get("n_examples", 65)
+
+    n_frames = tf.random.uniform(shape=[n_examples], minval=4000, maxval=8000, dtype=tf.int32, seed=seed)
+
+    def make_angle_track(length):
+        """
+        Makes a track with random movement. One degree of freedom.
+        """
+        i = tf.range(0, length, dtype=tf.float32)
+        sin_freqs = tf.exp(tf.random.uniform(shape=[3], minval=-2, maxval=0, dtype=tf.float32, seed=seed))
+        sin_offsets = tf.random.uniform(shape=[3], minval=0, maxval=2*np.pi, dtype=tf.float32, seed=seed)
+        sin_amplitudes = tf.random.uniform(shape=[3], minval=tau/48, maxval=tau/6, dtype=tf.float32, seed=seed)
+        mean = tf.random.uniform(shape=[], minval=-pi, maxval=pi, dtype=tf.float32, seed=seed)
+        angles = tf.reduce_sum(tf.sin(sin_freqs[None, :] * i[:, None] + sin_offsets[None, :])*sin_amplitudes[None, :], axis=1)
+        angles = utils.angle_wrap(angles + mean)
+
+        return angles
+
+    angles = tf.concat([
+        tf.stack([
+            make_angle_track(length=n_frames[i_example])
+            for i_track in range(cfg.n_hands * cfg.n_joints_per_hand * cfg.n_dof_per_joint)
+        ], axis=1)
+        for i_example in range(n_examples)
+    ], axis=0)
+
+    angles = ein.rearrange(angles, 'f (h j d) -> f h (j d)', h=cfg.n_hands, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
+
+    angles = tf.RaggedTensor.from_row_lengths(angles, n_frames)
+
+    dataset = tf.data.Dataset.from_tensor_slices(angles)
+    
+    return dataset
+
+def bvh_data(cfg):
+    
+    _filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(force=cfg.force, columns=cfg.columns)
+    
+    all_angles = tf.concat(angles, axis=0)
+    n_frames = tf.constant(n_frames)
+    orig_n_hands = all_angles.shape[1]
+    orig_n_dof = all_angles.shape[2]
+    ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
+
+    dataset = dataset.map(lambda x: subset(cfg, x))
+
+    if cfg.recluster:
+        circular_means = utils.circular_mean(all_angles, axis=0)
+        dataset = dataset.map(lambda x: recluster(x, circular_means))
+    
+    if cfg.decimate:
+        decimate = make_decimate_fn(cfg, orig_n_hands, orig_n_dof)
+        dataset = dataset.map(decimate)
+
+    dataset = tf.data.Dataset.from_tensor_slices(ragged_angles)
+
+    return dataset
+
 # take np BVH dataset and return angles, hand idxs, frame idxs, and dof idxs
-def tf_dataset(cfg, finish_fn):
+def tf_dataset(cfg, finish_fn, data_fn=bvh_data):
     """
     Takes a np BVH dataset, of type []
     returns a model-agnostic tf.data.Dataset pipeline, which can be further transformed.
@@ -205,32 +259,15 @@ def tf_dataset(cfg, finish_fn):
     each with shape (n_hands, n_frames, n_dof)
     """
 
-    filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(force=cfg.force, columns=cfg.columns)
-    filenames = tf.constant(filenames)
-    all_angles = tf.concat(angles, axis=0)
-    n_frames = tf.constant(n_frames)
-    orig_n_hands = all_angles.shape[1]
-    orig_n_dof = all_angles.shape[2]
-    ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
-    dataset = tf.data.Dataset.from_tensor_slices((filenames, ragged_angles))
+    dataset = data_fn(cfg)
 
-    dataset = dataset.map(to_dict)
-
-    if cfg.recluster:
-        circular_means = utils.circular_mean(all_angles, axis=0)
-        dataset = dataset.map(lambda x: recluster(x, circular_means))
-    
-    if cfg.decimate:
-        _, decimate = make_decimate_fn(cfg, orig_n_hands, orig_n_dof)
-        dataset = dataset.map(decimate)
-
-    dataset = dataset.map(lambda x: subset(cfg, x))
+    dataset = dataset.map(lambda a: { "angles": a })
     
     dataset = dataset.map(add_idx_arrays)
 
     # dataset = dataset.snapshot(cfg.cached_dataset_path, compression=None)
     dataset = dataset.cache()
-    dataset = dataset.shuffle(buffer_size=len(filenames), seed=1234) # keep seed the same for reproducibility of test error
+    dataset = dataset.shuffle(buffer_size=dataset.cardinality(), seed=1234) # keep seed the same for reproducibility of test error
 
     test_dataset = (
         dataset

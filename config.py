@@ -42,8 +42,11 @@ def get():
             "n_hand_vecs": 18,
             "batch_size": 11,
 
+            "decimate": False,
+            "decimate_threshold": 0.3,
+            "recluster": False,
+
             "n_hands": 1,
-            "n_dof": 3,
             "columns": "all",
             "n_joints_per_hand": 1,
             "n_dof_per_joint": 3,
@@ -51,6 +54,9 @@ def get():
             "embd_dim": 102,
 
             "ds_flat": {
+                "embd_dim": 1 * 1 * 3 * 5 * 2,
+                "n_examples": 60,
+                "n_hand_vecs": 200,
             },
             "ds_heirarchical": {
                 "contiguous": True,
@@ -75,6 +81,7 @@ def get():
 
             "model_decoder_only": {
                 "max_rel_embd": 1000,
+                "n_rotations": 5,
                 "decoder": {
                     "n_layers": 3,
                     **irmqa_cfg,

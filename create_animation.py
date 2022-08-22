@@ -41,7 +41,7 @@ name = names[i_example]
 example = tf.constant(angles[i_example])[1500:2600, :cfg.n_hands, :cfg.n_dof]
 data_bvh.write_bvh_files(example, f"{run_name}.{name}", "anims/")
 
-decimate, _ = data_tf.make_decimate_fn(cfg)
+decimate = data_tf.make_decimate_fn(cfg)
 example_decimated = decimate(example)
 print("example_decimated", example_decimated.shape)
 data_bvh.write_bvh_files(example_decimated, f"{run_name}.{name}.decimated", "anims/")

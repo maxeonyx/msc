@@ -6,7 +6,7 @@ from re import S
 import typing
 import einops as ein
 import tensorflow as tf
-from ml import data_tf, encoders, prediction_heads, utils, deberta
+from ml import data_tf, encoders, predict, prediction_heads, utils, deberta
 if typing.TYPE_CHECKING:
     from tensorflow.python import keras
     from tensorflow.python.keras import Input, Model, layers
@@ -16,6 +16,7 @@ else:
 from tensorflow_probability import distributions as tfd
 from ml.utils import tf_scope
 import enlighten
+from math import pi, tau
 
 @tf_scope
 def bucket_scale_fn(decay_power, step_power, clip=1000):
@@ -745,6 +746,15 @@ class DecoderOnly(tf.keras.Model):
         angles = inputs["input"]
         idxs = inputs["input_idxs"]
 
+        # produce a bunch of rotations to make the model's job easier
+        n = self.cfg.n_rotations
+        scale = (tau / 4.) * (1. / n) # only need to produce rotations up to tau/4, because the model can easily invert angles
+        offset = tf.range(n, dtype=tf.float32) * tf.constant([scale])
+        angles = angles[:, :, :, :, None] + offset[None, None, None, None, :]
+        angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
+
+        angles = ein.rearrange(angles, 'b fh j d rot sincos -> b fh (j d rot sincos)')
+
         frame_idxs = idxs[:, :, 0]
         hand_idxs = idxs[:, :, 1]
 
@@ -877,18 +887,13 @@ def flat_vector_batched_random_chunk(cfg, x, seed=None):
         parallel_iterations=10,
     )
     # for the input, produce a bunch of rotations of the angles
-    n = 5
-    scale = (math.tau / 4.) * (1. / n)
-    offset = tf.range(n, dtype=tf.float32) * tf.constant([scale])
-    input_vecs = vecs[:, :, :, :, None] + offset[None, None, None, None, :]
-    input_vecs = tf.stack([tf.cos(input_vecs), tf.sin(input_vecs)], axis=-1)
 
-    input = input_vecs[:, :-1, :, :, :, :]
+    input = vecs[:, :-1, :, :]
     input_idxs = idxs[:, :-1, :]
     target = vecs[:, 1:, :, :]
     target_idxs = idxs[:, 1:, :]
 
-    input = ein.rearrange(input, 'b fh j d r s -> b fh (j d r s)')
+    input = ein.rearrange(input, 'b fh j d -> b fh j d')
     target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
 
     return (
@@ -1100,7 +1105,7 @@ def train(cfg, run_name):
     cfg = cfg | cfg.dream
 
     # d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_heirarchical, dream_dataset)
-    d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_flat, decoder_only_dataset)
+    d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_flat, decoder_only_dataset, data_fn=data_tf.synthetic_data)
 
     print("Initializing datasets...")
     _, _ = next(iter(d_train))
@@ -1121,6 +1126,11 @@ def train(cfg, run_name):
     optimizer = keras.optimizers.Adam(cfg.adam.lr)
 
     with enlighten.get_manager() as manager:
+
+        predict_fn, predict_and_plot_fn = predict.create_predict_fn_v2(cfg, model, stat_fns)
+
+        test_inp_data, _test_tar_data = next(iter(d_test))
+
         eval_fn = make_exec_loop(
             "Validation",
             model,
@@ -1159,16 +1169,23 @@ def train(cfg, run_name):
             ],
             callbacks=[
                 {
-                    "name": "Steps until evaluate",
+                    "name": "Epoch",
                     "every": 1000,
                     
-                    # first metric is mean loss over validation set
-                    "fn": lambda i: eval_fn(manager)[1][0],
-                },
-                {
-                    "name": "Steps until checkpoint",
-                    "every": 1000,
-                    "fn": lambda i: model.save(f"models/{run_name}/checkpoint_{i}"),
+                    "fns": [
+                        {
+                            "name": "Evaluate",
+                            "fn": lambda i: eval_fn(manager)[1][0],
+                        },
+                        {
+                            "name": "Predict",
+                            "fn": lambda i: predict_and_plot_fn(test_inp_data, n_frames=100, seed_len=5),
+                        },
+                        {
+                            "name": "Checkpoint",
+                            "fn": lambda i: model.save(f"models/{run_name}/checkpoint_{i}"),
+                        },
+                    ],
                 },
             ],
         )
@@ -1183,9 +1200,9 @@ def train(cfg, run_name):
         print()
         print()
         if stopped_early:
-            print("Stopped training early.")
+            print(f"Run '{run_name}' stopped early.")
         else:
-            print("Training completed successfully!")
+            print(f"Run '{run_name}' completed successfully!")
         print()
 
 
@@ -1299,7 +1316,8 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
                 if use_callbacks:
                     for callback in callbacks:
                         if i % callback["every"] == 0:
-                            callback["fn"](i)
+                            for f in callback["fns"]:
+                                f["fn"](i)
                             callback["counter"].count = 0
                         callback["counter"].update()
                 steps_counter.update()
