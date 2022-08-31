@@ -53,7 +53,7 @@ class MeinMix(layers.Layer):
     Hacky keras-specfic impl of EinMix
     """
 
-    def __init__(self, in_shape, out_shape, name="mix") -> None:
+    def __init__(self, in_shape, out_shape, regularizer, name="mix") -> None:
         super().__init__(name=name)
 
         self.in_shape = in_shape
@@ -68,7 +68,7 @@ class MeinMix(layers.Layer):
         self.out_rearrange = f"... ({out_shape_pattern}) -> ... {out_shape_pattern}"
 
         self.dense = layers.Dense(
-            self.out_shape_len, use_bias=False, name=name)
+            self.out_shape_len, use_bias=False, name=name, kernel_regularizer=regularizer)
 
     def call(self, embd):
 
@@ -148,7 +148,7 @@ class IRMQA(layers.Layer):
     """
 
     @tf_scope
-    def __init__(self, QK, V, D, H, rpe, name="irmqa"):
+    def __init__(self, QK, V, D, H, rpe, regularizer, name="irmqa"):
         super().__init__(name=name)
 
         self.QK = QK
@@ -163,7 +163,8 @@ class IRMQA(layers.Layer):
         self.wv = MeinMix(
             in_shape={"d": self.D},
             out_shape={"v": self.V},
-            name="wv"
+            name="wv",
+            regularizer=regularizer,
         )
 
         # self.wo = EinMix('b h m v -> b m d',
@@ -171,7 +172,8 @@ class IRMQA(layers.Layer):
         self.wo = MeinMix(
             in_shape={"h": self.H, "v": self.V},
             out_shape={"d": self.D},
-            name="wo"
+            name="wo",
+            regularizer=regularizer,
         )
 
         # self.wqc = EinMix('b m d -> b h m qk',
@@ -179,7 +181,8 @@ class IRMQA(layers.Layer):
         self.wqc = MeinMix(
             in_shape={"d": self.D},
             out_shape={"h": self.H, "qk": self.QK},
-            name="wqc"
+            name="wqc",
+            regularizer=regularizer,
         )
         # k & v have m dimension first so they can be put into TensorArray
         # self.wkc = EinMix('b n d -> b n qk',
@@ -187,7 +190,8 @@ class IRMQA(layers.Layer):
         self.wkc = MeinMix(
             in_shape={"d": self.D},
             out_shape={"qk": self.QK},
-            name="wkc"
+            name="wkc",
+            regularizer=regularizer,
         )
 
         self.using_relative_position = rpe is not None
@@ -206,7 +210,8 @@ class IRMQA(layers.Layer):
                 projection=MeinMix(
                     in_shape={"d": self.D},
                     out_shape={"h": self.H, "qk": self.QK},
-                    name="wqp_proj"
+                    name="wqp_proj",
+                    regularizer=regularizer,
                 ),
                 name="wqp",
             )
@@ -222,7 +227,8 @@ class IRMQA(layers.Layer):
                 projection=MeinMix(
                     in_shape={"d": self.D},
                     out_shape={"qk": self.QK},
-                    name="wkp_proj"
+                    name="wkp_proj",
+                    regularizer=regularizer,
                 ),
                 name="wkp",
             )
@@ -333,7 +339,7 @@ class IRMQALayer(layers.Layer):
     """
 
     @tf_scope
-    def __init__(self, cfg, rpe, name="irmqa"):
+    def __init__(self, cfg, rpe, regularizer, name="irmqa"):
         super().__init__(name=name)
         self.irmqa = IRMQA(
             QK=cfg.qk_dim,
@@ -341,6 +347,7 @@ class IRMQALayer(layers.Layer):
             D=cfg.embd_dim,
             H=cfg.n_heads,
             rpe=rpe,
+            regularizer=regularizer,
         )
         self.intermediate = deberta.TFDebertaIntermediate(
             intermediate_size=cfg.intermediate_size,
@@ -381,14 +388,14 @@ class IRMQAEncoder(layers.Layer):
     """
 
     @tf_scope
-    def __init__(self, cfg, rpe, name="hand_enc") -> None:
+    def __init__(self, cfg, rpe, regularizer, name="hand_enc") -> None:
         super().__init__(name=name)
         self.cfg = cfg
         self.n_layers = cfg.n_layers
         self.embd_dim = cfg.embd_dim
 
         self.irmqa_layers = [
-            IRMQALayer(cfg, rpe, name=f"irmqa_{i}") for i in range(self.n_layers)
+            IRMQALayer(cfg, rpe, regularizer, name=f"irmqa_{i}") for i in range(self.n_layers)
         ]
     
     def create_state(self, batch_size):
@@ -542,6 +549,15 @@ class HierarchicalHandPredictor(Model):
 
         self.cfg = cfg
 
+        if cfg.l1_reg > 0 and cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L1L2(l1=cfg.l1_reg, l2=cfg.l2_reg)
+        elif cfg.l1_reg > 0:
+            regularizer = tf.keras.regularizers.L1(l=cfg.l1_reg)
+        elif cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L2(l=cfg.l2_reg)
+        else:
+            regularizer = None
+
         self.mask_type = "causal" if cfg.contiguous else "none"
 
         self.embd_dim = cfg.embd_dim
@@ -566,14 +582,14 @@ class HierarchicalHandPredictor(Model):
             cfg.n_dof_per_joint, cfg.embd_dim, name=f'euler_embd')
 
         self.hand_angles_embd = layers.Dense(
-            cfg.embd_dim, name=f'frame_angle_embd')
+            cfg.embd_dim, name=f'frame_angle_embd', kernel_regularizer=regularizer)
         self.joint_angles_embd = layers.Dense(
-            cfg.embd_dim, name=f'single_angle_embd')
+            cfg.embd_dim, name=f'single_angle_embd', kernel_regularizer=regularizer)
 
-        self.hand_encoder = IRMQAEncoder(cfg | cfg.hand_encoder, rpe=self.rpe)
-        self.hand_decoder = IRMQALayer(cfg | cfg.hand_decoder, rpe=self.rpe, name="hand_dec")
-        self.joint_decoder = MultiJointDecoder(cfg | cfg.joint_decoder)
-        self.dof_decoder = EulerAngleDecoder(cfg | cfg.dof_decoder)
+        self.hand_encoder = IRMQAEncoder(cfg | cfg.hand_encoder, rpe=self.rpe, regularizer=regularizer)
+        self.hand_decoder = IRMQALayer(cfg | cfg.hand_decoder, rpe=self.rpe, regularizer=regularizer, name="hand_dec")
+        self.joint_decoder = MultiJointDecoder(cfg | cfg.joint_decoder, regularizer=regularizer)
+        self.dof_decoder = EulerAngleDecoder(cfg | cfg.dof_decoder, regularizer=regularizer)
 
         self.prediction_head = prediction_head
     
@@ -714,11 +730,11 @@ class HierarchicalHandPredictor(Model):
 
 class IRMQADecoder(layers.Layer):
 
-    def __init__(self, cfg, rpe, name="irmqa_dec") -> None:
+    def __init__(self, cfg, rpe, regularizer, name="irmqa_dec") -> None:
         super().__init__(name=name)
 
         self.irmqa_layers = [
-            IRMQALayer(cfg, rpe, name=f"irmqa_layers_{i}")
+            IRMQALayer(cfg, rpe, regularizer, name=f"irmqa_layers_{i}")
             for i in range(cfg.n_layers)
         ]
     
@@ -733,13 +749,23 @@ class DecoderOnly(tf.keras.Model):
     def __init__(self, cfg, prediction_head, name="decoder_only"):
         super().__init__(name=name)
         self.cfg = cfg
+
+        if cfg.l1_reg > 0 and cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L1L2(l1=cfg.l1_reg, l2=cfg.l2_reg)
+        elif cfg.l1_reg > 0:
+            regularizer = tf.keras.regularizers.L1(l=cfg.l1_reg)
+        elif cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L2(l=cfg.l2_reg)
+        else:
+            regularizer = None
         
         self.prediction_head = prediction_head
-        self.angle_embd = layers.Dense(cfg.embd_dim, name="angle_embd")
+        self.angle_embd = layers.Dense(cfg.embd_dim, name="angle_embd", kernel_regularizer=regularizer)
         self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim)
-        self.rpe = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
-        self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd")
-        self.decoder = IRMQADecoder(cfg | cfg.decoder, self.rpe, name="dec")
+        self.frame_rel_embd = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
+        self.frame_abs_embd = layers.Embedding(8000, cfg.embd_dim) # TODO: set to max(dataset lengths) instead of 8000
+        self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd", kernel_regularizer=regularizer)
+        self.decoder = IRMQADecoder(cfg | cfg.decoder, self.frame_rel_embd, regularizer=regularizer, name="dec")
 
     def call(self, inputs):
 
@@ -758,7 +784,7 @@ class DecoderOnly(tf.keras.Model):
         frame_idxs = idxs[:, :, 0]
         hand_idxs = idxs[:, :, 1]
 
-        embd = self.angle_embd(angles) + self.hand_embd(hand_idxs)
+        embd = self.angle_embd(angles) + self.hand_embd(hand_idxs) + self.frame_abs_embd(frame_idxs)
 
         _, embd = self.decoder(embd, frame_idxs)
 
@@ -1127,7 +1153,7 @@ def train(cfg, run_name):
 
     with enlighten.get_manager() as manager:
 
-        predict_fn, predict_and_plot_fn = predict.create_predict_fn_v2(cfg, model, stat_fns)
+        predict_fn, predict_and_plot_fn = predict.create_predict_fn_v2(cfg, run_name, model, stat_fns)
 
         test_inp_data, _test_tar_data = next(iter(d_test))
 
@@ -1179,7 +1205,7 @@ def train(cfg, run_name):
                         },
                         {
                             "name": "Predict",
-                            "fn": lambda i: predict_and_plot_fn(test_inp_data, n_frames=100, seed_len=5),
+                            "fn": lambda i: predict_and_plot_fn(test_inp_data, n_frames=100, seed_len=5, id=i.numpy()),
                         },
                         {
                             "name": "Checkpoint",
@@ -1216,6 +1242,8 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
         with tf.GradientTape() as tape:
             outputs = model(inputs, training=True)
             loss = loss_fn(targets["target_output"], outputs["output"])
+            loss = tf.reduce_mean(loss)
+            loss += tf.reduce_mean(model.losses)
             grads = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
         if use_metrics:

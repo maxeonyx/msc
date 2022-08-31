@@ -7,7 +7,7 @@ def get():
         "qk_dim": 19, # 16w * 8h = 128 ~= 102
         "v_dim": 102,
         "n_heads": 7,
-        "intermediate_size": 2048,
+        "intermediate_size": 1048,
         "initializer_range": 0.02,
         "hidden_act": "gelu",
         "hidden_dropout_prob": 0.1,
@@ -46,6 +46,9 @@ def get():
             "decimate_threshold": 0.3,
             "recluster": False,
 
+            "l2_reg": 1e-6,
+            "l1_reg": 1e-7,
+
             "n_hands": 1,
             "columns": "all",
             "n_joints_per_hand": 1,
@@ -54,7 +57,7 @@ def get():
             "embd_dim": 102,
 
             "ds_flat": {
-                "embd_dim": 1 * 1 * 3 * 5 * 2,
+                "embd_dim": 1 * 1 * 3 * 5 * 2 * 10,
                 "n_examples": 60,
                 "n_hand_vecs": 200,
             },
@@ -85,6 +88,7 @@ def get():
                 "decoder": {
                     "n_layers": 3,
                     **irmqa_cfg,
+                    "hidden_act": "gelu",
                 },
             },
         },

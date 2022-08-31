@@ -1,3 +1,4 @@
+from configparser import Interpolation
 import tensorflow as tf
 import tensorflow.keras as keras
 import einops as ein
@@ -6,21 +7,29 @@ from matplotlib import pyplot as plt
 from box import Box as box
 from math import pi, tau
 
-def create_predict_fn_v2(cfg, model, get_angle_fns):
+def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
 
     if type(model) is str:
         model = keras.models.load_model(model)
 
-    def showimgs(data):
+    def showimgs(data, save, save_instead, id):
         n_imgs = len(data)
         batch_size = data[0].shape[0]
         n_tracks_per_img = cfg.n_hands * cfg.n_joints_per_hand * cfg.n_dof_per_joint
+        fig, axes = plt.subplots(n_imgs * batch_size, sharex=True, sharey=True, figsize=(15, 10))
         for i in range(batch_size):
-            fig, axes = plt.subplots(n_imgs, figsize=(20,2))
             for j in range(n_imgs):
-                axes[j].imshow(tf.transpose(tf.reshape(data[j][i], [-1, n_tracks_per_img]))[:, :200], vmin=-pi, vmax=pi)
-            fig.tight_layout()
-        plt.show()
+                axes[i * n_imgs + j].set_anchor('W')
+                axes[i * n_imgs + j].imshow(tf.transpose(tf.reshape(data[j][i], [-1, n_tracks_per_img]))[:, :200], vmin=-pi, vmax=pi, interpolation='nearest', cmap='twilight')
+        fig.tight_layout()
+        if save or save_instead:
+            if id is None:
+                id = ""
+            else:
+                id = "_" + str(id)
+            plt.savefig(f"runs/{run_name}/fig{id}.png")
+        if not save_instead:
+            plt.show()
 
     @tf.function
     def predict_fn(seed_input, idxs, outp_var):
@@ -57,14 +66,19 @@ def create_predict_fn_v2(cfg, model, get_angle_fns):
         target, seed_input, idxs = make_seed_data(data, seed_len)
         return predict_wrapper(n_frames, seed_input, idxs)
 
-    def predict_and_show(data, n_frames, seed_len=8):
+    def predict_and_show(data, n_frames, seed_len=8, save=True, save_instead=True, id=None):
         target, seed_input, idxs = make_seed_data(data, seed_len)
         outp = predict_wrapper(n_frames, seed_input, idxs)
-        showimgs([
-            target,
-            seed_input,
-            *[outp[:, i, ...] for i in range(len(get_angle_fns))]
-        ])
+        showimgs(
+            [
+                target,
+                seed_input,
+                *[outp[:, i, ...] for i in range(len(get_angle_fns))],
+            ],
+            save=save,
+            save_instead=save_instead,
+            id=id,
+        )
 
     return predict, predict_and_show
 
