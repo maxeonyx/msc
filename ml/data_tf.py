@@ -144,7 +144,7 @@ def subset(cfg, angles):
     """
     Slice just some of the data.
     """
-    angles = angles[:, :cfg.n_hands, :cfg.n_dof]
+    angles = angles[:, :cfg.n_hands, :cfg.n_joints_per_hand * cfg.n_dof_per_joint]
 
     return angles
 
@@ -195,14 +195,15 @@ def synthetic_data(cfg, seed=1234):
 
     n_frames = tf.random.uniform(shape=[n_examples], minval=4000, maxval=8000, dtype=tf.int32, seed=seed)
 
+    n_sins = cfg.n_sins
     def make_angle_track(length):
         """
         Makes a track with random movement. One degree of freedom.
         """
         i = tf.range(0, length, dtype=tf.float32)
-        sin_freqs = tf.exp(tf.random.uniform(shape=[3], minval=-2, maxval=0, dtype=tf.float32, seed=seed))
-        sin_offsets = tf.random.uniform(shape=[3], minval=0, maxval=2*np.pi, dtype=tf.float32, seed=seed)
-        sin_amplitudes = tf.random.uniform(shape=[3], minval=tau/48, maxval=tau/6, dtype=tf.float32, seed=seed)
+        sin_freqs = tf.exp(tf.random.uniform(shape=[n_sins], minval=-2, maxval=0, dtype=tf.float32, seed=seed))
+        sin_offsets = tf.random.uniform(shape=[n_sins], minval=0, maxval=2*np.pi, dtype=tf.float32, seed=seed)
+        sin_amplitudes = tf.random.uniform(shape=[n_sins], minval=tau/48, maxval=tau/6, dtype=tf.float32, seed=seed)
         mean = tf.random.uniform(shape=[], minval=-pi, maxval=pi, dtype=tf.float32, seed=seed)
         angles = tf.reduce_sum(tf.sin(sin_freqs[None, :] * i[:, None] + sin_offsets[None, :])*sin_amplitudes[None, :], axis=1)
         angles = utils.angle_wrap(angles + mean)
@@ -234,6 +235,8 @@ def bvh_data(cfg):
     orig_n_hands = all_angles.shape[1]
     orig_n_dof = all_angles.shape[2]
     ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
+    
+    dataset = tf.data.Dataset.from_tensor_slices(ragged_angles)
 
     dataset = dataset.map(lambda x: subset(cfg, x))
 

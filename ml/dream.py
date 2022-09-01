@@ -7,6 +7,7 @@ import typing
 import einops as ein
 import tensorflow as tf
 from ml import data_tf, encoders, predict, prediction_heads, utils, deberta
+from ml.data_bvh import chunk
 if typing.TYPE_CHECKING:
     from tensorflow.python import keras
     from tensorflow.python.keras import Input, Model, layers
@@ -324,7 +325,8 @@ class IRMQA(layers.Layer):
 
         scale = 1. / tf.sqrt(self.D * n_attn_types)
         attn_logits *= scale
-        attn_logits = self.dropout(attn_logits)
+        attn_logits = self.dropout(attn_logits)        
+
         attn_weights = self.softmax(attn_logits, mask=mask)
 
         # v has batch dim second because of tensor array
@@ -366,7 +368,8 @@ class IRMQALayer(layers.Layer):
 
     @tf_scope
     def call(self, kv_embd, q_embd, mask_type, state, write_state, kv_idxs=None, q_idxs=None):
-
+        
+        # embd is same shape as q_embd
         state, embd = self.irmqa(
             kv_embd=kv_embd,
             q_embd=q_embd,
@@ -382,7 +385,7 @@ class IRMQALayer(layers.Layer):
         return state, embd
 
 
-class IRMQAEncoder(layers.Layer):
+class IRMQASelfEncoder(layers.Layer):
     """
     Multi-layer self-attention encoder for IRMQA layers.
     """
@@ -586,7 +589,7 @@ class HierarchicalHandPredictor(Model):
         self.joint_angles_embd = layers.Dense(
             cfg.embd_dim, name=f'single_angle_embd', kernel_regularizer=regularizer)
 
-        self.hand_encoder = IRMQAEncoder(cfg | cfg.hand_encoder, rpe=self.rpe, regularizer=regularizer)
+        self.hand_encoder = IRMQASelfEncoder(cfg | cfg.hand_encoder, rpe=self.rpe, regularizer=regularizer)
         self.hand_decoder = IRMQALayer(cfg | cfg.hand_decoder, rpe=self.rpe, regularizer=regularizer, name="hand_dec")
         self.joint_decoder = MultiJointDecoder(cfg | cfg.joint_decoder, regularizer=regularizer)
         self.dof_decoder = EulerAngleDecoder(cfg | cfg.dof_decoder, regularizer=regularizer)
@@ -728,7 +731,7 @@ class HierarchicalHandPredictor(Model):
             "output": output_params
         }
 
-class IRMQADecoder(layers.Layer):
+class IRMQASelfCausal(layers.Layer):
 
     def __init__(self, cfg, rpe, regularizer, name="irmqa_dec") -> None:
         super().__init__(name=name)
@@ -740,7 +743,23 @@ class IRMQADecoder(layers.Layer):
     
     def call(self, embd, idxs):
         for layer in self.irmqa_layers:
-            _state, embd = layer(embd, embd, "causal", state=None, write_state=None, kv_idxs=idxs, q_idxs=idxs)
+            _state, embd = layer(kv_embd=embd, q_embd=embd, mask_type="causal", state=None, write_state=None, kv_idxs=idxs, q_idxs=idxs)
+        return None, embd
+
+class IRMQACrossCausal(layers.Layer):
+
+    def __init__(self, cfg, rpe, regularizer, name="irmqa_dec") -> None:
+        super().__init__(name=name)
+
+        self.irmqa_layers = [
+            IRMQALayer(cfg, rpe, regularizer, name=f"irmqa_layers_{i}")
+            for i in range(cfg.n_layers)
+        ]
+    
+    def call(self, kv_embd, kv_idxs, q_embd, q_idxs):
+        embd = q_embd
+        for layer in self.irmqa_layers:
+            _state, embd = layer(kv_embd=kv_embd, q_embd=embd, mask_type="causal", state=None, write_state=None, kv_idxs=kv_idxs, q_idxs=q_idxs)
         return None, embd
 
 class DecoderOnly(tf.keras.Model):
@@ -765,7 +784,7 @@ class DecoderOnly(tf.keras.Model):
         self.frame_rel_embd = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
         self.frame_abs_embd = layers.Embedding(8000, cfg.embd_dim) # TODO: set to max(dataset lengths) instead of 8000
         self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd", kernel_regularizer=regularizer)
-        self.decoder = IRMQADecoder(cfg | cfg.decoder, self.frame_rel_embd, regularizer=regularizer, name="dec")
+        self.decoder = IRMQASelfCausal(cfg | cfg.decoder, self.frame_rel_embd, regularizer=regularizer, name="dec")
 
     def call(self, inputs):
 
@@ -796,6 +815,71 @@ class DecoderOnly(tf.keras.Model):
             "output": self.prediction_head(latents),
         }
 
+
+class EncoderDecoder(tf.keras.Model):
+
+    @tf_scope
+    def __init__(self, cfg, prediction_head, name="enc_dec"):
+        super().__init__(name=name)
+        self.cfg = cfg
+
+        if cfg.l1_reg > 0 and cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L1L2(l1=cfg.l1_reg, l2=cfg.l2_reg)
+        elif cfg.l1_reg > 0:
+            regularizer = tf.keras.regularizers.L1(l=cfg.l1_reg)
+        elif cfg.l2_reg > 0:
+            regularizer = tf.keras.regularizers.L2(l=cfg.l2_reg)
+        else:
+            regularizer = None
+        
+        self.prediction_head = prediction_head
+        self.angle_embd = layers.Dense(cfg.embd_dim, name="angle_embd", kernel_regularizer=regularizer)
+        self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim)
+        self.frame_rel_embd = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
+        self.frame_abs_embd = layers.Embedding(8000, cfg.embd_dim) # TODO: set to max(dataset lengths) instead of 8000
+        self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd", kernel_regularizer=regularizer)
+        self.encoder = IRMQASelfCausal(cfg | cfg.encoder, self.frame_rel_embd, regularizer=regularizer, name="enc")
+        self.hand_embd_2 = layers.Embedding(cfg.n_hands, cfg.embd_dim)
+        self.frame_rel_embd_2 = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
+        self.frame_abs_embd_2 = layers.Embedding(8000, cfg.embd_dim) # TODO: set to max(dataset lengths) instead of 8000
+        self.n_ahead_embeddings = layers.Embedding(20, cfg.embd_dim)
+        self.decoder = IRMQACrossCausal(cfg | cfg.decoder, self.frame_rel_embd_2, regularizer=regularizer, name="dec")
+
+    def call(self, inputs):
+
+        angles = inputs["input"]
+        inp_idxs = inputs["input_idxs"]
+        tar_idxs = inputs["target_idxs"]
+        n_ahead = inputs["n_ahead"]
+
+        # produce a bunch of rotations to make the model's job easier
+        n = self.cfg.n_rotations
+        scale = (tau / 4.) * (1. / n) # only need to produce rotations up to tau/4, because the model can easily invert angles
+        offset = tf.range(n, dtype=tf.float32) * tf.constant([scale])
+        angles = angles[:, :, :, :, None] + offset[None, None, None, None, :]
+        angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
+
+        angles = ein.rearrange(angles, 'b fh j d rot sincos -> b fh (j d rot sincos)')
+
+        inp_frame_idxs = inp_idxs[:, :, 0]
+        inp_hand_idxs = inp_idxs[:, :, 1]
+        tar_frame_idxs = tar_idxs[:, :, 0]
+        tar_hand_idxs = tar_idxs[:, :, 1]
+
+        inp_embd = self.angle_embd(angles)# + self.hand_embd(inp_hand_idxs) + self.frame_abs_embd(inp_frame_idxs)
+        n_ahead = tf.ones_like(inp_frame_idxs[0], dtype=tf.int32)
+        tar_embd = self.n_ahead_embeddings(n_ahead, ) #+ self.hand_embd_2(tar_hand_idxs) + self.frame_abs_embd_2(tar_frame_idxs)
+
+        _, embd = self.encoder(embd=inp_embd, idxs=inp_frame_idxs)
+        _, embd = self.decoder(kv_embd=embd, kv_idxs=inp_frame_idxs, q_embd=tar_embd, q_idxs=tar_frame_idxs)
+
+        latents = self.angle_unembd(embd)
+
+        latents = ein.rearrange(latents, 'b fh (j d e) -> b (fh j d) e', j=self.cfg.n_joints_per_hand, d=self.cfg.n_dof_per_joint)
+
+        return {
+            "output": self.prediction_head(latents),
+        }
 
 def random_subset(options, n, seed=None):
     options = tf.random.shuffle(options, seed=seed)
@@ -876,7 +960,7 @@ def random_joint_order(n_joints_per_hand, seed=None):
 
 
 @tf_scope
-def get_chunk(cfg, angles, chunk_mode, seed=None):
+def get_chunk(cfg, chunk_size, angles, chunk_mode, seed=None):
     angles = angles
 
     angles = ein.rearrange(
@@ -885,15 +969,15 @@ def get_chunk(cfg, angles, chunk_mode, seed=None):
     fh_idxs = utils.multidim_indices([n_frames, cfg.n_hands], flatten=True)
     if chunk_mode == "overlapping":
         i = tf.random.uniform(
-            [], minval=0, maxval=n_frames-cfg.n_hand_vecs, seed=seed, dtype=tf.int32)
-        idxs = tf.concat([fh_idxs[i:i+cfg.n_hand_vecs//2],
-                            fh_idxs[i+1:i+cfg.n_hand_vecs//2+1]], axis=0)
+            [], minval=0, maxval=n_frames-chunk_size, seed=seed, dtype=tf.int32)
+        idxs = tf.concat([fh_idxs[i:i+chunk_size//2],
+                            fh_idxs[i+1:i+chunk_size//2+1]], axis=0)
     elif chunk_mode == "simple":
         i = tf.random.uniform(
-            [], minval=0, maxval=n_frames-cfg.n_hand_vecs, seed=seed, dtype=tf.int32)
-        idxs = fh_idxs[i:i+cfg.n_hand_vecs]
+            [], minval=0, maxval=n_frames-chunk_size, seed=seed, dtype=tf.int32)
+        idxs = fh_idxs[i:i+chunk_size]
     else:
-        idxs = random_subset(fh_idxs, cfg.n_hand_vecs, seed=seed)
+        idxs = random_subset(fh_idxs, chunk_size, seed=seed)
     hands = tf.gather_nd(angles, idxs)
 
     return hands, idxs
@@ -901,8 +985,15 @@ def get_chunk(cfg, angles, chunk_mode, seed=None):
 @tf_scope
 def flat_vector_batched_random_chunk(cfg, x, seed=None):
 
+    if cfg.random_ahead:
+        n_ahead = weighted_random_n(20, 2., 3., seed=seed)
+    else:
+        n_ahead = tf.constant(1, tf.int32)
+
+    chunk_size = cfg.n_hand_vecs + n_ahead
+
     vecs, idxs = tf.map_fn(
-        lambda a: get_chunk(cfg, a, chunk_mode="simple", seed=seed),
+        lambda a: get_chunk(cfg, chunk_size, a, chunk_mode="simple", seed=seed),
         x["angles"],
         fn_output_signature=(
             tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
@@ -912,12 +1003,12 @@ def flat_vector_batched_random_chunk(cfg, x, seed=None):
         name="hand_map",
         parallel_iterations=10,
     )
-    # for the input, produce a bunch of rotations of the angles
 
-    input = vecs[:, :-1, :, :]
-    input_idxs = idxs[:, :-1, :]
-    target = vecs[:, 1:, :, :]
-    target_idxs = idxs[:, 1:, :]
+    n_frames = tf.shape(vecs)[1]
+    input = vecs[:, :n_frames-n_ahead, :, :]
+    input_idxs = idxs[:, :n_frames-n_ahead, :]
+    target = vecs[:, n_ahead:, :, :]
+    target_idxs = idxs[:, n_ahead:, :]
 
     input = ein.rearrange(input, 'b fh j d -> b fh j d')
     target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
@@ -927,6 +1018,7 @@ def flat_vector_batched_random_chunk(cfg, x, seed=None):
             "input": input,
             "input_idxs": input_idxs,
             "target_idxs": target_idxs,
+            "n_ahead": n_ahead,
         },
         {
             "target_output": target,
@@ -943,7 +1035,7 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
         chunk_mode = "random"
 
     hands, fh_idxs = tf.map_fn(
-        lambda a: get_chunk(cfg, a, chunk_mode, seed),
+        lambda a: get_chunk(cfg, cfg.n_hand_vecs, a, chunk_mode, seed),
         x["angles"],
         fn_output_signature=(
             tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
@@ -1009,7 +1101,7 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
     )
 
 
-def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
+def hierarchical_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
 
     train_dataset = train_dataset.apply(
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
@@ -1028,7 +1120,7 @@ def dream_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dat
 
     return train_dataset, test_dataset, val_dataset
 
-def decoder_only_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
+def flat_dataset(cfg, train_dataset: tf.data.Dataset, test_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset):
 
     train_dataset = train_dataset.apply(
         tf.data.experimental.dense_to_ragged_batch(batch_size=cfg.batch_size))
@@ -1130,24 +1222,44 @@ def train(cfg, run_name):
 
     cfg = cfg | cfg.dream
 
-    # d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_heirarchical, dream_dataset)
-    d_train, d_test, d_val = data_tf.tf_dataset(cfg | cfg.ds_flat, decoder_only_dataset, data_fn=data_tf.synthetic_data)
-
-    print("Initializing datasets...")
-    _, _ = next(iter(d_train))
-    _, _ = next(iter(d_test))
-    _, _ = next(iter(d_val))
-    print("... Done.")
-    print()
-
     # loss_fn, stat_fns, prediction_head = decoders.von_mises_fisher(cfg, name="vmf")
     loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
 
+    if cfg.ds == "synthetic":
+        cfg = cfg | cfg.ds_synthetic
+        data_fn = data_tf.synthetic_data
+    elif cfg.ds == "real":
+        cfg = cfg | cfg.ds_real
+        data_fn = data_tf.bvh_data
+    else:
+        raise ValueError("Unknown dataset '{}'".format(cfg.ds))
+
+    print("Creating model ... ", end="")
+    if cfg.task == "flat":
+        cfg = cfg | cfg.task_flat
+        d_train, d_test, d_val = data_tf.tf_dataset(cfg, flat_dataset, data_fn=data_fn)
+        model = DecoderOnly(cfg | cfg.model, prediction_head=prediction_head)
+    elif cfg.task == "flat_query":
+        cfg = cfg | cfg.task_flat_query
+        d_train, d_test, d_val = data_tf.tf_dataset(cfg, flat_dataset, data_fn=data_fn)
+        model = EncoderDecoder(cfg | cfg.model, prediction_head=prediction_head)
+    elif cfg.task == "hierarchical":
+        cfg = cfg | cfg.task_hierarchical
+        d_train, d_test, d_val = data_tf.tf_dataset(cfg, hierarchical_dataset, data_fn=data_fn)
+        model = HierarchicalHandPredictor(cfg | cfg.model, prediction_head=prediction_head)
+    else:
+        raise ValueError("Unknown task: {}".format(cfg.task))
+    print("Done.")
+
+    print("Initializing datasets ... ", end="")
+    _, _ = next(iter(d_train))
+    _, _ = next(iter(d_test))
+    _, _ = next(iter(d_val))
+    print("Done.")
+    print()
+
     def loss_fn_wrapper(inp):
         return tf.reduce_mean(loss_fn(inp["targets"]["target_output"], inp["outputs"]["output"]))
-
-    # model = HierarchicalHandPredictor(cfg | cfg.model_heirarchical, prediction_head=prediction_head)
-    model = DecoderOnly(cfg | cfg.model_decoder_only, prediction_head=prediction_head)
 
     optimizer = keras.optimizers.Adam(cfg.adam.lr)
 
@@ -1171,6 +1283,12 @@ def train(cfg, run_name):
                 }
             ]
         )
+
+        def checkpoint_fn(i):
+            if i == 0:
+                model.save(f"models/{run_name}/model")
+            else:
+                model.save_weights(f"models/{run_name}/weights_{i}")
         
         train_fn = make_exec_loop(
             "Training",
@@ -1209,7 +1327,7 @@ def train(cfg, run_name):
                         },
                         {
                             "name": "Checkpoint",
-                            "fn": lambda i: model.save(f"models/{run_name}/checkpoint_{i}"),
+                            "fn": checkpoint_fn,
                         },
                     ],
                 },
@@ -1218,8 +1336,7 @@ def train(cfg, run_name):
 
 
         print()
-        print(f"Training model '{run_name}'")
-        print("  ...")
+        print(f"Training model '{run_name}' ... ")
         print()
         stopped_early, metric_results = train_fn(manager)
 
@@ -1278,7 +1395,7 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
         step_fn = eval_step_fn
     
     print()
-    print(f"Compiling {name.lower()} step function...")
+    print(f"Compiling {name.lower()} step function ... ", end="")
     compiled_step_fn = tf.function(
         step_fn,
         input_signature=[
@@ -1290,7 +1407,7 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
     step_fn = compiled_step_fn
 
     _ = step_fn(next(iter(dataset)))
-    print("... Done.")
+    print("Done.")
     print()
 
     def exec_loop(manager):

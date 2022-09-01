@@ -13,7 +13,7 @@ except KeyError:
 print(f"Starting run {run_name}.")
 print()
 
-print("Initializing tf...")
+print("Initializing tf ... ", end="")
 if typing.TYPE_CHECKING:
     from tensorflow.python import keras
     from tensorflow.python.keras import layers, Model, Input
@@ -24,7 +24,7 @@ if len(tf.config.list_physical_devices('GPU')) > 0:
     gpu = tf.config.list_physical_devices('GPU')[0]
     tf.config.experimental.set_memory_growth(gpu, True)
 tf.constant(1)
-print("... Done.")
+print("Done.")
 print()
 
 from ml import dream

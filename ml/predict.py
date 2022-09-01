@@ -44,7 +44,8 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
             inputs = {
                 "input": inp,
                 "input_idxs": idxs[:, :i],
-                "target_idxs": idxs[:, i:i+1]
+                "target_idxs": idxs[:, i:i+1],
+                "n_ahead": tf.constant(1, dtype=tf.int32),
             }
             output = model(inputs, training=False)
             output = output["output"]

@@ -47,48 +47,87 @@ def get():
             "recluster": False,
 
             "l2_reg": 1e-6,
-            "l1_reg": 1e-7,
+            "l1_reg": 0,
 
-            "n_hands": 1,
-            "columns": "all",
-            "n_joints_per_hand": 1,
-            "n_dof_per_joint": 3,
-            
-            "embd_dim": 102,
 
-            "ds_flat": {
-                "embd_dim": 1 * 1 * 3 * 5 * 2 * 10,
+            "embd_dim": 1 * 1 * 3 * 5 * 2 * 10,
+
+            "task": "flat",
+
+            "ds": "real",
+
+            "ds_synthetic": {
+                "n_hands": 1,
+                "n_joints_per_hand": 1,
+                "n_dof_per_joint": 3,
+
+                # num sin components
+                "n_sins": 3,
+            },
+
+            "ds_real": {
+                "n_hands": 1,
+                "n_joints_per_hand": 1,
+                "n_dof_per_joint": 3,
+
+                "columns": "all",
+            },
+
+            "task_flat": {
                 "n_examples": 60,
                 "n_hand_vecs": 200,
+                "random_ahead": False,
+
+                "model": {
+                    "max_rel_embd": 1000,
+                    "n_rotations": 5,
+                    "decoder": {
+                        "n_layers": 3,
+                        **irmqa_cfg,
+                        "hidden_act": "gelu",
+                    },
+                },
             },
-            "ds_heirarchical": {
+
+            "task_flat_query": {
+                "n_examples": 60,
+                "n_hand_vecs": 200,
+                "random_ahead": False,
+
+                "model": {
+                    "max_rel_embd": 1000,
+                    "n_rotations": 5,
+                    "encoder": {
+                        "n_layers": 3,
+                        **irmqa_cfg,
+                        "hidden_act": "gelu",
+                    },
+                    "decoder": {
+                        "n_layers": 1,
+                        **irmqa_cfg,
+                        "hidden_act": "gelu",
+                    },
+                },
+            },
+
+            "task_hierarchical": {
                 "contiguous": True,
-            },
 
-            "model_heirarchical": {
-                "max_rel_embd": 1000,
-                "hand_encoder": {
-                    "n_layers": 3,
-                    **irmqa_cfg,
-                },
-                "hand_decoder": {
-                    **irmqa_cfg,
-                },
-                "joint_decoder": {
-                    **irmqa_cfg,
-                },
-                "dof_decoder": {
-                    **irmqa_cfg,
-                },
-            },
-
-            "model_decoder_only": {
-                "max_rel_embd": 1000,
-                "n_rotations": 5,
-                "decoder": {
-                    "n_layers": 3,
-                    **irmqa_cfg,
-                    "hidden_act": "gelu",
+                "model": {
+                    "max_rel_embd": 1000,
+                    "hand_encoder": {
+                        "n_layers": 3,
+                        **irmqa_cfg,
+                    },
+                    "hand_decoder": {
+                        **irmqa_cfg,
+                    },
+                    "joint_decoder": {
+                        **irmqa_cfg,
+                    },
+                    "dof_decoder": {
+                        **irmqa_cfg,
+                    },
                 },
             },
         },
