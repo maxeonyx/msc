@@ -1,6 +1,6 @@
 #!/usr/bin/fish
 
-source env/bin/activate.fish
+source _env/bin/activate.fish
 
 if test (which randomname)
     set PREV_BRANCH_NAME (git symbolic-ref --short HEAD)
