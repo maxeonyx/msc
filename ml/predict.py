@@ -16,7 +16,7 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
         n_imgs = len(data)
         batch_size = data[0].shape[0]
         n_tracks_per_img = cfg.n_hands * cfg.n_joints_per_hand * cfg.n_dof_per_joint
-        fig, axes = plt.subplots(n_imgs * batch_size, sharex=True, sharey=True, figsize=(15, 10))
+        fig, axes = plt.subplots(n_imgs * batch_size, sharex=True, sharey=True, figsize=(10, 3*n_imgs*batch_size))
         for i in range(batch_size):
             for j in range(n_imgs):
                 axes[i * n_imgs + j].set_anchor('W')

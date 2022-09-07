@@ -2,13 +2,14 @@
 
 import pickle
 import os
-import einops
 
+import einops as ein
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from matplotlib import pyplot as plt
 
-from ml import predict, prediction_heads, utils
+from ml import dream, predict, prediction_heads, utils, data_bvh, data_tf
 
 import config
 
@@ -19,92 +20,83 @@ except KeyError:
     print("RUN_NAME not set. Must provide a name to run 'create_animation.py'.")
     exit(1)
 
-model = keras.models.load_model(f"models/{run_name}", compile=False)
+print("Loading model ... ", end="", flush=True)
+model = keras.models.load_model(f"models/{run_name}/model", compile=False)
+model.load_weights(tf.train.latest_checkpoint(f"models/{run_name}"))
 cfg = config.get()
-predict_mean_fn = predict.create_predict_fn(cfg, prediction_heads.von_mises_dist, prediction_heads.von_mises_mean, model)
-predict_sample_fn = predict.create_predict_fn(cfg, prediction_heads.von_mises_dist, prediction_heads.von_mises_sample, model)
+cfg = cfg | cfg.dream | cfg.dream.ds_real | cfg.dream.task_flat
+loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
+predict_fn, predict_and_show = predict.create_predict_fn_v2(cfg, run_name, model, stat_fns)
+print("Done.")
 
-from ml import data_bvh, data_tf
 
-filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(cfg.force)
-names = [os.path.basename(os.path.normpath(f)) for f in filenames]
+print("Loading data ... ", end="", flush=True)
+filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(cfg.force, columns=cfg.columns)
 all_angles = tf.concat(angles, axis=0)
-circular_means = utils.circular_mean(all_angles, axis=0)[:cfg.n_hands, :cfg.n_dof]
+circular_means = utils.circular_mean(all_angles, axis=0) # all examples concatenated so the "frame" axis is the first axis
 
-
-i_example = 0
-name = names[i_example]
+d_train, d_test, d_val = data_tf.tf_dataset(cfg, dream.flat_dataset, data_tf.bvh_data)
+inp, tar = next(iter(d_test))
+print("Done.")
 
 
 ## DATASET ANIMATIONS (subset)
+i_from = inp["input_idxs"][:, 0, 0].numpy()
+i_to = inp["input_idxs"][:, -1, 0].numpy()
+length = i_to - i_from
+assert np.all(length == length[0])
+length = length[0]
+input_angles = inp["input"]
+batch_size = input_angles.shape[0]
+input_angles = ein.rearrange(inp["input"], 'b (f h) j d -> b f h (j d)', h=cfg.n_hands, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
+orig_angles = inp["orig_angles"]
 
-example = tf.constant(angles[i_example])[1500:2600, :cfg.n_hands, :cfg.n_dof]
-data_bvh.write_bvh_files(example, f"{run_name}.{name}", "anims/")
+examples = []
+def write_files(data, f_ext):
+    global examples
+    if cfg.recluster:
+        data = utils.unrecluster(data, circular_means, n_batch_dims=1)
+    for i in range(batch_size):
+        name = inp["filename"][i].numpy().decode("utf-8") 
+        if len(examples) <= i:
+            examples.append({ "name": name, "files": [] })
+        f_ext_text = f_ext[i] if type(f_ext) == list else f_ext
+        f_name = f"{run_name}.{name}.{i}{f_ext_text}"
+        data_bvh.write_bvh_files(data[i], f_name, column_map=data_bvh.COL_ALL_JOINTS, output_dir="anims/")
+        examples[i]["files"].append(f_name  )
 
-decimate = data_tf.make_decimate_fn(cfg)
-example_decimated = decimate(example)
-print("example_decimated", example_decimated.shape)
-data_bvh.write_bvh_files(example_decimated, f"{run_name}.{name}.decimated", "anims/")
-
+write_files(orig_angles, ".original")
+write_files(input_angles, ".target")
 
 ## CONDITIONAL ANIMATION
 
-n_cond_frames = cfg.chunk_size-1
-n_cond_frames_to_generate = len(example_decimated) - n_cond_frames
-cond_angles = example_decimated[:n_cond_frames]
-cond_frame_idxs = tf.tile(tf.range(n_cond_frames)[:, None, None], [1, cfg.n_hands, cfg.n_dof])
-cond_hand_idxs = tf.tile(tf.range(cfg.n_hands)[None, :, None], [n_cond_frames, 1, cfg.n_dof])
-cond_dof_idxs = tf.tile(tf.range(cfg.n_dof)[None, None, :], [n_cond_frames, cfg.n_hands, 1])
-x = {
-    "angles": tf.reshape(cond_angles, [1, -1]),
-    "frame_idxs": tf.reshape(cond_frame_idxs, [1, -1]),
-    "hand_idxs": tf.reshape(cond_hand_idxs, [1, -1]),
-    "dof_idxs": tf.reshape(cond_dof_idxs, [1, -1]),
-}
-cond_means = predict_mean_fn(x, n_cond_frames_to_generate)
-cond_samples = predict_sample_fn(x, n_cond_frames_to_generate)
+n_seed_frames = 30
+n_cond_frames_to_generate = length - n_seed_frames
+print()
+print("INFO: n_seed_frames:", n_seed_frames)
+print("INFO: n_frames:", n_cond_frames_to_generate)
+print("INFO: batch_size:", batch_size)
+print("INFO: generating ... ", end="", flush=True)
+seqs = predict_fn(inp, tf.constant(n_cond_frames_to_generate), tf.constant(n_seed_frames))
+print("Done.")
+print()
 
-i_batch = 0
-means = einops.rearrange(cond_means[i_batch], '(seq hand dof) -> seq hand dof', hand=cfg.n_hands, dof=cfg.n_dof)
-samples = einops.rearrange(cond_samples[i_batch], '(seq hand dof) -> seq hand dof', hand=cfg.n_hands, dof=cfg.n_dof)
+seqs = ein.rearrange(seqs, 'b s (f h) j d -> s b f h (j d)', h=cfg.n_hands, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
+means = seqs[0]
+write_files(means[:, n_seed_frames:], ".predicted")
+if len(seqs) > 1:
+    samples = seqs[1]
+    write_files(samples[:, n_seed_frames:], ".predicted.sampled")
 
-if cfg.recluster:
-    means = utils.unrecluster(means, circular_means)
-    samples = utils.unrecluster(samples, circular_means)
+import json
+with open(f"anims/{run_name}.json", "w") as f:
+    json.dump({
+        "n_seed_frames": n_seed_frames,
+        "n_hands": cfg.n_hands,
+        "decimated": cfg.decimate,
+        "reclustered": cfg.recluster,
+        "examples": examples,
+    }, f, indent=1)
 
-data_bvh.write_bvh_files(means, f"{run_name}.{name}.means", "anims/")
-data_bvh.write_bvh_files(samples, f"{run_name}.{name}.samples", "anims/")
-
-
-## UNCONDITIONAL ANIMATIONS
-
-test_batch_size = 2
-x = {
-    "angles": tf.zeros([test_batch_size, 0], dtype=tf.float32),
-    "frame_idxs": tf.zeros([test_batch_size, 0], dtype=tf.int32),
-    "hand_idxs": tf.zeros([test_batch_size, 0], dtype=tf.int32),
-    "dof_idxs": tf.zeros([test_batch_size, 0], dtype=tf.int32),
-}
-y_pred_mean_batch = predict_mean_fn(x, 1100)
-y_pred_sample_batch = predict_sample_fn(x, 1100)
-for i_batch in range(y_pred_mean_batch.shape[0]):
-
-    means = einops.rearrange(y_pred_mean_batch[i_batch], '(seq hand dof) -> seq hand dof', hand=cfg.n_hands, dof=cfg.n_dof)
-    samples = einops.rearrange(y_pred_sample_batch[i_batch], '(seq hand dof) -> seq hand dof', hand=cfg.n_hands, dof=cfg.n_dof)
-
-    if cfg.recluster:
-        means = utils.unrecluster(means, circular_means)
-        samples = utils.unrecluster(samples, circular_means)
-
-    data_bvh.write_bvh_files(means, f"{run_name}.{i_batch}.means", "anims/")
-    data_bvh.write_bvh_files(samples, f"{run_name}.{i_batch}.samples", "anims/")
-
-
-## SHOW GUI AFTER GENERATING FILES
-
-from ml import viz
-
-for y_pred_mean, y_pred_sample in zip(y_pred_mean_batch, y_pred_sample_batch):
-    viz.show_animations(cfg, [y_pred_mean, y_pred_sample])
-viz.show_animations(cfg, [cond_means, cond_samples])
-plt.show()
+print("Done. Wrote animations to 'anims/'.")
+print()

@@ -23,11 +23,11 @@ def get():
         "convert_deg_to_rad": True,
         "cached_dataset_path": "./cache/tf_dataset",
 
-        "decimate": True,
-        "decimate_threshold": 0.3,
-        "recluster": True,
-
         "pre": {
+
+            "decimate": True,
+            "decimate_threshold": 0.3,
+            "recluster": True,
             "scale_to_1_1": False,
             # Chunk size is used for models that take a fixed input size.
             # It is a number of animation frames, and can be no larger than
@@ -42,23 +42,24 @@ def get():
             "n_hand_vecs": 18,
             "batch_size": 11,
 
-            "decimate": False,
-            "decimate_threshold": 0.3,
+            "decimate": True,
+            "decimate_threshold": 0.2,
             "recluster": False,
 
             "l2_reg": 1e-6,
             "l1_reg": 0,
 
 
-            "embd_dim": 1 * 1 * 3 * 5 * 2 * 10,
-
             "task": "flat",
 
             "ds": "real",
 
             "ds_synthetic": {
+                #           h   j    d   rep  sincos  extra
+                "embd_dim": 1 * 3 * 3 * 5 *  2 *     1, 
+                
                 "n_hands": 1,
-                "n_joints_per_hand": 1,
+                "n_joints_per_hand": 3,
                 "n_dof_per_joint": 3,
 
                 # num sin components
@@ -66,8 +67,11 @@ def get():
             },
 
             "ds_real": {
+                #           h   j    d   rep  sincos  extra
+                "embd_dim": 1 * 17 * 3 * 5 *  2 *     1,
+
                 "n_hands": 1,
-                "n_joints_per_hand": 1,
+                "n_joints_per_hand": 17,
                 "n_dof_per_joint": 3,
 
                 "columns": "all",

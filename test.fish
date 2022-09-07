@@ -35,7 +35,7 @@ if test (which randomname)
         if test $status -eq 0
             echo Run $RUN_NAME complete!
         else
-            "$RUN_NAME anims failed."
+            echo "$RUN_NAME anims failed."
         end
     else
         echo "$RUN_NAME train failed."

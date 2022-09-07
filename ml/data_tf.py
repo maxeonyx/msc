@@ -224,11 +224,11 @@ def synthetic_data(cfg, seed=1234):
 
     dataset = tf.data.Dataset.from_tensor_slices(angles)
     
-    return dataset
+    return None, dataset
 
 def bvh_data(cfg):
     
-    _filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(force=cfg.force, columns=cfg.columns)
+    filenames, angles, n_frames = data_bvh.np_dataset_parallel_lists(force=cfg.force, columns=cfg.columns)
     
     all_angles = tf.concat(angles, axis=0)
     n_frames = tf.constant(n_frames)
@@ -236,21 +236,21 @@ def bvh_data(cfg):
     orig_n_dof = all_angles.shape[2]
     ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
     
-    dataset = tf.data.Dataset.from_tensor_slices(ragged_angles)
-
-    dataset = dataset.map(lambda x: subset(cfg, x))
+    orig_dataset = tf.data.Dataset.from_tensor_slices(ragged_angles)
+    filenames = tf.data.Dataset.from_tensor_slices(filenames)
+    dataset = orig_dataset
 
     if cfg.recluster:
         circular_means = utils.circular_mean(all_angles, axis=0)
         dataset = dataset.map(lambda x: recluster(x, circular_means))
     
+    dataset = dataset.map(lambda x: subset(cfg, x))
+
     if cfg.decimate:
-        decimate = make_decimate_fn(cfg, orig_n_hands, orig_n_dof)
+        decimate = make_decimate_fn(cfg, cfg.n_hands, cfg.n_joints_per_hand * cfg.n_dof_per_joint)
         dataset = dataset.map(decimate)
 
-    dataset = tf.data.Dataset.from_tensor_slices(ragged_angles)
-
-    return dataset
+    return { "filename": filenames, "orig_angles": orig_dataset }, dataset
 
 # take np BVH dataset and return angles, hand idxs, frame idxs, and dof idxs
 def tf_dataset(cfg, finish_fn, data_fn=bvh_data):
@@ -262,9 +262,12 @@ def tf_dataset(cfg, finish_fn, data_fn=bvh_data):
     each with shape (n_hands, n_frames, n_dof)
     """
 
-    dataset = data_fn(cfg)
+    extra, dataset = data_fn(cfg)
 
-    dataset = dataset.map(lambda a: { "angles": a })
+    if extra is None:
+        extra = {}
+    
+    dataset = tf.data.Dataset.zip({ "angles": dataset, **extra })
     
     dataset = dataset.map(add_idx_arrays)
 

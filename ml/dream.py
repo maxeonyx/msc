@@ -783,7 +783,7 @@ class DecoderOnly(tf.keras.Model):
         self.hand_embd = layers.Embedding(cfg.n_hands, cfg.embd_dim)
         self.frame_rel_embd = RelativePositionEmbedding(cfg.max_rel_embd, cfg.embd_dim)
         self.frame_abs_embd = layers.Embedding(8000, cfg.embd_dim) # TODO: set to max(dataset lengths) instead of 8000
-        self.angle_unembd = layers.Dense(cfg.embd_dim * cfg.n_joints_per_hand * cfg.n_dof_per_joint, name="angle_unembd", kernel_regularizer=regularizer)
+        self.angle_unembd = layers.Dense(cfg.n_joints_per_hand * cfg.n_dof_per_joint * cfg.embd_dim, name="angle_unembd", kernel_regularizer=regularizer)
         self.decoder = IRMQASelfCausal(cfg | cfg.decoder, self.frame_rel_embd, regularizer=regularizer, name="dec")
 
     def call(self, inputs):
@@ -803,14 +803,16 @@ class DecoderOnly(tf.keras.Model):
         frame_idxs = idxs[:, :, 0]
         hand_idxs = idxs[:, :, 1]
 
-        embd = self.angle_embd(angles) + self.hand_embd(hand_idxs) + self.frame_abs_embd(frame_idxs)
+        embd = self.angle_embd(angles) + self.hand_embd(hand_idxs) #+ self.frame_abs_embd(frame_idxs)
 
         _, embd = self.decoder(embd, frame_idxs)
 
+        embd = embd + self.frame_abs_embd(frame_idxs)
+
         latents = self.angle_unembd(embd)
 
-        latents = ein.rearrange(latents, 'b fh (j d e) -> b (fh j d) e', j=self.cfg.n_joints_per_hand, d=self.cfg.n_dof_per_joint)
-
+        latents = ein.rearrange(latents, 'b fh (j d e) -> b (fh j d) e', j=self.cfg.n_joints_per_hand, d=self.cfg.n_dof_per_joint, e=self.cfg.embd_dim)
+        print("latents", tf.shape(latents))
         return {
             "output": self.prediction_head(latents),
         }
@@ -1014,7 +1016,7 @@ def flat_vector_batched_random_chunk(cfg, x, seed=None):
     target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
 
     return (
-        {
+        x | {
             "input": input,
             "input_idxs": input_idxs,
             "target_idxs": target_idxs,
@@ -1087,7 +1089,7 @@ def hierarchical_batched_random_chunk(cfg, x, seed=None):
     target_joint_vecs = tf.gather(target_hands, query_j_idxs, batch_dims=2)
     target_joint_vecs = ein.rearrange(target_joint_vecs, 'b fh j d -> b (fh j d)')
     return (
-        {
+        x | {
             "cond_hand_vecs": cond_hand_vecs,
             "cond_fh_idxs": cond_fh_idxs,
             "query_fh_idxs": query_fh_idxs,
@@ -1222,9 +1224,6 @@ def train(cfg, run_name):
 
     cfg = cfg | cfg.dream
 
-    # loss_fn, stat_fns, prediction_head = decoders.von_mises_fisher(cfg, name="vmf")
-    loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
-
     if cfg.ds == "synthetic":
         cfg = cfg | cfg.ds_synthetic
         data_fn = data_tf.synthetic_data
@@ -1233,6 +1232,9 @@ def train(cfg, run_name):
         data_fn = data_tf.bvh_data
     else:
         raise ValueError("Unknown dataset '{}'".format(cfg.ds))
+
+    # loss_fn, stat_fns, prediction_head = decoders.von_mises_fisher(cfg, name="vmf")
+    loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
 
     print("Creating model ... ", end="")
     if cfg.task == "flat":

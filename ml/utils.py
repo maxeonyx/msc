@@ -57,10 +57,13 @@ def recluster(angles, circular_means=None, frame_axis=0):
     return angles
 
 
-def unrecluster(angles, circular_means, frame_axis=0):
+def unrecluster(angles, circular_means, n_batch_dims=0):
     # assuming the mean is currently 0, rotate the data so the mean is
     # back to the original given by `circular_means`
-    angles = angles + tf.expand_dims(circular_means, axis=frame_axis)
+    circular_means = tf.expand_dims(circular_means, axis=0) # add frame axis
+    for _ in range(n_batch_dims):
+        circular_means = tf.expand_dims(circular_means, axis=0) # add batch_dims
+    angles = angles + circular_means
     angles = angle_wrap(angles)
 
     return angles

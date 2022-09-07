@@ -237,7 +237,7 @@ def get_bvh_data(columns, bvh_dir=None, convert_deg_to_rad=True):
         l_obj.data = extract_columns(l_obj.data, cols)
         r_obj.data = extract_columns(r_obj.data, cols)
 
-        name = os.path.commonprefix([l_fname, r_fname])
+        name = os.path.basename(os.path.normpath(os.path.os.path.commonprefix([l_fname, r_fname])))
 
         # axes are [frame, hand, dof]
         data = np.stack([l_obj.data, r_obj.data], axis=1)
@@ -402,11 +402,12 @@ def write_bvh_files(data, name, column_map, output_dir=None, convert_rad_to_deg=
     if tf.is_tensor(data):
         data = data.numpy()
 
-    assert len(data.shape) == 3, "data must be a 3D tensor with shape (n_frames, n_hands, n_dof)"
+    assert len(data.shape) == 3 or (len(data.shape) == 4 and data.shape[3] == 3), f"data must be a 3D tensor with shape (n_frames, n_hands, n_dof_per_hand) or a 4D tensor with shape (n_frames, n_hands, n_joints_per_hand, n_dof_per_joint=3), got {data.shape}"
+    if len(data.shape) == 4:
+        data = np.reshape(data, [data.shape[0], data.shape[1], data.shape[2]*data.shape[3]])
     assert data.shape[0] >= 0, "data must have at least one frame"
-    assert data.shape[1] in [1, 2], "data must have 1 or 2 hands"
-    assert data.shape[2] == 23, "data must have 23 degrees of freedom"
-    print(f"data shape: {data.shape}")
+    assert data.shape[1] in [1, 2], f"data must have 1 or 2 hands, got {data.shape[1]}"
+    assert data.shape[2] == 23 or data.shape[2] == 51, "data must have 23 or 51 degrees of freedom"
 
     if convert_rad_to_deg:
         # convert back to degrees
