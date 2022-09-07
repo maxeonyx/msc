@@ -21,7 +21,7 @@ def get():
         "shuffle_buffer_size": 130,
         "force": False,
         "convert_deg_to_rad": True,
-        "cached_dataset_path": "./cache/tf_dataset",
+        "_cached_dataset_path": "./_cache/tf_dataset",
 
         "pre": {
 
@@ -53,6 +53,8 @@ def get():
             "task": "flat",
 
             "ds": "real",
+
+            "loss": "vm_crossentropy",
 
             "ds_synthetic": {
                 #           h   j    d   rep  sincos  extra

@@ -27,16 +27,17 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
                 id = ""
             else:
                 id = "_" + str(id)
-            plt.savefig(f"runs/{run_name}/fig{id}.png")
+            plt.savefig(f"_runs/{run_name}/fig{id}.png")
         if not save_instead:
             plt.show()
 
-    @tf.function
+    @tf.function(jit_compile=False)
     def predict_fn(seed_input, idxs, outp_var):
         n_stats = len(get_angle_fns)
         seed_len = seed_input.shape[1]
         # tile seed input across number of statistics we will generate (eg. mean() and sample())
         seed_input = ein.repeat(seed_input, 'b fh j d -> b s fh j d', s=n_stats)
+        idxs = ein.repeat(idxs, "b fh i -> (b s) fh i", s=n_stats)
         outp_var[:, :, :seed_len].assign(seed_input)
         n = outp_var.shape[2]
         for i in tf.range(seed_len, n): # converted to tf.while_loop
@@ -49,9 +50,10 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
             }
             output = model(inputs, training=False)
             output = output["output"]
-            output = ein.rearrange(output, '(b n_stats) (fh j d) sincos -> b n_stats fh j d sincos', n_stats=n_stats, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint, sincos=2)
+            output = ein.rearrange(output, '(b s) (fh j d) params -> b s fh j d params', s=n_stats, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
             for j in range(len(get_angle_fns)): # not converted, adds ops to graph
-                outp_var[:, j, i, :, :].assign(get_angle_fns[j](output[:, j, -1, :, :, :]))
+                vals = get_angle_fns[j](output[:, j, -1, :, :, :])
+                outp_var[:, j, i, :, :].assign(vals)
         return outp_var
 
     def make_seed_data(data, seed_len):

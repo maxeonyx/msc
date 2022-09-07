@@ -812,7 +812,7 @@ class DecoderOnly(tf.keras.Model):
         latents = self.angle_unembd(embd)
 
         latents = ein.rearrange(latents, 'b fh (j d e) -> b (fh j d) e', j=self.cfg.n_joints_per_hand, d=self.cfg.n_dof_per_joint, e=self.cfg.embd_dim)
-        print("latents", tf.shape(latents))
+
         return {
             "output": self.prediction_head(latents),
         }
@@ -1233,10 +1233,17 @@ def train(cfg, run_name):
     else:
         raise ValueError("Unknown dataset '{}'".format(cfg.ds))
 
-    # loss_fn, stat_fns, prediction_head = decoders.von_mises_fisher(cfg, name="vmf")
-    loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
+    
+    if cfg.loss == "angular_mse":
+        loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
+    elif cfg.loss == "vmf_crossentropy":
+        loss_fn, stat_fns, prediction_head = prediction_heads.von_mises_fisher(cfg, name="vmf")
+    elif cfg.loss == "vm_atan_crossentropy":
+        loss_fn, stat_fns, prediction_head = prediction_heads.von_mises_atan(cfg, name="vm_atan")
+    else:
+        raise ValueError("Unknown loss type '{}'".format(cfg.loss))
 
-    print("Creating model ... ", end="")
+    print("Creating model ... ", end="", flush=True)
     if cfg.task == "flat":
         cfg = cfg | cfg.task_flat
         d_train, d_test, d_val = data_tf.tf_dataset(cfg, flat_dataset, data_fn=data_fn)
@@ -1253,7 +1260,7 @@ def train(cfg, run_name):
         raise ValueError("Unknown task: {}".format(cfg.task))
     print("Done.")
 
-    print("Initializing datasets ... ", end="")
+    print("Initializing datasets ... ", end="", flush=True)
     _, _ = next(iter(d_train))
     _, _ = next(iter(d_test))
     _, _ = next(iter(d_val))
@@ -1288,9 +1295,9 @@ def train(cfg, run_name):
 
         def checkpoint_fn(i):
             if i == 0:
-                model.save(f"models/{run_name}/model")
+                model.save(f"_models/{run_name}/model")
             else:
-                model.save_weights(f"models/{run_name}/weights_{i}")
+                model.save_weights(f"_models/{run_name}/weights_{i}")
         
         train_fn = make_exec_loop(
             "Training",
@@ -1397,7 +1404,7 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
         step_fn = eval_step_fn
     
     print()
-    print(f"Compiling {name.lower()} step function ... ", end="")
+    print(f"Compiling {name.lower()} step function ... ", end="", flush=True)
     compiled_step_fn = tf.function(
         step_fn,
         input_signature=[
@@ -1456,18 +1463,21 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
                 )
         try:
             for i, batch in dataset:
-                step_fn((i, batch))
-                if use_metrics:
-                    metric_header_bar.update(metric_header_text)
-                    metric_status_bar.update(metric_status_text())
                 if use_callbacks:
                     for callback in callbacks:
                         if i % callback["every"] == 0:
                             for f in callback["fns"]:
                                 f["fn"](i)
                             callback["counter"].count = 0
-                        callback["counter"].update()
+                            callback["counter"].refresh(elapsed=0.)
+                step_fn((i, batch))
+                if use_metrics:
+                    metric_header_bar.update(metric_header_text)
+                    metric_status_bar.update(metric_status_text())
                 steps_counter.update()
+                if use_callbacks:
+                    for callback in callbacks:
+                        callback["counter"].update()
             stopped_early = False
         except KeyboardInterrupt:
             stopped_early = True

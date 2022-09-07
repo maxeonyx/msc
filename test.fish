@@ -17,7 +17,7 @@ if test (which randomname)
     set -x XLA_FLAGS --xla_gpu_cuda_data_dir=/opt/cuda/
     set -x TF_XLA_FLAGS --tf_xla_auto_jit=2 --tf_xla_cpu_global_jit
 
-    mkdir -p runs/$RUN_NAME
+    mkdir -p _runs/$RUN_NAME
     # create a new commit with the current state of the working directory on a new branch
     git checkout -b run/$RUN_NAME
     git commit -a -m "Commit of src at run $RUN_NAME"
@@ -29,13 +29,13 @@ if test (which randomname)
     
     if test $status -eq 0
         function fish_title
-            echo "$RUN_NAME (anims)"
+            echo "$RUN_NAME (_anims)"
         end
         python create_animation.py
         if test $status -eq 0
             echo Run $RUN_NAME complete!
         else
-            echo "$RUN_NAME anims failed."
+            echo "$RUN_NAME _anims failed."
         end
     else
         echo "$RUN_NAME train failed."

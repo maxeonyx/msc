@@ -14,7 +14,7 @@ from ml import utils
 
 # assumes running with working directory as root of the repo
 DEFAULT_BVH_DIR = "./BVH"
-DEFAULT_OUTPUT_BVH_DIR = "./anims"
+DEFAULT_OUTPUT_BVH_DIR = "./_anims"
 
 def extract_bvh_file(file_content):
     """
@@ -265,7 +265,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None
 
     """
 
-    ds_path = "./cache/dataset.pickle"
+    ds_path = "./_cache/dataset.pickle"
 
     if not force:
         try:
@@ -305,7 +305,7 @@ def np_dataset(force=False, convert_deg_to_rad=True, limit_columns=True):
 
     """
 
-    ds_path = "./cache/dataset.npy"
+    ds_path = "./_cache/dataset.npy"
 
     if not force:
         try:

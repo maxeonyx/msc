@@ -13,7 +13,7 @@ except KeyError:
 print(f"Starting run {run_name}.")
 print()
 
-print("Initializing tf ... ", end="")
+print("Initializing tf ... ", end="", flush=True)
 if typing.TYPE_CHECKING:
     from tensorflow.python import keras
     from tensorflow.python.keras import layers, Model, Input

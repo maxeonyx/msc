@@ -82,7 +82,7 @@ class VIEW3D_PT_generate_animation(bpy.types.Panel):
         self.layout.label(text="Click Generate")
         self.layout.operator(GenerateAnimation.bl_idname, icon='MESH_CUBE', text="Generate")
 
-anim_path = "//anims/ds_bottle1_body1_left_1500.npy"
+anim_path = "//_anims/ds_bottle1_body1_left_1500.npy"
 
 class GenerateAnimation(bpy.types.Operator):
     """Generate Animation Script"""      # Use this as a tooltip for menu items and buttons.

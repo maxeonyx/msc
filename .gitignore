@@ -1,17 +1,17 @@
 __pycache__/
 cached_dataset
-env/
+_env/
 .ipynb_checkpoints/
 wandb/
 *.blend1
 
 # artifacts
-renders/*
-anims/*
-models/*
-cache/*
-runs/*
-logs/*
+_renders/*
+_anims/*
+_models/*
+_cache/*
+_runs/*
+_logs/*
 
 !**/.gitkeep
 

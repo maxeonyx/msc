@@ -21,8 +21,8 @@ except KeyError:
     exit(1)
 
 print("Loading model ... ", end="", flush=True)
-model = keras.models.load_model(f"models/{run_name}/model", compile=False)
-model.load_weights(tf.train.latest_checkpoint(f"models/{run_name}"))
+model = keras.models.load_model(f"_models/{run_name}/model", compile=False)
+model.load_weights(tf.train.latest_checkpoint(f"_models/{run_name}"))
 cfg = config.get()
 cfg = cfg | cfg.dream | cfg.dream.ds_real | cfg.dream.task_flat
 loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
@@ -62,7 +62,7 @@ def write_files(data, f_ext):
             examples.append({ "name": name, "files": [] })
         f_ext_text = f_ext[i] if type(f_ext) == list else f_ext
         f_name = f"{run_name}.{name}.{i}{f_ext_text}"
-        data_bvh.write_bvh_files(data[i], f_name, column_map=data_bvh.COL_ALL_JOINTS, output_dir="anims/")
+        data_bvh.write_bvh_files(data[i], f_name, column_map=data_bvh.COL_ALL_JOINTS, output_dir="_anims/")
         examples[i]["files"].append(f_name  )
 
 write_files(orig_angles, ".original")
@@ -89,7 +89,7 @@ if len(seqs) > 1:
     write_files(samples[:, n_seed_frames:], ".predicted.sampled")
 
 import json
-with open(f"anims/{run_name}.json", "w") as f:
+with open(f"_anims/{run_name}.json", "w") as f:
     json.dump({
         "n_seed_frames": n_seed_frames,
         "n_hands": cfg.n_hands,
@@ -98,5 +98,5 @@ with open(f"anims/{run_name}.json", "w") as f:
         "examples": examples,
     }, f, indent=1)
 
-print("Done. Wrote animations to 'anims/'.")
+print("Done. Wrote animations to '_anims/'.")
 print()

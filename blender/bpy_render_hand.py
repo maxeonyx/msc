@@ -27,7 +27,7 @@ def render(cfg):
     bpy.context.scene.frame_end = cfg.conditioning_steps + cfg.new_frames
     bpy.context.scene.render.image_settings.file_format = 'FFMPEG'
     timestamp = datetime.datetime.now().isoformat(timespec='seconds')
-    bpy.context.scene.render.filepath = "//renders/" + timestamp
+    bpy.context.scene.render.filepath = "//_renders/" + timestamp
     bpy.context.scene.render.fps = 60
 
     if cfg.cuda:
