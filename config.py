@@ -39,22 +39,22 @@ def get():
         },
     
         "dream": {
-            "n_hand_vecs": 18,
-            "batch_size": 11,
 
             "decimate": True,
-            "decimate_threshold": 0.2,
+            "decimate_threshold": 0.1,
             "recluster": False,
 
             "l2_reg": 1e-6,
             "l1_reg": 0,
 
+            "clip_gradient_norm": 10.,
 
             "task": "flat",
 
-            "ds": "real",
+            "ds": "synthetic",
 
-            "loss": "vm_crossentropy",
+            "loss": "categorical",
+            "n_categories": 256,
 
             "ds_synthetic": {
                 #           h   j    d   rep  sincos  extra
@@ -80,6 +80,7 @@ def get():
             },
 
             "task_flat": {
+                "batch_size": 11,
                 "n_examples": 60,
                 "n_hand_vecs": 200,
                 "random_ahead": False,
@@ -153,7 +154,7 @@ def get():
         "predict_frames": 20,
         "test_batch_size": 3,
 
-        "steps": 100000,
+        "steps": 5000,
         "test_steps": 1000,
         "val_steps": 1000,
         "steps_per_epoch": 1000,

@@ -1,26 +1,73 @@
-from configparser import Interpolation
+import pathlib
 import tensorflow as tf
-import tensorflow.keras as keras
+import typing
+if typing.TYPE_CHECKING:
+    import keras.api._v2.keras as keras
+    from keras.api._v2.keras import Model, Input, layers
+else:
+    from tensorflow import keras
+    from tensorflow.keras import Input, Model, layers
 import einops as ein
 from ml import utils, data_tf
 from matplotlib import pyplot as plt
 from box import Box as box
 from math import pi, tau
 
-def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
+import holoviews as hv
+hv.extension('bokeh')
+
+def create_predict_fn_v2(cfg, run_name, model, to_angle_fns):
 
     if type(model) is str:
         model = keras.models.load_model(model)
 
-    def showimgs(data, save, save_instead, id):
+    figures = {}
+    def build_figure(data, timestep, name="figure"):
+        nonlocal figures
         n_imgs = len(data)
-        batch_size = data[0].shape[0]
+        names = list(data.keys())
+        tracks = list(data.values())
+        tracks = [track.numpy() if tf.is_tensor(track) else track for track in tracks]
+        batch_size = tracks[0].shape[0]
+        key_dims = [
+            hv.Dimension(("batch", "Batch")),
+            hv.Dimension(("time", "Timestep")),
+        ]
+        plots = {
+            (timestep, i_batch): hv.Layout([
+                hv.Raster(tracks[i_track][i_batch], label=names[i_track]).opts(cmap='twilight') for i_track in range(n_imgs)
+            ], label=f"Batch {i_batch}", shared_axes="X")
+            for i_batch in range(batch_size)
+        }
+        if name in figures:
+            figures[name].update(plots)
+        else:
+            figures[name] = hv.HoloMap(plots, kdims=key_dims)
+        h = figures[name].collate()
+        pathlib.Path(f'_figures/{run_name}').mkdir(parents=True, exist_ok=True)
+        hv.save(h, f'_figures/{run_name}/{name}.html')
+
+
+    def showimgs(data, save, save_instead, t):
+        n_imgs = len(data)
+        names = list(data.keys())
+        tracks = list(data.values())
+        batch_size = tracks[0].shape[0]
         n_tracks_per_img = cfg.n_hands * cfg.n_joints_per_hand * cfg.n_dof_per_joint
-        fig, axes = plt.subplots(n_imgs * batch_size, sharex=True, sharey=True, figsize=(10, 3*n_imgs*batch_size))
-        for i in range(batch_size):
-            for j in range(n_imgs):
-                axes[i * n_imgs + j].set_anchor('W')
-                axes[i * n_imgs + j].imshow(tf.transpose(tf.reshape(data[j][i], [-1, n_tracks_per_img]))[:, :200], vmin=-pi, vmax=pi, interpolation='nearest', cmap='twilight')
+
+        fig = plt.figure()
+        fig.set_figheight(batch_size*n_imgs*1)
+        subfigs = fig.subfigures(nrows=batch_size)
+        subfigs.get
+        for batch_i, sfig in enumerate(subfigs):
+            sfig.set_in_layout(True)
+            sfig.suptitle(f"Batch {batch_i + 1}")
+            axes = sfig.subplots(nrows=n_imgs)
+            for plot_i, (ax, title) in enumerate(zip(axes, names)):
+                ax.set_aspect('equal')
+                ax.set_title(title)
+                ax.set_anchor('W')
+                ax.imshow(tf.transpose(tf.reshape(tracks[plot_i][batch_i], [-1, n_tracks_per_img]))[:, :200], vmin=-pi, vmax=pi, interpolation='nearest', cmap='twilight')
         fig.tight_layout()
         if save or save_instead:
             if id is None:
@@ -31,17 +78,17 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
         if not save_instead:
             plt.show()
 
-    @tf.function(jit_compile=False)
+    @tf.function
     def predict_fn(seed_input, idxs, outp_var):
-        n_stats = len(get_angle_fns)
+        n_stats = len(to_angle_fns)
         seed_len = seed_input.shape[1]
         # tile seed input across number of statistics we will generate (eg. mean() and sample())
-        seed_input = ein.repeat(seed_input, 'b fh j d -> b s fh j d', s=n_stats)
-        idxs = ein.repeat(idxs, "b fh i -> (b s) fh i", s=n_stats)
+        seed_input = ein.repeat(seed_input, 'b fh j d -> s b fh j d', s=n_stats)
+        idxs = ein.repeat(idxs, "b fh i -> (s b) fh i", s=n_stats)
         outp_var[:, :, :seed_len].assign(seed_input)
         n = outp_var.shape[2]
         for i in tf.range(seed_len, n): # converted to tf.while_loop
-            inp = ein.rearrange(outp_var[:, :, :i], "b stat fh j d -> (b stat) fh j d")
+            inp = ein.rearrange(outp_var[:, :, :i], "s b fh j d -> (s b) fh j d")
             inputs = {
                 "input": inp,
                 "input_idxs": idxs[:, :i],
@@ -50,37 +97,35 @@ def create_predict_fn_v2(cfg, run_name, model, get_angle_fns):
             }
             output = model(inputs, training=False)
             output = output["output"]
-            output = ein.rearrange(output, '(b s) (fh j d) params -> b s fh j d params', s=n_stats, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
-            for j in range(len(get_angle_fns)): # not converted, adds ops to graph
-                vals = get_angle_fns[j](output[:, j, -1, :, :, :])
-                outp_var[:, j, i, :, :].assign(vals)
+            output = ein.rearrange(output, '(s b) (fh j d) params -> s b fh j d params', s=n_stats, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
+            for j, fn in enumerate(to_angle_fns.values()): # not converted, adds ops to graph
+                vals = fn(output[j, :, -1, :, :, :])
+                outp_var[j, :, i, :, :].assign(vals)
         return outp_var
 
     def make_seed_data(data, seed_len):
         return data["input"], data["input"][:, :seed_len], data["input_idxs"]
 
     def predict_wrapper(n_frames, seed_input, idxs):
-        n_stats = len(get_angle_fns)
+        n_stats = len(to_angle_fns)
         batch_size = seed_input.shape[0]
-        outp_var = tf.Variable(tf.zeros([batch_size, n_stats, n_frames * cfg.n_hands, cfg.n_joints_per_hand, cfg.n_dof_per_joint]))
+        outp_var = tf.Variable(tf.zeros([n_stats, batch_size, n_frames * cfg.n_hands, cfg.n_joints_per_hand, cfg.n_dof_per_joint]))
         return predict_fn(seed_input, idxs, outp_var)
 
     def predict(data, n_frames, seed_len=8):
         target, seed_input, idxs = make_seed_data(data, seed_len)
         return predict_wrapper(n_frames, seed_input, idxs)
 
-    def predict_and_show(data, n_frames, seed_len=8, save=True, save_instead=True, id=None):
+    def predict_and_show(data, n_frames, seed_len=8, timestep=0):
         target, seed_input, idxs = make_seed_data(data, seed_len)
         outp = predict_wrapper(n_frames, seed_input, idxs)
-        showimgs(
-            [
-                target,
-                seed_input,
-                *[outp[:, i, ...] for i in range(len(get_angle_fns))],
-            ],
-            save=save,
-            save_instead=save_instead,
-            id=id,
+        build_figure(
+            {
+                "target": target,
+                "seed": seed_input,
+                **{ name: outp[i, ...] for i, (name) in enumerate(to_angle_fns.keys()) },
+            },
+            timestep=timestep,
         )
 
     return predict, predict_and_show

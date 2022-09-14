@@ -9,8 +9,8 @@ import tensorflow as tf
 from ml import data_tf, encoders, predict, prediction_heads, utils, deberta
 from ml.data_bvh import chunk
 if typing.TYPE_CHECKING:
-    from tensorflow.python import keras
-    from tensorflow.python.keras import Input, Model, layers
+    import keras.api._v2.keras as keras
+    from keras.api._v2.keras import Model, Input, layers
 else:
     from tensorflow import keras
     from tensorflow.keras import Input, Model, layers
@@ -1233,15 +1233,7 @@ def train(cfg, run_name):
     else:
         raise ValueError("Unknown dataset '{}'".format(cfg.ds))
 
-    
-    if cfg.loss == "angular_mse":
-        loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
-    elif cfg.loss == "vmf_crossentropy":
-        loss_fn, stat_fns, prediction_head = prediction_heads.von_mises_fisher(cfg, name="vmf")
-    elif cfg.loss == "vm_atan_crossentropy":
-        loss_fn, stat_fns, prediction_head = prediction_heads.von_mises_atan(cfg, name="vm_atan")
-    else:
-        raise ValueError("Unknown loss type '{}'".format(cfg.loss))
+    loss_fn, prediction_head, to_angle_fns = prediction_heads.get_prediction_head(cfg, typ=cfg.loss)
 
     print("Creating model ... ", end="", flush=True)
     if cfg.task == "flat":
@@ -1270,11 +1262,11 @@ def train(cfg, run_name):
     def loss_fn_wrapper(inp):
         return tf.reduce_mean(loss_fn(inp["targets"]["target_output"], inp["outputs"]["output"]))
 
-    optimizer = keras.optimizers.Adam(cfg.adam.lr)
+    optimizer = keras.optimizers.Adam(cfg.adam.lr, clipnorm=cfg.clip_gradient_norm)
 
     with enlighten.get_manager() as manager:
 
-        predict_fn, predict_and_plot_fn = predict.create_predict_fn_v2(cfg, run_name, model, stat_fns)
+        predict_fn, predict_and_plot_fn = predict.create_predict_fn_v2(cfg, run_name, model, to_angle_fns)
 
         test_inp_data, _test_tar_data = next(iter(d_test))
 
@@ -1332,7 +1324,7 @@ def train(cfg, run_name):
                         },
                         {
                             "name": "Predict",
-                            "fn": lambda i: predict_and_plot_fn(test_inp_data, n_frames=100, seed_len=5, id=i.numpy()),
+                            "fn": lambda i: predict_and_plot_fn(test_inp_data, n_frames=100, seed_len=5, timestep=i.numpy()),
                         },
                         {
                             "name": "Checkpoint",
@@ -1426,7 +1418,7 @@ def make_exec_loop(name, model, dataset, loss_fn, optimizer, training, metrics=[
                 metric["metric"].reset()
 
             metric_column_length = max(len(metric["name"]) for metric in metrics)
-            metric_header_text = " | ".join(
+            metric_header_text = "| " + " | ".join(
                 "{name:^{length}}".format(name=metric["name"], length=metric_column_length)
                 for metric in metrics
             )

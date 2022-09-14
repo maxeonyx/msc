@@ -8,6 +8,7 @@ wandb ~= 0.12
 dotmap ~= 1.3
 ipywidgets ~= 7.6
 icecream ~= 2.1
+tensorflow
 tensorflow_datasets
 tensorflow_probability
 python-box ~= 6.0
@@ -18,3 +19,4 @@ einops
 pyqt5 ~= 5.15
 nvsmi ~= 0.4
 tensorboard_plugin_profile
+holoviews[recommended]

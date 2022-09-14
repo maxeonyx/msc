@@ -25,8 +25,9 @@ model = keras.models.load_model(f"_models/{run_name}/model", compile=False)
 model.load_weights(tf.train.latest_checkpoint(f"_models/{run_name}"))
 cfg = config.get()
 cfg = cfg | cfg.dream | cfg.dream.ds_real | cfg.dream.task_flat
-loss_fn, stat_fns, prediction_head = prediction_heads.angular(cfg)
-predict_fn, predict_and_show = predict.create_predict_fn_v2(cfg, run_name, model, stat_fns)
+
+loss_fn, prediction_head, to_angle_fns = prediction_heads.get_prediction_head(cfg, typ=cfg.loss)
+predict_fn, predict_and_show = predict.create_predict_fn_v2(cfg, run_name, model, to_angle_fns)
 print("Done.")
 
 
@@ -82,11 +83,9 @@ print("Done.")
 print()
 
 seqs = ein.rearrange(seqs, 'b s (f h) j d -> s b f h (j d)', h=cfg.n_hands, j=cfg.n_joints_per_hand, d=cfg.n_dof_per_joint)
-means = seqs[0]
-write_files(means[:, n_seed_frames:], ".predicted")
-if len(seqs) > 1:
-    samples = seqs[1]
-    write_files(samples[:, n_seed_frames:], ".predicted.sampled")
+for i, name in enumerate(to_angle_fns.keys()):
+    write_files(seqs[i, :, n_seed_frames:], f".predicted.{name}")
+
 
 import json
 with open(f"_anims/{run_name}.json", "w") as f:
@@ -95,6 +94,7 @@ with open(f"_anims/{run_name}.json", "w") as f:
         "n_hands": cfg.n_hands,
         "decimated": cfg.decimate,
         "reclustered": cfg.recluster,
+        "tracks": list(to_angle_fns.keys()),
         "examples": examples,
     }, f, indent=1)
 

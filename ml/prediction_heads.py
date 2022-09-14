@@ -4,6 +4,8 @@ from tensorflow.keras import layers, Model, Input
 import tensorflow_probability as tfp
 from tensorflow_probability import distributions as tfd
 
+from math import pi, tau
+
 from ml import utils
 
 def von_mises_fisher_dist(p) -> tfd.VonMisesFisher:
@@ -11,13 +13,16 @@ def von_mises_fisher_dist(p) -> tfd.VonMisesFisher:
     concentration = tf.nn.softplus(p[..., 2])
     return tfd.VonMisesFisher(mean_direction=mean_direction, concentration=concentration)
 
+@tf.autograph.experimental.do_not_convert
 def von_mises_fisher_sample(p):
     d = von_mises_fisher_dist(p)
-    return d.sample()
+    sincos = d.sample()
+    return tf.atan2(sincos[..., 0], sincos[..., 1])
 
 def von_mises_fisher_mean(p):
     d = von_mises_fisher_dist(p)
-    return d.mean()
+    sincos = d.mean()
+    return tf.atan2(sincos[..., 0], sincos[..., 1])
 
 @tf.function(
     input_signature=[
@@ -37,7 +42,10 @@ def von_mises_fisher(cfg, name="von_mises_fisher"):
     params = layers.Dense(3, name="params")(inputs)
     vmf_decoder = Model(inputs=inputs, outputs=params, name=name)
 
-    return von_mises_fisher_loss, [von_mises_fisher_mean, von_mises_fisher_sample], vmf_decoder
+    return von_mises_fisher_loss, vmf_decoder, {
+        "mean": von_mises_fisher_mean,
+        "sample": von_mises_fisher_sample,
+    }
 
 def von_mises_atan_dist(p):
     mean_direction, _norm = tf.linalg.normalize(p[..., 0:2], axis=-1) # normalize mean_direction
@@ -57,16 +65,20 @@ def von_mises_atan_sample(p):
     d = von_mises_atan_dist(p)
     return d.sample()
 
-def von_mises_atan(cfg, name="von_mises"):
+def von_mises_atan(cfg, name="von_mises_atan"):
     inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
     params = layers.Dense(3, name="params")(inputs)
     angular_decoder = Model(inputs=inputs, outputs=params, name=f"{name}_params")
 
-    return von_mises_atan_loss, [von_mises_atan_mean, von_mises_atan_sample], angular_decoder
+    return von_mises_atan_loss, angular_decoder, {
+        "mean": von_mises_atan_mean,
+        "sample": von_mises_atan_sample
+    }
+
 
 def von_mises_dist(p):
-    loc = p[..., 0]
-    concentration = tf.nn.softplus(p[..., 2])
+    loc = utils.angle_wrap(p[..., 0])
+    concentration = tf.nn.softplus(p[..., 1])
     return tfd.VonMises(loc=loc, concentration=concentration)
 
 def von_mises_loss(targets, p):
@@ -86,7 +98,10 @@ def von_mises(cfg, name="von_mises"):
     params = layers.Dense(2, name="params")(inputs)
     angular_decoder = Model(inputs=inputs, outputs=params, name=f"{name}_params")
 
-    return von_mises_loss, [von_mises_mean, von_mises_sample], angular_decoder
+    return von_mises_loss, angular_decoder, {
+        "mean": von_mises_mean,
+        "sample": von_mises_sample
+    }
 
 @tf.function(
     input_signature=[
@@ -94,7 +109,7 @@ def von_mises(cfg, name="von_mises"):
         tf.TensorSpec(shape=[None, None, None], dtype=tf.float32),
     ]
 )
-def angular_squared_error(targets, p):
+def angular_squared_error(targets: tf.Tensor, p: tf.Tensor):
     """
     Angular squared error between targets in [-pi, pi) and p in <[-1, 1), [-1, 1)>
     """
@@ -113,4 +128,75 @@ def angular(cfg, name="angular"):
     params = layers.Dense(2, name="sincos")(inputs)
     decoder = Model(inputs=inputs, outputs=params, name=f"{name}_decoder")
 
-    return angular_squared_error, [to_angle], decoder
+    return angular_squared_error, decoder, {
+        "mean": to_angle,
+    }
+
+def categorical(cfg, name="categorical"):
+
+    def to_categorical(angle):
+        """
+        Convert an angle in the range [-pi, pi) to a one-hot vector
+        with shape [cfg.n_categories]
+        """
+        # convert to range [0, 1)
+        angle = (angle + pi) / tau
+        # convert to int in range [0, cfg.n_categories)
+        angle = tf.cast(tf.math.floor(angle * cfg.n_categories), tf.int32)
+        # convert to one-hot
+        return tf.one_hot(angle, cfg.n_categories)
+
+    def from_categorical(p):
+        """
+        Convert a one-hot vector with shape [cfg.n_categories] to an angle
+        in the range [-pi, pi)
+        """
+        # convert to int in range [0, cfg.n_categories)
+        p = tf.math.argmax(p, axis=-1)
+        # convert to range [0, 1)
+        p = tf.cast(p, tf.float32) / cfg.n_categories
+        # convert to range [-pi, pi)
+        p = p * tau - pi
+        # ensure in range [-pi, pi)
+        return utils.angle_wrap(p)
+
+
+    def categorical_dist(p):
+        return tfd.OneHotCategorical(logits=p)
+
+    def categorical_loss(targets, p):
+        d = categorical_dist(p)
+        targets = to_categorical(targets)
+        return -tf.reduce_mean(d.log_prob(targets))
+    
+    def categorical_mode(p):
+        d = categorical_dist(p)
+        return from_categorical(d.mode())
+    
+    def categorical_sample(p):
+        d = categorical_dist(p)
+        return from_categorical(d.sample())
+
+    inputs = Input(shape=[None, cfg.embd_dim], dtype=tf.float32, name="latents")
+    logits = layers.Dense(cfg.n_categories, name="logits")(inputs)
+    decoder = Model(inputs=inputs, outputs=logits, name=f"{name}_decoder")
+
+    return categorical_loss, decoder, {
+        "mode": categorical_mode,
+        "sample": categorical_sample,
+    }
+
+
+def get_prediction_head(cfg, typ):
+    if typ == "angular_mse":
+        return angular(cfg)
+    elif typ == "vmf_crossentropy":
+        return von_mises_fisher(cfg, name="vmf")
+    elif typ == "vm_atan_crossentropy":
+        return von_mises_atan(cfg, name="vm_atan")
+    elif typ == "vm_crossentropy":
+        return von_mises(cfg, name="vm")
+    elif typ == "categorical":
+        return categorical(cfg, name="categorical")
+    else:
+        raise ValueError("Unknown loss type '{}'".format(typ))
