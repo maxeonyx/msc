@@ -1,0 +1,11 @@
+holoviews[recommended]
+enlighten ~= 1.10
+wandb ~= 0.12
+tensorflow
+tensorflow_datasets
+tensorflow_probability
+python-box ~= 6.0
+randomname ~= 0.1
+einops
+nvsmi ~= 0.4
+tensorboard_plugin_profile

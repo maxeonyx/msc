@@ -1,0 +1,15 @@
+__pycache__/
+cached_dataset
+_env/
+.ipynb_checkpoints/
+wandb/
+
+# artifacts
+_models/*
+_cache/*
+_runs/*
+_logs/*
+
+!**/.gitkeep
+
+**/*.ignore*
