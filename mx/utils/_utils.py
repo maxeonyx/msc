@@ -1,11 +1,12 @@
 from abc import abstractmethod, ABC
+import inspect
 from collections import UserDict
 from collections.abc import Callable
 import functools
 from math import pi, tau
 from random import random
 from typing_extensions import Self
-from typing import Literal, Callable, ParamSpec
+from typing import Literal, Callable, ParamSpec, Union
 
 import tensorflow as tf
 import typing
@@ -312,69 +313,29 @@ def tf_scope(func):
     return tf_decorator.make_decorator(func, func_with_name_scope)
 
 
-Module = tf.Module
+class Layer(Callable, tf.Module, ABC):
+    pass
 
-P = ParamSpec("P")
-class Layer_1_1(Module, Callable, ABC):
-    """
-    A layer is a module that can be called, and has a default input and output.
-    """
 
-    def __init__(self, name=None):
-        super().__init__(name=name)
+class Layer_DefaultInput(Layer, ABC):
 
     @abstractmethod
-    def out_shape(self, in_shape: Einshape) -> Einshape:
-        pass
-    
-    @abstractmethod
-    def __call__(self, default_input, **other_inputs) -> Einsor:
+    def __call__(self, input: Einsor, *args, **kwargs) -> Union[Einsor, dict[str, Einsor]]:
         pass
 
-class Layer_1_N(Module, Callable, ABC):
-    """
-    A layer is a module that can be called, and has a default input and output.
-    """
+    @classmethod
+    def get_all_subclasses(cls):
+        all_subclasses = []
 
-    def __init__(self, name=None):
-        super().__init__(name=name)
+        for subclass in cls.__subclasses__():
+            if not inspect.isabstract(subclass):
+                all_subclasses.append(subclass)
+            all_subclasses.extend(cls.get_all_subclasses(subclass))
 
-    @abstractmethod
-    def out_shape(self, in_shape: Einshape) -> Einshape:
-        pass
-    
-    @abstractmethod
-    def __call__(self, default_input, **other_inputs) -> dict[str, Einsor]:
-        pass
+        return all_subclasses
 
-class Layer_N_1(Module, Callable, ABC):
-    """
-    A layer is a module that can be called, and has a default input and output.
-    """
-
-    def __init__(self, name=None):
-        super().__init__(name=name)
+class Layer_DefaultOutput(Layer, ABC):
 
     @abstractmethod
-    def out_shape(self, in_shape: Einshape) -> Einshape:
-        pass
-    
-    @abstractmethod
-    def __call__(self, **other_inputs) -> Einsor:
-        pass
-
-class Layer_N_N(Module, Callable, ABC):
-    """
-    A block is like a layer, but it doesn't have default outputs.
-    """
-
-    def __init__(self, name=None):
-        super().__init__(name=name)
-
-    @abstractmethod
-    def out_shape(self, in_shape: Einshape) -> Einshape:
-        pass
-
-    @abstractmethod
-    def __call__(self, **inputs) -> dict[str, Einsor]:
+    def __call__(self, *args, **kwargs) -> Einsor:
         pass
