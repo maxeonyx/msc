@@ -1,7 +1,17 @@
 from dataclasses import dataclass
+import abc
 from typing_extensions import Self
 
 import tensorflow as tf
+
+@dataclass
+class BaseDatasetConfig(abc.ABC):
+    """
+    Info common to all datasets defined in this repo.
+    """
+    pretty_name: str
+    code_name: str
+
 
 @dataclass
 class DSet:

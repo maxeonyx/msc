@@ -1,12 +1,7 @@
-from abc import abstractmethod, ABC
-import inspect
-from collections import UserDict
-from collections.abc import Callable
 import functools
 from math import pi, tau
-from random import random
+from typing import Literal
 from typing_extensions import Self
-from typing import Literal, Callable, ParamSpec, Union
 
 import tensorflow as tf
 import typing
@@ -23,93 +18,6 @@ else:
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake
-
-def soft_convert_to_tensor_recursive(d):
-    """
-    Recursively converts all dicts in a nested dict structure to tensors.
-    Converts tuples recursively, but converts any lists to tensors.
-    """
-    if isinstance(d, Einsor):
-        return d
-    
-    if isinstance(d, tuple):
-        return tuple(soft_convert_to_tensor_recursive(x) for x in d)
-    
-    if (
-        isinstance(d, list)
-        or isinstance(d, int)
-        or isinstance(d, float)
-        or isinstance(d, str)
-        or isinstance(d, bool)
-    ):
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        print("Converting to tensor:", d)
-        return tf.convert_to_tensor(d)
-
-    if (
-        isinstance(d, dict)
-        or isinstance(d, UserDict)
-    ):
-        if isinstance(d, UserDict):
-            d = d.data
-        for k, v in d.items():
-            d[k] = soft_convert_to_tensor_recursive(v)
-        return d
-    
-    return d
-
-
-class Einsor(tf.Tensor, UserDict):
-    """
-    A TensorLike object which can have a default value, as well as an auxiliary
-    dictionary of values.
-    """
-    val: tf.Tensor
-    extra: typing.Mapping[str, tf.Tensor]
-
-    def __init__(self, val: TensorLike, **extra: typing.Mapping[str, tf.Tensor]):
-        self.val = soft_convert_to_tensor_recursive(val)
-        self.extra = soft_convert_to_tensor_recursive(extra)
-
-    @staticmethod
-    def _proxy_methods() -> set[str]:
-        return {
-            "numpy",
-            "shape",
-            "dtype",
-            "ndim",
-            "__iter__",
-            *tf.Tensor.OVERLOADABLE_OPERATORS,
-        }
-    
-    @staticmethod
-    def _make_proxy_method(name):
-        def method(self, *args, **kwargs):
-            print("Calling method:", name)
-            return getattr(self.val, name)(*args, **kwargs)
-        return method
-    
-    @classmethod
-    def _attach_proxy_methods(cls):
-        for method_name in Einsor._proxy_methods():
-            method = cls._make_proxy_method(method_name)
-            setattr(cls, method_name, method)
-
-    def __getitem__(self, key: str) -> tf.Tensor:
-        if type(key) is str:
-            return self.extra[key]
-        else:
-            return self.val[key]
-
-Einsor._attach_proxy_methods()
-
-
 
 class Einshape:
 
@@ -153,10 +61,16 @@ class Einshape:
 
     @property
     def shape(self):
+        """Return the shape of the tensor as a list of integers or None."""
         return [*self._b.values(), *self._s.values(), *self._f.values()]
+
+    def b_s_shape(self) -> list[int | None]:
+        """Shape of the batch and sequence dimensions."""
+        return [*self._b.values(), *self._s.values()]
 
     @property
     def s_f_shape(self) -> list[int | None]:
+        """Shape of the sequence and feature dimensions."""
         return [*self._s.values(), *self._f.values()]
 
     @property
@@ -183,6 +97,37 @@ class Einshape:
     def f_rank(self) -> int:
         return len(self._f)
 
+    @staticmethod
+    def _product(shape: list[int | None]) -> int:
+        
+        def multiply_or_none(x, y):
+            if x is None or y is None:
+                return None
+            else:
+                return x * y
+
+        return functools.reduce(multiply_or_none, shape)
+
+    @property
+    def b_product(self) -> int:
+        """Return the total length of the batch dimensions (product of all batch dimensions)."""
+        return Einshape._product(self.b_shape)
+
+    @property
+    def s_product(self) -> int:
+        """Return the total length of the sequence dimensions (product of all sequence dimensions)."""
+        return Einshape._product(self.s_shape)
+
+    @property
+    def f_product(self) -> int:
+        """Return the total length of the feature dimensions (product of all feature dimensions)."""
+        return Einshape._product(self.f_shape)
+    
+    @property
+    def product(self) -> int:
+        """Return the total length of the tensor (product of all dimensions)."""
+        return Einshape._product(self.shape)
+
     def cut(self, new_seq_dims: list[int | None]) -> Self:
         """Cut the sequence dimensions to the given lengths. New sequence dimensions must be shorter than the old ones."""
 
@@ -208,12 +153,113 @@ class Einshape:
             feature_dims = { k: dim for k, dim in zip(self._f.keys(), new_feature_dims) },
         )
 
+    def f_indices(self, flatten=True, elide_rank_1=True):
+        """
+        Return a list of indices for the feature dimensions.
+        
+        If flatten=True (the default), the returned indices will
+        have shape [ product(f_shape), f_rank]. Otherwise, the
+        returned indices will have shape [ *f_shape, f_rank ].
+        
+        If elide_rank_1=True (the default), when there is only a
+        single feature dimension, the returned indices will not have
+        an extra dimension. Otherwise, the returned indices will have
+        an extra dimension with size equal to the rank of the feature
+        dimensions.
+        """
 
-def multidim_indices(shape, flatten=True):
+        return multidim_indices(self.f_shape, flatten=flatten, elide_rank_1=elide_rank_1)
+
+    def s_indices(self, flatten=True, elide_rank_1=True):
+        """
+        Return a list of indices for the sequence dimensions.
+        
+        If flatten=True (the default), the returned indices will
+        have shape [ s_product, s_rank]. Otherwise, the
+        returned indices will have shape [ *s_shape, s_rank ].
+        
+        If elide_rank_1=True (the default), when there is only a
+        single sequence dimension, the returned indices will not have
+        an extra dimension. Otherwise, the returned indices will have
+        an extra dimension with size equal to the rank of the sequence
+        dimensions.
+        """
+
+        return multidim_indices(self.s_shape, flatten=flatten, elide_rank_1=elide_rank_1)
+    
+    def b_indices(self, flatten=True, elide_rank_1=True):
+        """
+        Return a list of indices for the batch dimensions.
+
+        If flatten=True (the default), the returned indices will
+        have shape [ b_product, b_rank]. Otherwise, the returned
+        indices will have shape [ *b_shape, b_rank ].
+
+        If elide_rank_1=True (the default), when there is only a
+        single batch dimension, the returned indices will not have
+        an extra dimension. Otherwise, the returned indices will have
+        an extra dimension with size equal to the rank of the batch
+        dimensions.
+        """
+
+        return multidim_indices(self.b_shape, flatten=flatten, elide_rank_1=elide_rank_1)
+    
+    def indices(self, flatten=True):
+        """
+        Return a list of indices for the batch, sequence, and feature dimensions.
+        
+        If flatten=True (the default), the returned indices will
+        have shape [ product, rank ]. Otherwise, the
+        returned indices will have shape [ *shape, rank ].
+        """
+        return multidim_indices(self.shape, flatten=flatten, elide_rank_1=False)
+
+    def append_feature_dim(self, name: str, val: int | None) -> Self:
+        """Append a new feature dimension to the shape."""
+        assert name not in self._f, f"Feature dimension {name} already exists."
+        return Einshape(
+            batch_dims = self._b,
+            sequence_dims = self._s,
+            feature_dims = { **self._f, name: val },
+        )
+
+    def with_feature_dims(self, feature_dims: dict[str, int | None]) -> Self:
+        """Return a new shape with the given feature dimensions."""
+        return Einshape(
+            batch_dims = self._b,
+            sequence_dims = self._s,
+            feature_dims = feature_dims,
+        )
+    
+    def with_sequence_dims(self, sequence_dims: dict[str, int | None | Literal["ragged"]]) -> Self:
+        """Return a new shape with the given sequence dimensions."""
+        return Einshape(
+            batch_dims = self._b,
+            sequence_dims = sequence_dims,
+            feature_dims = self._f,
+        )
+    
+    def with_batch_dims(self, batch_dims: dict[str, int | None]) -> Self:
+        """Return a new shape with the given batch dimensions."""
+        return Einshape(
+            batch_dims = batch_dims,
+            sequence_dims = self._s,
+            feature_dims = self._f,
+        )
+    
+
+
+def multidim_indices(shape, flatten=True, elide_rank_1=True):
     """
     Uses tf.meshgrid to get the indices for a tensor of any rank
     Returns an int32 tensor of shape [ product(shape), rank ]
     """
+    if len(shape) == 0:
+        raise ValueError("Shape must have at least one dimension.")
+    if len(shape) == 1:
+        if elide_rank_1:
+            return tf.range(shape[0], dtype=tf.int32)
+
     indices = tf.meshgrid(*[tf.range(s) for s in shape])
     indices = tf.stack(indices, axis=-1)
     if flatten:
@@ -311,31 +357,3 @@ def tf_scope(func):
             return func(*args, **kwargs)
     
     return tf_decorator.make_decorator(func, func_with_name_scope)
-
-
-class Layer(Callable, tf.Module, ABC):
-    pass
-
-
-class Layer_DefaultInput(Layer, ABC):
-
-    @abstractmethod
-    def __call__(self, input: Einsor, *args, **kwargs) -> Union[Einsor, dict[str, Einsor]]:
-        pass
-
-    @classmethod
-    def get_all_subclasses(cls):
-        all_subclasses = []
-
-        for subclass in cls.__subclasses__():
-            if not inspect.isabstract(subclass):
-                all_subclasses.append(subclass)
-            all_subclasses.extend(cls.get_all_subclasses(subclass))
-
-        return all_subclasses
-
-class Layer_DefaultOutput(Layer, ABC):
-
-    @abstractmethod
-    def __call__(self, *args, **kwargs) -> Einsor:
-        pass

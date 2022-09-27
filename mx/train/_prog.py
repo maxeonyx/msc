@@ -1,4 +1,3 @@
-from collections import abc
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import threading
@@ -7,8 +6,7 @@ from typing import Callable
 
 import enlighten
 
-from mx.tasks import TaskCfg
-from ._train import MyMetric, TrainCfg
+from ._train import MyMetric
 
 def metric_bar_format(metrics: list[MyMetric]):
 

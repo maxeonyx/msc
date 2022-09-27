@@ -2,18 +2,24 @@ import abc
 from dataclasses import dataclass
 from typing import Literal, Union
 
+from ._dataset_utils import DSet
+
 @dataclass
 class TaskCfg(abc.ABC):
     """Defines a particular input and output format that a dataset can be adapted into."""
 
-    batch: Union[Literal[False], int]
-    """
-    Whether the task includes batching the data, and if so, the batch size.
-    """
+    @staticmethod
+    @abc.abstractmethod
+    def already_batched() -> bool:
+        pass
 
 @dataclass
-class NextTokenPrediction(TaskCfg):
-    """Next token prediction task."""
+class NextVectorPrediction(TaskCfg):
+    """Predict whole feature-vectors in sequence."""
+
+    @staticmethod
+    def already_batched() -> bool:
+        return False
 
     sequence_length: int
     """
@@ -23,12 +29,10 @@ class NextTokenPrediction(TaskCfg):
     'relative_only' is used.
     """
 
-    batch = False
-
     relative_only: bool = False
     """
     If True, the model will only be able to predict
-    the next token using the relative position of
+    the next output using the relative position of
     the context. This is useful for very long
     sequences, and means the model will generalize
     any length of sequence.
@@ -37,6 +41,10 @@ class NextTokenPrediction(TaskCfg):
 @dataclass
 class MaskedSequenceModeling(TaskCfg):
     """Fill-in-the-gaps task."""
+
+    @staticmethod
+    def already_batched() -> bool:
+        return False
 
     sequence_length: int
     """
@@ -64,6 +72,10 @@ class MaskedSequenceModeling(TaskCfg):
 @dataclass
 class QueryPrediction(TaskCfg):
     """Predict new tokens at specified positions."""
+
+    @staticmethod
+    def already_batched() -> bool:
+        return False
 
     sequence_length: int
     """
@@ -100,10 +112,3 @@ class QueryPrediction(TaskCfg):
     sequences, and means the model will generalize
     any length of sequence.
     """
-
-
-TaskCfg = Union[
-    NextTokenPrediction,
-    MaskedSequenceModeling,
-    QueryPrediction,
-]

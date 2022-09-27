@@ -14,18 +14,19 @@ else:
 
 from ._layer_utils import input_dict, make_causal_mask, shape_list
 
-def codebook(num_tokens, num_dims, seq_dims=[]) -> Model:
+def codebook(n_tokens: int, embd_dim: int, seq_dims: list[tuple[str, int]]) -> Model:
 
-    embedder = layers.Embedding(num_tokens, num_dims, name="codebook")
+    embedder = layers.Embedding(n_tokens, embd_dim, name="codebook")
+    seq_shape = [d for _, d in seq_dims]
 
-    def call(inputs):
-        return embedder(inputs["token"])
+    def call(tokens):
+        return embedder(tokens)
 
     inputs = input_dict(
-        Input(shape=[*seq_dims], dtype=tf.int32, name="token"),
+        Input(shape=[*seq_shape], dtype=tf.int32, name="tokens"),
     )
     
-    return Model(inputs=inputs, outputs=call(inputs), name="embd")
+    return Model(inputs=inputs, outputs=call(**inputs), name="embd")
 
 def positional_embedding(seq_len, embd_dim) -> Model:
     assert embd_dim % 2 == 0, f"embd_dim must be divisible by 2 to use positional encoding, got embd_dim={embd_dim}"

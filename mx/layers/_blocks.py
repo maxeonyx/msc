@@ -15,23 +15,21 @@ else:
 from tensorflow_probability import distributions as tfd
 
 from ._layer_utils import input_dict, make_causal_mask, shape_list
-from mx.utils import Einshape, Einsor
+from mx.utils import Einshape
 
-def mein_mix(in_shape: Einshape, out_shape: dict[str, int], regularizer, name="mix") -> Model:
+def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer, name="mix") -> Model:
     """
-    Hacky keras-specfic impl of EinMix
+    A dense layer across the feature dimensions.
     """
 
-    in_shape_pattern = " ".join(in_shape.keys())
-    out_shape_pattern = " ".join(out_shape.keys())
+    in_dims = [shape for _, shape in in_dims]
+    out_dims = [shape for _, shape in out_dims]
 
-    out_shape_len = functools.reduce(lambda x, y: x * y, out_shape.values())
-
-    in_rearrange = f"... {in_shape_pattern} -> ... ({in_shape_pattern})"
-    out_rearrange = f"... ({out_shape_pattern}) -> ... {out_shape_pattern}"
+    in_rearrange = f"... {in_dims.f_str} -> ... ({in_dims.f_str})"
+    out_rearrange = f"... ({out_dims.f_str}) -> ... {out_dims.f_str}"
 
     dense = layers.Dense(
-        out_shape_len,
+        out_dims.f_product,
         use_bias=False,
         name=name,
         kernel_regularizer=regularizer,
@@ -39,16 +37,16 @@ def mein_mix(in_shape: Einshape, out_shape: dict[str, int], regularizer, name="m
 
     def call(embd):
 
-        embd = ein.rearrange(embd, in_rearrange, **in_shape)
+        embd = ein.rearrange(embd, in_rearrange, **in_dims.f)
 
         embd = dense(embd)
 
-        embd = ein.rearrange(embd, out_rearrange, **out_shape)
+        embd = ein.rearrange(embd, out_rearrange, **out_dims.f)
 
         return embd
 
     inputs = input_dict(
-        Input(shape=in_shape.values(), name="embd"),
+        Input(shape=in_dims.s_f_shape, name="embd"),
     )
     
     return Model(inputs=inputs, outputs=call(inputs), name=name)
@@ -71,7 +69,7 @@ def mlp(embd_dim, hidden_units, dropout=0.1, name="mlp") -> Model:
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 
-def mha(n_heads=8, weight_type: Literal["scale", "softmax"] = "softmax", seq_dim=None, embd_dim=None, self_attn=True, rel_idxs=None, causal_mask=True, name="scale_mha") -> Model:
+def mha(n_heads=8, weight_type: Literal["scale", "softmax"] = "softmax", seq_dim: int = None, embd_dim:int=None, self_attn=True, rel_idxs:None|True|int=None, causal_mask=True, return_attn_weights=False, name="scale_mha") -> Model:
 
     q_proj = layers.Dense(embd_dim, use_bias=False, name=f"{name}/q_proj")
     k_proj = layers.Dense(embd_dim, use_bias=False, name=f"{name}/k_proj")
@@ -123,10 +121,10 @@ def mha(n_heads=8, weight_type: Literal["scale", "softmax"] = "softmax", seq_dim
         
         attn = tf.einsum("b h m n, b h n d -> b h m d", attn_weights, v)
 
-        return Einsor(
-            attn,
-            attn_logits=attn_logits,
-        )
+        if return_attn_weights:
+            return attn, attn_weights
+        
+        return attn
     
     if self_attn:
         embd_inputs = [

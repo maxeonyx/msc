@@ -1,10 +1,8 @@
 from dataclasses import dataclass
 from typing import Literal, Set, Union
 
-import enlighten
-from box import Box as box
-
-from mx import utils, tasks, datasets as ds
+from mx import utils, datasets as ds
+from mx.datasets import tasks
 from ._metrics import *
 
 @dataclass(frozen=True)

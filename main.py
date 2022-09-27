@@ -8,15 +8,24 @@ else:
     from tensorflow import keras
     from tensorflow.keras import Input, Model, layers
 
-from mx import bvh, train, layers, utils
-from mx.utils import Einshape
+from mx import bvh, datasets, train, layers, utils
 
-print(bvh.DEFAULT_BVH_DIR)
-print(bvh.DEFAULT_OUTPUT_BVH_DIR)
+
+seq_len = 32
+
+dataset, shapes = datasets.init_dataset_and_task(
+    datasets.bvh.BvhAllColumns(
+        recluster=True,
+        decimate=0.5,
+    ),
+    datasets.tasks.NextVectorPrediction(
+        batch=8,
+        sequence_length=seq_len,
+    ),
+)
 
 n_layers = 5
 embd_dim = 256
-seq_len = 128
 
 blocks = [
     l for i in range(n_layers)
@@ -46,12 +55,14 @@ backbone = layers.residual(
 embedding = layers.codebook(
     num_tokens=512,
     embd_dim=embd_dim,
-    seq_dim=[seq_len],
+    seq_dims=[seq_len],
     name="codebook"
 )
 
 head = layers.circular_mse(
-    embd_shape=Einshape(sequence_dims={"frames": seq_len}, embd_dims={"embd": embd_dim}),
+    in_dims=shapes["inputs"]["input"].with_feature_dims({ "embd": embd_dim }),
 )
 
 inp = Input(shape=[seq_len, 3], name="inp")
+
+model = Model(inputs=inp, outputs=head(backbone(embedding(inp))), name="model")

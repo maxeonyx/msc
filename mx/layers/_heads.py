@@ -9,7 +9,7 @@ from tensorflow_probability import distributions as tfd
 import typing
 
 from ._layer_utils import input_dict
-from mx.layers import mein_mix
+from mx.layers import featurewise_dense
 from mx.utils import Einshape
 
 if typing.TYPE_CHECKING:
@@ -42,14 +42,16 @@ class PredictionHead(tf.Module):
     """
 
 
-def mse(out_shape: Einshape, name="mse") -> PredictionHead:
+def mse(in_dims: Einshape, name="mse") -> PredictionHead:
+
+    out_dims = in_dims
     
     def loss_fn_call(y_true, output):
         return tf.reduce_mean(tf.square(y_true - output))
     
     loss_fn_inputs = input_dict(
-        Input(shape=out_shape.shape, name="y_true"),
-        Input(shape=out_shape.shape, name="output"),
+        Input(shape=out_dims.s_f_shape, name="y_true"),
+        Input(shape=out_dims.s_f_shape, name="output"),
     )
     loss_fn = Model(
         inputs=loss_fn_inputs,
@@ -65,19 +67,20 @@ def mse(out_shape: Einshape, name="mse") -> PredictionHead:
     )
 
 
-def circular_mse(embd_shape: Einshape, name="mse") -> PredictionHead:
+def circular_mse(in_dims: Einshape, name="mse") -> PredictionHead:
     """
-    Circular mean squared error.
-    Loss function takes y_true as angles in radians, and y_pred as unit vectors.
+    Circular mean squared error. Takes y_true as angles in radians, and y_pred as unit vectors.
     """
 
-    final_layer_call = mein_mix(
-        in_shape=embd_shape,
-        out_shape=[*embd_shape.s_shape, 2],
+    out_dims = in_dims.with_feature_dims({ "sincos": 2 })
+
+    final_layer_call = featurewise_dense(
+        in_dims=in_dims,
+        out_dims=out_dims,
         name="final_layer",
     )
     final_layer_inputs = input_dict(
-        Input(shape=embd_shape.shape, name="embd"),
+        Input(shape=in_dims.s_f_shape, name="embd"),
     )
     final_layer = Model(
         inputs=final_layer_inputs,
@@ -91,8 +94,8 @@ def circular_mse(embd_shape: Einshape, name="mse") -> PredictionHead:
         return tf.reduce_mean(tf.square(tf.math.sin(y_true) - y) + tf.square(tf.math.cos(y_true) - x))
 
     loss_fn_inputs = input_dict(
-        Input(shape=embd_shape.s_shape, name="y_true"),
-        Input(shape=[*embd_shape.s_shape, 2], name="unit_vectors"),
+        Input(shape=in_dims.s_f_shape, name="y_true"),
+        Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
     loss_fn = Model(
         inputs=loss_fn_inputs,
@@ -101,7 +104,7 @@ def circular_mse(embd_shape: Einshape, name="mse") -> PredictionHead:
     )
 
     unit_vectors = input_dict(
-        Input(shape=[*embd_shape.s_shape, 2], name="unit_vectors"),
+        Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
     def angles_call(unit_vectors):
         x = unit_vectors[..., 0]
@@ -109,7 +112,7 @@ def circular_mse(embd_shape: Einshape, name="mse") -> PredictionHead:
         return tf.math.atan2(y, x)
     
     output_fns = {
-        "angles": Model(
+        "Angle": Model(
             inputs=unit_vectors,
             outputs=angles_call(unit_vectors),
             name="angles",
@@ -123,15 +126,17 @@ def circular_mse(embd_shape: Einshape, name="mse") -> PredictionHead:
         name=name,
     )
 
-def categorical(embd_shape: Einshape, out_shape: Einshape, name="categorical") -> PredictionHead:
+def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> PredictionHead:
 
-    final_layer_call = mein_mix(
-        in_shape=embd_shape.s_f_shape,
-        out_shape=out_shape.s_f_shape,
+    out_dims = in_dims.with_feature_dims({ "c": num_categories })
+
+    final_layer_call = featurewise_dense(
+        in_dims=in_dims,
+        out_dims=out_dims,
         name="logits",
     )
     final_layer_inputs = input_dict(
-        Input(shape=embd_shape.s_f_shape, name="embd"),
+        Input(shape=in_dims.s_f_shape, name="embd"),
     )
     final_layer = Model(
         inputs=final_layer_inputs,
@@ -147,8 +152,8 @@ def categorical(embd_shape: Einshape, out_shape: Einshape, name="categorical") -
         return -tf.reduce_mean(d.log_prob(y_true))
     
     loss_fn_inputs = input_dict(
-        Input(shape=out_shape.s_f_shape, name="y_true"),
-        Input(shape=out_shape.s_f_shape, name="logits"),
+        Input(shape=out_dims.s_f_shape, name="y_true"),
+        Input(shape=out_dims.s_f_shape, name="logits"),
     )
     loss_fn = Model(
         inputs=loss_fn_inputs,
@@ -166,21 +171,21 @@ def categorical(embd_shape: Einshape, out_shape: Einshape, name="categorical") -
         return dist(logits).entropy()
 
     logits = input_dict(
-        Input(shape=out_shape.s_f_shape, name="logits"),
+        Input(shape=out_dims.s_f_shape, name="logits"),
     )
     
     output_fns = {
-        "mode": Model(
+        "Mode": Model(
             inputs=logits,
             outputs=mode_call(logits),
             name="mode",
         ),
-        "sample": Model(
+        "Sample": Model(
             inputs=logits,
             outputs=sample_call(logits),
             name="sample",
         ),
-        "entropy": Model(
+        "Entropy": Model(
             inputs=logits,
             outputs=entropy_call(logits),
             name="entropy",
