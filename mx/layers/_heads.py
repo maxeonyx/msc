@@ -9,7 +9,8 @@ from tensorflow_probability import distributions as tfd
 import typing
 
 from ._layer_utils import input_dict
-from mx.layers import featurewise_dense
+from ._blocks import featurewise_dense
+from mx import layers
 from mx.utils import Einshape
 
 if typing.TYPE_CHECKING:
@@ -67,20 +68,20 @@ def mse(in_dims: Einshape, name="mse") -> PredictionHead:
     )
 
 
-def circular_mse(in_dims: Einshape, name="mse") -> PredictionHead:
+def circular_mse(embd_dims: Einshape, name="mse") -> PredictionHead:
     """
     Circular mean squared error. Takes y_true as angles in radians, and y_pred as unit vectors.
     """
-
-    out_dims = in_dims.with_feature_dims({ "sincos": 2 })
+    target_dims = embd_dims.with_feature_dims({})
+    out_dims = embd_dims.with_feature_dims({ "sincos": 2 })
 
     final_layer_call = featurewise_dense(
-        in_dims=in_dims,
+        in_dims=embd_dims,
         out_dims=out_dims,
         name="final_layer",
     )
     final_layer_inputs = input_dict(
-        Input(shape=in_dims.s_f_shape, name="embd"),
+        Input(shape=embd_dims.s_f_shape, name="embd"),
     )
     final_layer = Model(
         inputs=final_layer_inputs,
@@ -94,12 +95,12 @@ def circular_mse(in_dims: Einshape, name="mse") -> PredictionHead:
         return tf.reduce_mean(tf.square(tf.math.sin(y_true) - y) + tf.square(tf.math.cos(y_true) - x))
 
     loss_fn_inputs = input_dict(
-        Input(shape=in_dims.s_f_shape, name="y_true"),
+        Input(shape=target_dims.s_f_shape, name="y_true"),
         Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
     loss_fn = Model(
         inputs=loss_fn_inputs,
-        outputs=loss_fn_call(loss_fn_inputs),
+        outputs=loss_fn_call(**loss_fn_inputs),
         name="loss",
     )
 
@@ -114,7 +115,7 @@ def circular_mse(in_dims: Einshape, name="mse") -> PredictionHead:
     output_fns = {
         "Angle": Model(
             inputs=unit_vectors,
-            outputs=angles_call(unit_vectors),
+            outputs=angles_call(**unit_vectors),
             name="angles",
         ),
     }
@@ -123,7 +124,6 @@ def circular_mse(in_dims: Einshape, name="mse") -> PredictionHead:
         final_layer=final_layer,
         loss_fn=loss_fn,
         output_fns=output_fns,
-        name=name,
     )
 
 def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> PredictionHead:

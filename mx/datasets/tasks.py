@@ -112,3 +112,17 @@ class QueryPrediction(TaskCfg):
     sequences, and means the model will generalize
     any length of sequence.
     """
+
+
+@dataclass(frozen=True)
+class TrainingCfg:
+    """
+    Config for the training process.
+    """
+    batch_size: int = 32
+    n_steps: int = 5000
+    n_steps_per_epoch: int = 500
+    fused_steps: int = 1
+
+    max_test_steps: int = 100
+    test_batch_size: int = 32

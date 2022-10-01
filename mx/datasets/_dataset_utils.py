@@ -1,8 +1,11 @@
 from dataclasses import dataclass
 import abc
+from typing import TypedDict
 from typing_extensions import Self
 
 import tensorflow as tf
+
+from mx.utils import Einshape
 
 @dataclass
 class BaseDatasetConfig(abc.ABC):
@@ -12,6 +15,17 @@ class BaseDatasetConfig(abc.ABC):
     pretty_name: str
     code_name: str
 
+@dataclass
+class DatasetShape:
+    inputs: dict[str, Einshape]
+    targets: dict[str, Einshape]
+    extra: dict[str, Einshape]
+
+@dataclass
+class DataPipelineShape:
+    train: DatasetShape
+    test: DatasetShape
+    val: DatasetShape
 
 @dataclass
 class DSet:

@@ -10,9 +10,10 @@ else:
     from tensorflow import keras
     from tensorflow.keras import Input, Model, layers
 
-from ._layer_utils import input_dict, make_causal_mask, shape_list
+from ._layer_utils import input_dict, make_causal_mask, MxLayer
+from mx.utils import Einshape
     
-def residual(embd_dim, n_layers: int=None, make_layer: Callable[[int], tf.Module]=None, layers: list[tf.Module]=None, seq_dims=[], normalization='scale', dropout=0.1, name="residual") -> Model:
+def residual(embd_shape: Einshape, n_layers: int=None, make_layer: Callable[[int], MxLayer]=None, layers: list[MxLayer]=None, normalization='scale', dropout=0.1, name="residual") -> Model:
 
     making_layers = n_layers is not None and make_layer is not None
     using_layers = layers is not None
@@ -23,14 +24,13 @@ def residual(embd_dim, n_layers: int=None, make_layer: Callable[[int], tf.Module
     if making_layers:
         layers = [make_layer(i) for i in range(n_layers)]
 
-    def call(inputs):
-        embd = inputs["embd"]
+    def call(embd):
         for layer in layers:
             embd += layer(embd)
         return embd
 
     inputs = input_dict(
-        Input(shape=[*seq_dims, embd_dim], name="embd")
+        Input(shape=embd_shape.s_f_shape, name="embd")
     )
 
-    return Model(inputs=inputs, outputs=call(inputs), name=name)
+    return Model(inputs=inputs, outputs=call(**inputs), name=name)

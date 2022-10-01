@@ -1,68 +1,134 @@
-import tensorflow_datasets as tfds
-import tensorflow as tf
-import typing
-if typing.TYPE_CHECKING:
-    import keras.api._v2.keras as keras
-    from keras.api._v2.keras import Model, Input, layers
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
+import os
 
-from mx import bvh, datasets, train, layers, utils
+from mx.datasets import tasks
+try:
+    run_name = os.environ["RUN_NAME"]
+except KeyError:
+    import randomname
+    run_name = randomname.get_name()
+    os.environ["RUN_NAME"] = run_name
+
+from mx import progress
+with progress.create_progress_manager(run_name) as pm:
+
+    
+
+    with pm.enter_spinner("Init Tensorflow", "Initializing Tensorflow..."):
+        from mx.utils.tf import *
+        from mx import datasets, layers, train
+
+    with pm.enter_spinner("Init Dataset", "Initializing dataset and task..."):
+        seq_len = 32
+        dataset_config = datasets.bvh.BvhAllColumns(
+            recluster=True,
+            decimate=0.5,
+        )
+        task_config = datasets.tasks.NextVectorPrediction(
+            sequence_length=seq_len,
+        )
+        train_cfg = tasks.TrainingCfg(
+            batch_size=64,
+            n_steps=5000,
+            n_steps_per_epoch=500,
+        )
+        dataset, shapes = datasets.init_data_pipeline(dataset_config, task_config, train_cfg)
+        inp_shape = shapes.train.inputs["input"]
+        inp_idxs_shape = shapes.train.inputs["input_idxs"]
+        tar_idxs_shape = shapes.train.inputs["target_idxs"]
 
 
-seq_len = 32
+    with pm.enter_spinner("Init Model", "Creating the model..."):
+        n_layers = 5
+        embd_dim = 256
 
-dataset, shapes = datasets.init_dataset_and_task(
-    datasets.bvh.BvhAllColumns(
-        recluster=True,
-        decimate=0.5,
-    ),
-    datasets.tasks.NextVectorPrediction(
-        batch=8,
-        sequence_length=seq_len,
-    ),
-)
+        inp_embd_shape = inp_shape.with_feature_dims({ "embd": embd_dim })
+        inp_embedding = layers.angle_embedding(
+            num_repeats=5,
+            input_shape=inp_shape,
+            embd_shape=inp_embd_shape,
+            name="inp_embd",
+        )
+        inp_idx_embedding = layers.codebook(
+            n_tokens=512,
+            embd_shape=inp_embd_shape,
+            add_begin_token=True,
+            name="inp_idx_embd"
+        )
+        prepend_begin_token = layers.prepend_begin_token(
+            input_shape=inp_embd_shape,
+            name="prepend_begin_token",
+        )
+        tar_idx_embedding = layers.codebook(
+            n_tokens=512,
+            embd_shape=tar_idxs_shape.with_feature_dims({ "embd": embd_dim }),
+            add_begin_token=False,
+            name="tar_idx_embd"
+        )
 
-n_layers = 5
-embd_dim = 256
+        embd_shape = (
+            inp_shape
+            .with_sequence_dims({ "seq": seq_len })
+            .with_feature_dims({ "embd": embd_dim })
+        )
 
-blocks = [
-    l for i in range(n_layers)
-    for l in [
-        layers.mha(
-            n_heads=8,
-            weight_type="softmax",
-            seq_dim=seq_len,
-            embd_dim=embd_dim,
-            name=f"mha_{i}"
-        ),
-        layers.mlp(
-            embd_dim=embd_dim,
-            hidden_units=4096,
-            name=f"mlp_{i}"
-        ),
-    ]
-]
+        blocks = [
+            l for i in range(n_layers)
+            for l in [
+                layers.mha(
+                    embd_shape=embd_shape,
+                    n_heads=8,
+                    name=f"mha_{i}"
+                ),
+                layers.featurewise_dense_block(
+                    hidden_size=1024,
+                    in_dims=embd_shape,
+                    out_dims=embd_shape,
+                    name=f"mlp_{i}"
+                ),
+            ]
+        ]
+        
+        backbone = layers.residual(
+            embd_shape=embd_shape,
+            layers=blocks,
+            name="backbone"
+        )
 
-backbone = layers.residual(
-    embd_dim=embd_dim,
-    layers=blocks,
-    seq_dims=[seq_len],
-    name="backbone"
-)
+        head = layers.circular_mse(
+            embd_dims=embd_shape,
+        )
 
-embedding = layers.codebook(
-    num_tokens=512,
-    embd_dim=embd_dim,
-    seq_dims=[seq_len],
-    name="codebook"
-)
+        def call(input, input_idxs, target_idxs):
+            input_embd = inp_embedding(input)
+            input_idxs_embd = inp_idx_embedding(input_idxs)
+            print("SHAPES", input_embd.shape, input_idxs_embd.shape)
+            input_embd = input_embd + input_idxs_embd
+            print("SHAPES1", input_embd.shape)
+            input_embd = prepend_begin_token(input_embd)
+            print("SHAPES2", input_embd.shape)
+            target_idxs_embd = tar_idx_embedding(target_idxs)
+            embd = input_embd + target_idxs_embd
+            embd = backbone(embd)
+            return head.final_layer(embd)
 
-head = layers.circular_mse(
-    in_dims=shapes["inputs"]["input"].with_feature_dims({ "embd": embd_dim }),
-)
+        inputs = layers.input_dict(
+            Input(shape=inp_shape.s_f_shape, name="input"),
+            Input(shape=inp_idxs_shape.s_f_shape, name="input_idxs"),
+            Input(shape=tar_idxs_shape.s_f_shape, name="target_idxs"),
+        )
 
-inp = Input(shape=[seq_len, 3], name="inp")
+        print(inputs)
+        
+        model = Model(inputs=inputs, outputs=call(**inputs), name="model")
 
-model = Model(inputs=inp, outputs=head(backbone(embedding(inp))), name="model")
+    with pm.enter_spinner("Init Train Loop", "Building the training loop..."):
+        train_loop = train.make_train_loop(
+            train_cfg=train.TrainLoopCfg(),
+            task_cfg=task_config,
+            run_name=None, # random
+            task=dataset,
+            loss_fn=head.loss_fn,
+            model=model,
+        )
+
+    train_loop(pm)

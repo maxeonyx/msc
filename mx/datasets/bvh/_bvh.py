@@ -1,5 +1,6 @@
 
 import os
+import pathlib
 import re
 import sys
 import pickle
@@ -248,7 +249,7 @@ def get_bvh_data(columns, bvh_dir=None, convert_deg_to_rad=True):
 
         yield name, data, data.shape[0]
 
-def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None):
+def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None) -> tuple[list[str], list[np.ndarray], list[int]]:
     """
     Get a numpy dataset of all the BVH data in the manipnet dataset.
 
@@ -286,6 +287,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None
         angles.append(a)
         n_frames.append(n)
 
+    pathlib.Path(ds_path).parent.mkdir(parents=True, exist_ok=True)
     with open(ds_path, "wb") as f:
         pickle.dump((filenames, angles, n_frames), f)
 

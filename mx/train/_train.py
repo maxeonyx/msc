@@ -1,22 +1,16 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Set, Union
 
 from mx import utils, datasets as ds
 from mx.datasets import tasks
+from mx.progress import Progress
 from ._metrics import *
 
 @dataclass(frozen=True)
-class TrainCfg:
+class TrainLoopCfg:
     """
     Config for the training loop.
     """
-    batch_size: int = 32
-    n_steps: int = 5000
-    steps_per_epoch: int = 500
-    fused_steps: int = 1
-
-    max_test_steps: int = 100
-    test_batch_size: int = 32
 
     optimizer: Literal["adam", "sgd"] = "adam"
 
@@ -24,16 +18,6 @@ class TrainCfg:
     log_interval: Union[int, Literal["epoch"], Literal["never"]] = "10"
     log_type: Set[Literal["tensorboard", "wandb"]] = frozenset({"tensorboard"})
 
-    metrics: Set[MetricCfg] = frozenset({
-        RollingAvgMetricCfg(type="loss", n_steps=100, reset_every_epoch=False),
-        InstantaneousMetricCfg(type="total_epoch_time"),
-        RollingAvgMetricCfg(type="step_time", n_steps=10),
-    })
-    eval_metrics: Set[MetricCfg] = frozenset({
-        RunningAvgMetricCfg(type="loss"),
-        InstantaneousMetricCfg(type="total_epoch_time"),
-        RollingAvgMetricCfg(type="step_time", n_steps=10),
-    })
 
 def default_train_step(model: Model, optimizer: keras.optimizers.Optimizer, inputs: dict[str, TensorLike], targets: TensorLike, loss: Callable) -> tuple[TensorLike, TensorLike]:
     """
@@ -47,7 +31,7 @@ def default_train_step(model: Model, optimizer: keras.optimizers.Optimizer, inpu
     optimizer.apply_gradients(zip(grads, model.trainable_weights))
     return outputs, loss
 
-def train_step_wrapper(model: Model, optimizer: tf.keras.optimizers.Optimizer, data: tf.data.Dataset, loss: Callable, metrics: Set[MyMetric], train_step: Callable):
+def train_step_wrapper(model: Model, optimizer: tf.keras.optimizers.Optimizer, data: tf.data.Dataset, loss: Callable, metrics: Set[MxMetric], train_step: Callable):
     """
     Wraps a training step function.
     
@@ -60,14 +44,34 @@ def train_step_wrapper(model: Model, optimizer: tf.keras.optimizers.Optimizer, d
         outputs_batch, loss = train_step(model, inputs_batch, targets_batch, loss)
 
         for metric in metrics:
-            metric(i_step, inputs_batch | targets_batch | outputs_batch | { "loss": loss })
+            metric.__call__(i_step, inputs_batch | targets_batch | outputs_batch | { "loss": loss })
 
+def default_metrics(loss_fn) -> list[MxMetric]:
+    """
+    Default metrics.
+    """
+    return (
+        [
+            TimeSinceLastCall(name="step_time"),
+            RunningMean(TimeSinceLastCall(name="epoch_time", reset_every_epoch=False)),
+            RunningMean(fn=loss_fn, unit=None, name="loss_epoch"),
+            InstantaneousMetric(fn=loss_fn, unit=None, name="loss"),
+            Rolling(length=100, fn=loss_fn, unit=None, name="loss_100"),
+            Rolling(length=1000, fn=loss_fn, unit=None, name="loss_1000"),
+        ],
+        [
+            TimeSinceLastCall(name="eval_step_time"),
+            RunningMean(fn=loss_fn, unit=None, name="eval_loss_epoch"),
+            InstantaneousMetric(fn=loss_fn, unit=None, name="eval_loss"),
+            Rolling(length=100, fn=loss_fn, unit=None, name="eval_loss_100"),
+            Rolling(length=1000, fn=loss_fn, unit=None, name="eval_loss_1000"),
+        ],
+    )
 
-def make_train_loop(train_cfg: TrainCfg, task_cfg: tasks.TaskCfg, run_name: str, task: ds.DSet, loss_fn: Callable, model: Model, train_step: Callable = default_train_step):
+def make_train_loop(train_cfg: TrainLoopCfg, task_cfg: tasks.TaskCfg, run_name: str, task: ds.DSet, loss_fn: Callable, model: Model, metrics: Union[Literal["default"], tuple[list[MxMetric], list[MxMetric]], tuple[Literal["default plus"], list[MxMetric], list[MxMetric]]] = "default", train_step: Callable = default_train_step):
     """
     Make the training loop.
     """
-    ds_test, ds_val, ds_train = task.destructure()
 
     # make optimizer
     if train_cfg.optimizer == "adam":
@@ -77,40 +81,33 @@ def make_train_loop(train_cfg: TrainCfg, task_cfg: tasks.TaskCfg, run_name: str,
     else:
         raise ValueError(f"Unknown optimizer: {train_cfg.optimizer}")
     
-    # make metrics
-    metrics = set()
-    for metric_cfg in train_cfg.metrics:
-        m = make_metric(metric_cfg, loss_fn=loss_fn)
-        metrics.add(m)
-    
-    # make eval metrics
-    eval_metrics = set()
-    for metric_cfg in train_cfg.eval_metrics:
-        m = make_metric(metric_cfg, loss_fn=loss_fn)
-        eval_metrics.add(m)
+    if metrics == "default":
+        metrics = default_metrics(loss_fn)
+    elif isinstance(metrics, tuple) and len(metrics) == 3 and metrics[0] == "default plus":
+        def_metrics, def_eval_metrics = default_metrics(loss_fn)
+        metrics = (
+            def_metrics + metrics[1],
+            def_eval_metrics + metrics[2],
+        )
+    elif isinstance(metrics, tuple) and len(metrics) == 2:
+        pass # metrics is already a tuple of metrics
+    else:
+        raise ValueError(f"metrics must be a tuple of train metrics and eval metrics")
 
-    if not task_cfg.batch:
-        ds_train = ds_train.batch(train_cfg.batch_size)
-        ds_val = ds_val.batch(train_cfg.test_batch_size)
-        ds_test = ds_test.batch(train_cfg.test_batch_size)
-    ds_train = ds_train.take(train_cfg.n_steps).enumerate()
-    ds_train = ds_train.window(train_cfg.fused_steps)
-    ds_train = ds_train.window(train_cfg.steps_per_epoch//train_cfg.fused_steps)
-    ds_train = ds_train.prefetch(tf.data.experimental.AUTOTUNE)
+    ds_test, ds_val, ds_train = task.destructure()
+    n_epochs = ds_train.cardinality()
 
-    n_epochs = train_cfg.n_steps // train_cfg.steps_per_epoch
+    def train_loop(prog: Progress):
 
-    # need import here because of circular imports
-    from ._prog import ProgressManager
-
-    def train_loop(prog: ProgressManager):
-
-        with prog.enter_training(n_epochs, metrics) as train_prog_bar:
+        with prog.enter_training(n_epochs, metrics[0]) as train_prog_bar:
             for i_epoch, epoch in enumerate(train_prog_bar(ds_train)):
-                with prog.enter_counter("Epoch", total=train_cfg.steps_per_epoch) as epoch_prog_bar:
-                    for i_step, data in epoch_prog_bar(epoch):
+                epoch_steps = epoch.cardinality()
+                with prog.enter_counter("Epoch", total=epoch_steps) as epoch_prog_bar:
+                    for i_fusedstep, data in epoch_prog_bar(epoch):
 
-                        if i_step == 0:
+                        data = data.map(lambda x: (x["inputs"], x["targets"]))
+
+                        if i_fusedstep == 0:
                             with prog.enter_spinner("Compiling train loop"):
                                 train_step = tf.function(train_step_wrapper)
                                 train_step(model, optimizer, data, loss_fn, metrics, train_step)

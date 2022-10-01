@@ -1,27 +1,16 @@
 import functools
-from math import pi, tau
-from typing import Literal
+from typing import Literal, Union
 from typing_extensions import Self
 
-import tensorflow as tf
-import typing
-if typing.TYPE_CHECKING:
-    import keras.api._v2.keras as keras
-    from keras.api._v2.keras import Model, Input, layers
-    from keras.api._v2.keras.backend import is_keras_tensor
-    from tensorflow.python.types.core import TensorLike
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
-    from tensorflow.keras.backend import is_keras_tensor
-    from tensorflow.types.experimental import TensorLike
+from .tf import *
+
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake
 
 class Einshape:
 
-    def __init__(self, batch_dims: dict[str, int | None], sequence_dims: dict[str, int | None | Literal["ragged"]], feature_dims: dict[str, int | None]):
+    def __init__(self, batch_dims: dict[str, int | None] = {}, sequence_dims: dict[str, int | None | Literal["ragged"]] = {}, feature_dims: dict[str, int | None] = {}):
         self._b = batch_dims
         self._s = {
             k: None if v == "ragged" else v
@@ -64,6 +53,7 @@ class Einshape:
         """Return the shape of the tensor as a list of integers or None."""
         return [*self._b.values(), *self._s.values(), *self._f.values()]
 
+    @property
     def b_s_shape(self) -> list[int | None]:
         """Shape of the batch and sequence dimensions."""
         return [*self._b.values(), *self._s.values()]
@@ -128,12 +118,12 @@ class Einshape:
         """Return the total length of the tensor (product of all dimensions)."""
         return Einshape._product(self.shape)
 
-    def cut(self, new_seq_dims: list[int | None]) -> Self:
+    def cut(self, new_seq_dims: list[int]) -> Self:
         """Cut the sequence dimensions to the given lengths. New sequence dimensions must be shorter than the old ones."""
 
         assert len(new_seq_dims) == self.s_rank, f"Expected {self.s_rank} sequence dimensions, got {len(new_seq_dims)}."
-        assert all(dim is None or dim > 0 for dim in new_seq_dims), "Sequence dimensions must be positive integers."
-        assert all(dim is None or dim <= old_dim for dim, old_dim in zip(new_seq_dims, self.s_shape)), "New sequence dimensions must be smaller than old sequence dimensions."
+        assert all(dim > 0 for dim in new_seq_dims), "Sequence dimensions must be positive integers."
+        assert all(old_dim is None or dim <= old_dim for dim, old_dim in zip(new_seq_dims, self.s_shape)), "New sequence dimensions must be smaller than old sequence dimensions."
 
         return Einshape(
             batch_dims = self._b,
@@ -152,6 +142,13 @@ class Einshape:
             sequence_dims = self._s,
             feature_dims = { k: dim for k, dim in zip(self._f.keys(), new_feature_dims) },
         )
+    
+    def batch(self, new_batch_dim: int, name="b") -> Self:
+        """Prepends a new batch dimension to the tensor."""
+
+        assert isinstance(new_batch_dim, int) and new_batch_dim > 0, "Batch dimension must be a positive integer."
+
+        return self.with_batch_dims({ name: new_batch_dim, **self.b, })
 
     def f_indices(self, flatten=True, elide_rank_1=True):
         """
@@ -251,29 +248,46 @@ class Einshape:
 
 def multidim_indices(shape, flatten=True, elide_rank_1=True):
     """
-    Uses tf.meshgrid to get the indices for a tensor of any rank
-    Returns an int32 tensor of shape [ product(shape), rank ]
+    Uses tf.meshgrid to get multidimensional indices in the given shape.
+    
+    If flatten=True (the default), the returned indices will
+    have shape [ product(shape), rank]. Otherwise, the
+    returned indices will have shape [ *shape, rank ].
+
+    If elide_rank_1=True (the default), when there is only a
+    single dimension, the returned indices will not have
+    an extra dimension. Otherwise, the returned indices will have
+    an extra dimension with size equal to the rank of the tensor.
     """
+
     if len(shape) == 0:
         raise ValueError("Shape must have at least one dimension.")
-    if len(shape) == 1:
-        if elide_rank_1:
-            return tf.range(shape[0], dtype=tf.int32)
+    if len(shape) == 1 and elide_rank_1:
+        return tf.range(shape[0], dtype=tf.int32)
 
-    indices = tf.meshgrid(*[tf.range(s) for s in shape])
+    indices = tf.meshgrid(*[tf.range(s) for s in shape], indexing="ij")
     indices = tf.stack(indices, axis=-1)
     if flatten:
         indices = tf.reshape(indices, [-1, len(shape)])
     return indices
 
 
-def multidim_indices_of(tensor, flatten=True):
+def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     """
-    Uses tf.meshgrid to get the indices for a tensor of any rank
-    Returns an int32 tensor of shape [ product(shape), rank ]
+    Uses tf.meshgrid to get multidimensional indices in the shape of the given tensor.
+
+    If flatten=True (the default), the returned indices will
+    have shape [ product(shape), rank]. Otherwise, the
+    returned indices will have shape [ *shape, rank ].
+
+    If elide_rank_1=True (the default), when there is only a
+    single dimension, the returned indices will not have
+    an extra dimension. Otherwise, the returned indices will have
+    an extra dimension with size equal to the rank of the tensor.
     """
-    shape = tf.shape(tensor)
-    return multidim_indices(shape, flatten=flatten)
+
+    shape = shape_list(tensor)
+    return multidim_indices(shape, flatten=flatten, elide_rank_1=elide_rank_1)
 
 
 def angle_wrap(angles):

@@ -17,16 +17,13 @@ from tensorflow_probability import distributions as tfd
 from ._layer_utils import input_dict, make_causal_mask, shape_list
 from mx.utils import Einshape
 
-def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer, name="mix") -> Model:
+def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer=None, name="mix") -> Model:
     """
     A dense layer across the feature dimensions.
     """
 
-    in_dims = [shape for _, shape in in_dims]
-    out_dims = [shape for _, shape in out_dims]
-
-    in_rearrange = f"... {in_dims.f_str} -> ... ({in_dims.f_str})"
-    out_rearrange = f"... ({out_dims.f_str}) -> ... {out_dims.f_str}"
+    in_rearrange = lambda t: ein.rearrange(t, f"... {in_dims.f_str} -> ... ({in_dims.f_str})", **in_dims.f)
+    out_rearrange = lambda t: ein.rearrange(t, f"... ({out_dims.f_str}) -> ... {out_dims.f_str}", **out_dims.f)
 
     dense = layers.Dense(
         out_dims.f_product,
@@ -37,11 +34,9 @@ def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer, name="
 
     def call(embd):
 
-        embd = ein.rearrange(embd, in_rearrange, **in_dims.f)
-
+        embd = in_rearrange(embd)
         embd = dense(embd)
-
-        embd = ein.rearrange(embd, out_rearrange, **out_dims.f)
+        embd = out_rearrange(embd)
 
         return embd
 
@@ -49,7 +44,32 @@ def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer, name="
         Input(shape=in_dims.s_f_shape, name="embd"),
     )
     
-    return Model(inputs=inputs, outputs=call(inputs), name=name)
+    return Model(inputs=inputs, outputs=call(**inputs), name=name)
+
+def featurewise_dense_block(hidden_size: int, in_dims: Einshape, out_dims: Einshape, regularizer=None, name="mix") -> Model:
+    """
+    Two dense layers with an activation in between, applied across all feature dimensions.
+    """
+
+    hidden_dims = in_dims.with_feature_dims({ "hidden": hidden_size })
+
+    in_layer = featurewise_dense(in_dims, hidden_dims, regularizer=regularizer, name=f"{name}/in")
+    activation = layers.ReLU(name=f"{name}/act")
+    out_layer = featurewise_dense(hidden_dims, out_dims, regularizer=regularizer, name=f"{name}/out")
+
+    def call(embd):
+
+        embd = in_layer(embd)
+        embd = activation(embd)
+        embd = out_layer(embd)
+
+        return embd
+
+    inputs = input_dict(
+        Input(shape=in_dims.s_f_shape, name="embd"),
+    )
+    
+    return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 
 def mlp(embd_dim, hidden_units, dropout=0.1, name="mlp") -> Model:
@@ -69,99 +89,114 @@ def mlp(embd_dim, hidden_units, dropout=0.1, name="mlp") -> Model:
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 
-def mha(n_heads=8, weight_type: Literal["scale", "softmax"] = "softmax", seq_dim: int = None, embd_dim:int=None, self_attn=True, rel_idxs:None|True|int=None, causal_mask=True, return_attn_weights=False, name="scale_mha") -> Model:
+def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, normalization_type: Literal["scale", "softmax"] = "softmax", type: Literal["self_attn", "cross_attn"] = "self_attn", rel_idxs: Union[Literal[None, True], int] = None, causal_mask=True, return_attn_weights=False, name="scale_mha") -> Model:
 
-    q_proj = layers.Dense(embd_dim, use_bias=False, name=f"{name}/q_proj")
-    k_proj = layers.Dense(embd_dim, use_bias=False, name=f"{name}/k_proj")
-    v_proj = layers.Dense(embd_dim, use_bias=False, name=f"{name}/v_proj")
+    q_proj = layers.Dense(embd_shape.f_product, use_bias=False, name=f"{name}/q_proj")
+    k_proj = layers.Dense(embd_shape.f_product, use_bias=False, name=f"{name}/k_proj")
+    v_proj = layers.Dense(embd_shape.f_product, use_bias=False, name=f"{name}/v_proj")
+
+    rearrange_embd_in = lambda t: ein.rearrange(t, f"... {embd_shape.s_str} {embd_shape.f_str} -> ... ({embd_shape.s_str}) ({embd_shape.f_str})", **embd_shape.f, **embd_shape.s)
+    rearrange_embd_out = lambda t: ein.rearrange(t, f"... ({embd_shape.s_str}) ({embd_shape.f_str}) -> ... {embd_shape.s_str} {embd_shape.f_str}", **embd_shape.f, **embd_shape.s)
+    if kv_embd_shape is not None:
+        rearrange_kv_embd_in = lambda t: ein.rearrange(t, f"... {kv_embd_shape.s_str} {kv_embd_shape.f_str} -> ... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str})", **kv_embd_shape.f, **kv_embd_shape.s)
+        rearrange_kv_embd_out = lambda t: ein.rearrange(t, f"... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str}) -> ... {kv_embd_shape.s_str} {kv_embd_shape.f_str}", **kv_embd_shape.f, **kv_embd_shape.s)
 
     def call(**inputs):
 
-        if self_attn:
-            q = inputs["qk"]
-            k = inputs["qk"]
+        if type == "self_attn":
+            embd = rearrange_embd_in(inputs["embd"])
+            q, k, v = q_proj(embd), k_proj(embd), v_proj(embd)
         else:
-            q = inputs["q"]
-            k = inputs["k"]
-        
-        v = inputs["v"]
-
-        q = q_proj(q)
-        k = k_proj(k)
-        v = v_proj(v)
+            q_embd = rearrange_embd_in(inputs["q_embd"])
+            kv_embd = rearrange_kv_embd_in(inputs["kv_embd"])
+            q, k, v = q_proj(q_embd), k_proj(kv_embd), v_proj(kv_embd)
 
         q = ein.rearrange(q, "b m (h d) -> b h m d", h=n_heads)
         k = ein.rearrange(k, "b n (h d) -> b h n d", h=n_heads)
-        v = ein.repeat(v, "b n d -> b h n d", h=n_heads)
+        v = ein.rearrange(v, "b n (h d) -> b h n d", h=n_heads)
 
-        # we assume that the query and key vectors are already scaled by 1/sqrt(d)
-        # and that their 2-norm is approximately 1. Therefore, their
-        # dot product is approximately the cosine similarity between the two vectors.
-        # which is in the range [-1, 1].
         attn_logits = tf.einsum("b h m d, b h n d -> b h m n", q, k)
 
-        if weight_type == "softmax":
+        if causal_mask:
+            if type == "self_attn":
+                mask, mask_scales = make_causal_mask(embd_shape.s_product)
+            else: # cross_attn
+                mask, mask_scales = make_causal_mask(embd_shape.s_product, kv_embd_shape.s_product)
+
+        if normalization_type == "softmax":
+            
+            # scale to unit vectors
+            e = tf.cast(embd_shape.f_product, tf.float32)
+            attn_logits = attn_logits * 1./tf.sqrt(e)
+            
             if causal_mask:
-                mask, _scales = make_causal_mask(seq_dim)
-                attn_logits += mask * -1e9
+                attn_logits -= mask * 1e9
             attn_weights = tf.nn.softmax(attn_logits, axis=-1)
-        elif weight_type == "scale":
+        elif normalization_type == "scale":
+            # we assume that the query and key vectors are already scaled by 1/sqrt(embd_dim)
+            # and that their 2-norm is approximately 1. Therefore, their
+            # dot product is approximately the cosine similarity between the two vectors.
+            # which is in the range [-1, 1].
             if causal_mask:
-                mask, scales = make_causal_mask(seq_dim)
                 attn_logits *= mask
+                scales = mask_scales
             else:
-                scales = tf.expand_dims(1./tf.sqrt(tf.cast(seq_dim, tf.float32)), 0)
+                d = tf.cast(embd_shape.s_product, tf.float32)
+                scales = 1./tf.sqrt(d)
+                scales = scales[None]
             
             # scale the attention weights according to the number of value vectors that
             # are being combined to produce the output vector. When we use the mask,
             # this is the number of non-masked-out values.
             attn_weights = attn_logits * scales
         else:
-            raise ValueError(f"Unknown weight_type '{weight_type}' for mha")
+            raise ValueError(f"Unknown weight_type '{normalization_type}' for mha")
         
-        attn = tf.einsum("b h m n, b h n d -> b h m d", attn_weights, v)
+        out = tf.einsum("b h m n, b h n d -> b h m d", attn_weights, v)
+        out = ein.rearrange(out, "b h m d -> b m (h d)")
 
         if return_attn_weights:
-            return attn, attn_weights
+            return out, attn_weights
         
-        return attn
+        return out
     
-    if self_attn:
+    if type == "self_attn":
         embd_inputs = [
-            Input(shape=(seq_dim, embd_dim), name="qk"),
-            Input(shape=(seq_dim, embd_dim), name="v"),
+            Input(shape=embd_shape.s_f_shape, name="embd"),
+        ]
+    elif type == "cross_attn":
+        assert kv_embd_shape is not None, "kv_embd_shape must be specified for cross attention"
+        embd_inputs = [
+            Input(shape=embd_shape.s_f_shape, name="q_embd"),
+            Input(shape=kv_embd_shape.s_f_shape, name="kv_embd"),
         ]
     else:
-        embd_inputs = [
-            Input(shape=(seq_dim, embd_dim), name="q"),
-            Input(shape=(seq_dim, embd_dim), name="k"),
-            Input(shape=(seq_dim, embd_dim), name="v"),
-        ]
+        raise ValueError(f"Unknown type '{type}' for mha")
 
-    if rel_idxs is None:
-        idx_inputs = []
-    else:
-        if rel_idxs is True:
-            idxs_shape = [seq_dim]
-        elif type(rel_idxs) is int:
-            idxs_shape = [seq_dim]
-        else:
-            raise ValueError("rel_idxs must be None, True or int. Got: ", rel_idxs)
+    # if rel_idxs is None:
+    #     idx_inputs = []
+    # else:
+    #     if rel_idxs is True:
+    #         idxs_shape = [seq_dim]
+    #     elif type(rel_idxs) is int:
+    #         idxs_shape = [seq_dim]
+    #     else:
+    #         raise ValueError("rel_idxs must be None, True or int. Got: ", rel_idxs)
         
-        if self_attn:
-            idx_inputs = [
-                Input(shape=idxs_shape, name="qk_idxs"),
-            ]
-        else:
-            idx_inputs = [
-                Input(shape=idxs_shape, name="q_idxs"),
-                Input(shape=idxs_shape, name="k_idxs"),
-            ]
+    #     if self_attn:
+    #         idx_inputs = [
+    #             Input(shape=idxs_shape, name="qk_idxs"),
+    #         ]
+    #     else:
+    #         idx_inputs = [
+    #             Input(shape=idxs_shape, name="q_idxs"),
+    #             Input(shape=idxs_shape, name="k_idxs"),
+    #         ]
 
 
     inputs = input_dict(
         *embd_inputs,
-        *idx_inputs,
+        # *idx_inputs,
     )
 
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
