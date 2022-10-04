@@ -5,7 +5,6 @@ import re
 import sys
 import pickle
 from pathlib import Path
-
 import tensorflow as tf
 import numpy as np
 

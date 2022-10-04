@@ -49,7 +49,8 @@ class Progress:
     min_delta: float = 0.5 / 8
     indent_level: int = 0
     tasks: list[str] = field(default_factory=list)
-    update_fns: set[Callable[[int], None]] = field(default_factory=set)
+    update_fns: list[Callable[[int], None]] = field(default_factory=list)
+    update_fns_to_remove = []
 
     def __post_init__(self) -> None:
 
@@ -79,7 +80,7 @@ class Progress:
                 self.indent_level += 1
                 self.tasks.append(name)
                     
-                self.update_fns.add(update)
+                self.update_fns.append(update)
 
                 yield
 
@@ -133,7 +134,7 @@ class Progress:
                 yield prog_bar
         finally:
             if metrics_update is not None and metrics_update in self.update_fns:
-                self.update_fns.remove(metrics_update)
+                self.update_fns_to_remove.append(metrics_update)
 
 
 @contextmanager
@@ -156,14 +157,16 @@ def create_progress_manager(
                 while not done:
                     l = len(prog.update_fns)
                     for j in range(l):
-                        prog.update_fns[l](i)
+                        prog.update_fns[j](i)
+                    for f in prog.update_fns_to_remove:
+                        prog.update_fns.remove(f)
                     i += 1
                     time.sleep(prog.min_delta)
             
             def update_title_bar(i):
                 prog.title_bar.update(task_format=prog.task_format())
             
-            prog.update_fns.add(update_title_bar)
+            prog.update_fns.append(update_title_bar)
 
             t = threading.Thread(None, update).start()
 
@@ -178,7 +181,7 @@ def create_progress_manager(
             if t is not None:
                 t.join()
             if update_title_bar is not None and update_title_bar in prog.update_fns:
-                prog.update_fns.remove(update_title_bar)
+                prog.update_fns_to_remove.append(update_title_bar)
 
 if __name__ == '__main__':
     with create_progress_manager("Test") as prog:

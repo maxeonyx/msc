@@ -42,3 +42,30 @@ class DSet:
             test = self.test.map(fn),
             val = self.val.map(fn),
         )
+    
+    def batch(self, batch_size, test_batch_size, shapes: DataPipelineShape) -> tuple[Self, DataPipelineShape]:
+        dset = DSet(
+            train = self.train.batch(batch_size),
+            test = self.test.batch(test_batch_size),
+            val = self.val.batch(test_batch_size),
+        )
+
+        train_shapes = DatasetShape(
+            inputs={ k: shp.batch(batch_size) for k, shp in shapes.inputs.items() },
+            targets={ k: shp.batch(batch_size) for k, shp in shapes.targets.items() },
+            extra={ k: shp.batch(batch_size) for k, shp in shapes.extra.items() },
+        )
+
+        test_val_shapes = DatasetShape(
+            inputs={ k: shp.batch(test_batch_size) for k, shp in shapes.inputs.items() },
+            targets={ k: shp.batch(test_batch_size) for k, shp in shapes.targets.items() },
+            extra={ k: shp.batch(test_batch_size) for k, shp in shapes.extra.items() },
+        )
+
+        shapes = DataPipelineShape(
+            train=train_shapes,
+            test=test_val_shapes,
+            val=test_val_shapes,
+        )
+
+        return dset, shapes

@@ -100,7 +100,8 @@ def make_train_loop(train_cfg: TrainLoopCfg, task_cfg: tasks.TaskCfg, run_name: 
     def train_loop(prog: Progress):
 
         with prog.enter_training(n_epochs, metrics[0]) as train_prog_bar:
-            for i_epoch, epoch in enumerate(train_prog_bar(ds_train)):
+            for i_epoch, epoch in train_prog_bar(ds_train):
+                print("epoch obj:", epoch)
                 epoch_steps = epoch.cardinality()
                 with prog.enter_counter("Epoch", total=epoch_steps) as epoch_prog_bar:
                     for i_fusedstep, data in epoch_prog_bar(epoch):
@@ -113,5 +114,6 @@ def make_train_loop(train_cfg: TrainLoopCfg, task_cfg: tasks.TaskCfg, run_name: 
                                 train_step(model, optimizer, data, loss_fn, metrics, train_step)
                         else:
                             train_step(model, optimizer, data, loss_fn, metrics, train_step)
+                train_prog_bar.update()
     
     return train_loop

@@ -8,6 +8,49 @@ from .tf import *
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake
 
+
+def tf_scope(func):
+    """
+    Decorator to automatically enter the module name scope.
+
+    This will create a scope named after:
+    -   The module name (if the wrapped function is __call__)
+    -   The module name + "_init" (if the wrapped function is __init__)
+    -   Any `name` argument passed to the wrapped function
+    -   The function name (otherwise)
+
+    """
+
+    is_init = func.__name__ == "__init__"
+    is_call = func.__name__ == "__call__"
+    
+    fn_name = func.__name__
+
+    @functools.wraps(func)
+    def func_with_name_scope(*args, **kwargs):
+        is_module = len(args) > 0 and isinstance(args[0], tf.Module)
+        
+        if is_module and is_init:
+            # init happens before the tf.Module instance has a _name attribute
+            if 'name' in kwargs and kwargs['name'] is not None:
+                name_prefix = kwargs['name']
+            else:
+                name_prefix = camel_to_snake(type(args[0]).__name__)
+            
+            scope_name = name_prefix + "_init"
+        elif is_module and not is_call:
+            scope_name = args[0].name + "_" + fn_name
+        elif is_module and is_call:
+            scope_name = args[0].name
+        else:
+            scope_name = fn_name
+        
+        with tf.name_scope(scope_name):
+            return func(*args, **kwargs)
+    
+    return tf_decorator.make_decorator(func, func_with_name_scope)
+
+
 class Einshape:
 
     def __init__(self, batch_dims: dict[str, int | None] = {}, sequence_dims: dict[str, int | None | Literal["ragged"]] = {}, feature_dims: dict[str, int | None] = {}):
@@ -244,8 +287,7 @@ class Einshape:
             feature_dims = self._f,
         )
     
-
-
+@tf_scope
 def multidim_indices(shape, flatten=True, elide_rank_1=True):
     """
     Uses tf.meshgrid to get multidimensional indices in the given shape.
@@ -272,6 +314,7 @@ def multidim_indices(shape, flatten=True, elide_rank_1=True):
     return indices
 
 
+@tf_scope
 def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     """
     Uses tf.meshgrid to get multidimensional indices in the shape of the given tensor.
@@ -309,6 +352,7 @@ def circular_mean(angles, axis=0):
     return circular_means
 
 
+@tf_scope
 def recluster(angles, circular_means=None, frame_axis=0):
     if circular_means is None:
         circular_means = circular_mean(angles, axis=frame_axis)
@@ -320,6 +364,7 @@ def recluster(angles, circular_means=None, frame_axis=0):
     return angles
 
 
+@tf_scope
 def unrecluster(angles, circular_means, n_batch_dims=0):
     # assuming the mean is currently 0, rotate the data so the mean is
     # back to the original given by `circular_means`
@@ -330,44 +375,3 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
     angles = angle_wrap(angles)
 
     return angles
-
-def tf_scope(func):
-    """
-    Decorator to automatically enter the module name scope.
-
-    This will create a scope named after:
-    -   The module name (if the wrapped function is __call__)
-    -   The module name + "_init" (if the wrapped function is __init__)
-    -   Any `name` argument passed to the wrapped function
-    -   The function name (otherwise)
-
-    """
-
-    is_init = func.__name__ == "__init__"
-    is_call = func.__name__ == "__call__"
-    
-    fn_name = func.__name__
-
-    @functools.wraps(func)
-    def func_with_name_scope(*args, **kwargs):
-        is_module = len(args) > 0 and isinstance(args[0], tf.Module)
-        
-        if is_module and is_init:
-            # init happens before the tf.Module instance has a _name attribute
-            if 'name' in kwargs and kwargs['name'] is not None:
-                name_prefix = kwargs['name']
-            else:
-                name_prefix = camel_to_snake(type(args[0]).__name__)
-            
-            scope_name = name_prefix + "_init"
-        elif is_module and not is_call:
-            scope_name = args[0].name + "_" + fn_name
-        elif is_module and is_call:
-            scope_name = args[0].name
-        else:
-            scope_name = fn_name
-        
-        with tf.name_scope(scope_name):
-            return func(*args, **kwargs)
-    
-    return tf_decorator.make_decorator(func, func_with_name_scope)
