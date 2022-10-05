@@ -30,7 +30,7 @@ class PredictionHead(tf.Module):
 
     loss_fn: tf.Module
     """
-    The loss function. Takes two parameters `y_true` and:
+    The loss function. Takes two parameters `targets` and:
     - regression: `output`
     - classification: `logits`
     - distribution: `params`
@@ -47,13 +47,13 @@ def mse(in_dims: Einshape, name="mse") -> PredictionHead:
 
     out_dims = in_dims
     
-    def loss_fn_call(y_true, output):
-        return tf.reduce_mean(tf.square(y_true - output))
     
     loss_fn_inputs = input_dict(
-        Input(shape=out_dims.s_f_shape, name="y_true"),
+        Input(shape=out_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="output"),
     )
+    def loss_fn_call(targets, output):
+        return tf.reduce_mean(tf.square(targets - output))
     loss_fn = Model(
         inputs=loss_fn_inputs,
         outputs=loss_fn_call(loss_fn_inputs),
@@ -68,54 +68,59 @@ def mse(in_dims: Einshape, name="mse") -> PredictionHead:
     )
 
 
-def circular_mse(embd_dims: Einshape, name="mse") -> PredictionHead:
+def circular_mse(target_dims: Einshape, embd_dims: Einshape, name="mse") -> PredictionHead:
     """
-    Circular mean squared error. Takes y_true as angles in radians, and y_pred as unit vectors.
+    Circular mean squared error. Takes targets as angles in radians, and y_pred as unit vectors.
     """
-    target_dims = embd_dims.with_feature_dims({})
-    out_dims = embd_dims.with_feature_dims({ "sincos": 2 })
+    
+    out_dims = target_dims.append_feature_dim("sincos", 2)
 
-    final_layer_call = featurewise_dense(
-        in_dims=embd_dims,
-        out_dims=out_dims,
-        name="final_layer",
-    )
     final_layer_inputs = input_dict(
         Input(shape=embd_dims.s_f_shape, name="embd"),
     )
+    to_sincos_dense = featurewise_dense(
+        in_dims=embd_dims,
+        out_dims=out_dims,
+        name="to_sincos",
+    )
+    def final_layer_call(embd, **kwargs):
+        return { "unit_vectors": to_sincos_dense(embd), **kwargs }
     final_layer = Model(
         inputs=final_layer_inputs,
         outputs=final_layer_call(final_layer_inputs),
         name="unit_vectors",
     )
-    
-    def loss_fn_call(y_true, unit_vectors):
-        x = unit_vectors[..., 0]
-        y = unit_vectors[..., 1]
-        return tf.reduce_mean(tf.square(tf.math.sin(y_true) - y) + tf.square(tf.math.cos(y_true) - x))
 
     loss_fn_inputs = input_dict(
-        Input(shape=target_dims.s_f_shape, name="y_true"),
+        Input(shape=target_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
+    def loss_fn_call(inputs):
+        targets = inputs["targets"]
+        unit_vectors = inputs["unit_vectors"]
+
+        x = unit_vectors[..., 0]
+        y = unit_vectors[..., 1]
+        return tf.reduce_mean(tf.square(tf.math.sin(targets) - y) + tf.square(tf.math.cos(targets) - x))
+
     loss_fn = Model(
         inputs=loss_fn_inputs,
-        outputs=loss_fn_call(**loss_fn_inputs),
+        outputs=loss_fn_call(loss_fn_inputs),
         name="loss",
     )
 
-    unit_vectors = input_dict(
+    to_angles_inputs = input_dict(
         Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
-    def angles_call(unit_vectors):
+    def to_angles_call(inputs):
+        unit_vectors = inputs["unit_vectors"]
         x = unit_vectors[..., 0]
         y = unit_vectors[..., 1]
         return tf.math.atan2(y, x)
-    
     output_fns = {
         "Angle": Model(
-            inputs=unit_vectors,
-            outputs=angles_call(**unit_vectors),
+            inputs=to_angles_inputs,
+            outputs=to_angles_call(to_angles_inputs),
             name="angles",
         ),
     }
@@ -130,14 +135,16 @@ def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> P
 
     out_dims = in_dims.with_feature_dims({ "c": num_categories })
 
-    final_layer_call = featurewise_dense(
+    final_layer_inputs = input_dict(
+        Input(shape=in_dims.s_f_shape, name="embd"),
+    )
+    to_logits = featurewise_dense(
         in_dims=in_dims,
         out_dims=out_dims,
         name="logits",
     )
-    final_layer_inputs = input_dict(
-        Input(shape=in_dims.s_f_shape, name="embd"),
-    )
+    def final_layer_call(embd, **kwargs):
+        return { "logits": to_logits(embd), **kwargs }
     final_layer = Model(
         inputs=final_layer_inputs,
         outputs=final_layer_call(final_layer_inputs),
@@ -147,14 +154,13 @@ def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> P
     def dist(logits):
         return tfd.Categorical(logits=logits)
 
-    def loss_fn_call(y_true, logits):
-        d = dist(logits)
-        return -tf.reduce_mean(d.log_prob(y_true))
-    
     loss_fn_inputs = input_dict(
-        Input(shape=out_dims.s_f_shape, name="y_true"),
+        Input(shape=out_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="logits"),
     )
+    def loss_fn_call(targets, logits):
+        d = dist(logits)
+        return -tf.reduce_mean(d.log_prob(targets))
     loss_fn = Model(
         inputs=loss_fn_inputs,
         outputs=loss_fn_call(loss_fn_inputs),

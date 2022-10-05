@@ -26,6 +26,7 @@ class BvhSpecificColumns(_BvhCfg):
     """
     n_dof_per_hand: int = 23
     columns: Literal["useful"] = "useful"
+    name = "bvh_all_columns"
 
 @dataclass
 class BvhAllColumns(_BvhCfg):
@@ -35,48 +36,7 @@ class BvhAllColumns(_BvhCfg):
     n_joints_per_hand: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17
     n_dof_per_joint: Literal[1, 2, 3] = 3
     columns: Literal["all"] = "all"
-    
-def inspect(ds, text):
-
-    def tfstring(x):
-        if tf.is_tensor(x):
-            if tf.executing_eagerly():
-                return str(x.numpy())
-            else:
-                return "?"
-        return str(x)
-
-    def textshape(x):
-        x = shape_list(x)
-        return "[" + " ".join(map(tfstring, x)) + "]"
-    
-    def textdtype(x):
-        return x.dtype.name
-
-    def tfrepr(x, indent="    ", depth=0, prefix=""):
-        if isinstance(x, tf.Tensor):
-            return tfvalrepr(x, indent=indent, depth=depth, prefix=prefix)
-        elif isinstance(x, dict):
-            return tfdictrepr(x, indent=indent, depth=depth, prefix=prefix)
-        elif isinstance(x, tuple):
-            return tftuplerepr(x, indent=indent, depth=depth, prefix=prefix)
-        else:
-            raise NotImplementedError        
-
-    def tfvalrepr(x, indent="    ", depth=0, prefix=""):
-        return f"{indent*depth}{prefix}{textdtype(x)}{textshape(x)}"
-    
-    def tfdictrepr(x, indent="    ", depth=0, prefix=""):
-        return f"{indent * depth}{prefix}{{\n" + ",\n".join(tfrepr(v, indent=indent, depth=depth+1, prefix=f"{k}: ") for k, v in x.items()) + f"\n{indent * depth}}}"
-
-    def tftuplerepr(x, indent="    ", depth=0, prefix=""):
-        return f"{indent * depth}{prefix}(\n" + ",\n".join(tfrepr(v, indent=indent, depth=depth+1) for v in x) + f"\n{indent * depth})"
-
-    def fn(x, text):
-        tf.print("##  ", text, "  ##")
-        tf.print(tfrepr(x))
-        return x
-    return ds.map(lambda x: fn(x, text))
+    name = "bvh_all_columns"
 
 def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[str, Einshape]]:
     
@@ -116,7 +76,7 @@ def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[s
     
     orig_angles = tf.data.Dataset.from_tensor_slices(ragged_angles)
 
-    orig_angles = inspect(orig_angles, "orig_angles")
+    # orig_angles = orig_angles.map(inspect("orig_angles"))
 
     orig_angles_einshape = angles_einshape
     filenames = tf.data.Dataset.from_tensor_slices(filenames)
@@ -132,16 +92,6 @@ def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[s
 
     dset = dset.shuffle(buffer_size=n, seed=1234)
 
-    test_size = n // 10
-    dset = DSet(
-        test=dset.take(test_size),
-        val=dset.skip(test_size).take(test_size),
-        train=dset.skip(2 * test_size)
-    )
-
-    print("ds train cardinality (orig)", dset.train.cardinality().numpy())
-    print("ds test cardinality (orig)", dset.test.cardinality().numpy())
-    print("ds val cardinality (orig)", dset.val.cardinality().numpy())
 
     dset = dset.map(lambda x: { **x, "angles": x["orig_angles"] })
     def map_angles(dataset, fn):
@@ -150,13 +100,9 @@ def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[s
     if cfg.recluster:
         circular_means = utils.circular_mean(all_angles, axis=0)
         dset = map_angles(dset, lambda a: utils.recluster(a, circular_means))
-    
-    dset = inspect(dset, "circ_means")
 
     dset = dset.map(lambda x: { **x, "idxs": utils.multidim_indices_of(x["angles"], flatten=False) })
     index_einshape = angles_einshape.append_feature_dim("i", angles_einshape.rank)
-
-    dset = inspect(dset, "indices")
 
     if cfg.decimate:
         decimate = make_decimate_fn(cfg.decimate, angles_einshape, other_params=[(index_einshape, tf.int32)])
@@ -169,12 +115,20 @@ def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[s
             }
         dset = dset.map(do_decimate)
 
-    dset = inspect(dset, "decimate")
+    dset = dset.snapshot(f"./_cache/tf/{cfg.name}", compression=None)
 
-    # dset = dset.map(inspect)
+    test_size = n // 10
+    dset = DSet(
+        test=dset.take(test_size),
+        val=dset.skip(test_size).take(test_size),
+        train=dset.skip(2 * test_size)
+    )
     
-    # dset = dset.snapshot(cfg.cached_dataset_path, compression=None)
-    # dset = dset.cache()
+    dset = DSet(
+        train=dset.train.cache(),
+        test=dset.test.cache(),
+        val=dset.val.cache(),
+    )
 
     return dset, {
         "angles": angles_einshape,
@@ -196,6 +150,20 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
     # one sequence dimension
     dset = dset.map(lambda x: { **x, "idxs": x["idxs"][:, 0, 0, 0, :1] })
     shapes["idxs"] = shapes["idxs"].with_feature_dims({ "i": 1})
+
+    # repeat data to take many random chunks from each sequence
+    train, test, val = dset.destructure()
+    n_train = train.cardinality().numpy()
+    dset = DSet(
+        # repeat training data infinitely
+        train=train.repeat().shuffle(n_train),
+
+        # take 10 random chunks from each example
+        test=test.repeat(100),
+        val=val.repeat(100),
+    )
+
+    # dset = dset.map(inspect("repeat"))
 
     get_chunk = make_get_chunk(
         [
@@ -225,44 +193,24 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
     # chunk
     dset = dset.map(do_chunk)
 
-    dset = inspect(dset, "chunk")
-
-
-
-
+    # dset = dset.map(inspect("chunk"))
 
     dset = dset.map(lambda x: {
         "inputs": {
-            "input": x["angles"][:-1],
-            "input_idxs": x["idxs"][:-1],
-            "target_idxs": x["idxs"],
+            "input": tf.identity(x["angles"][:-1], name="inputs_angles"),
+            "input_idxs": tf.identity(x["idxs"][:-1], name="inputs_input_idxs"),
+            "target_idxs": tf.identity(x["idxs"], name="inputs_target_idxs"),
         },
-        "targets": {
-            "target": x["angles"],
-        },
+        "targets": tf.identity(x["angles"], name="targets_targets"),
         "extra": {
-            "orig_angles": x["orig_angles"],
-            "filename": x["filename"],
+            "orig_angles": tf.identity(x["orig_angles"], name="extra_orig_angles"),
+            "filename": tf.identity(x["filename"], name="extra_filename"),
         },
     })
 
     print("ds train cardinality (after chunk)", dset.train.cardinality().numpy())
     print("ds test cardinality (after chunk)", dset.test.cardinality().numpy())
     print("ds val cardinality (after chunk)", dset.val.cardinality().numpy())
-
-    # repeat data to take many random chunks from each sequence
-    train, test, val = dset.destructure()
-    n_train = train.cardinality().numpy()
-    dset = DSet(
-        # repeat training data infinitely
-        train=train.repeat().shuffle(n_train),
-
-        # take 10 random chunks from each example
-        test=test.repeat(100),
-        val=val.repeat(100),
-    )
-
-    dset = inspect(dset, "repeat")
 
     print("ds train cardinality (after repeat)", dset.train.cardinality().numpy())
     print("ds test cardinality (after repeat)", dset.test.cardinality().numpy())
@@ -275,8 +223,6 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
     )
     dset = dset.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
 
-    dset = inspect(dset, "index")
-
     # set shapes to chunk size and sequence length
     shapes = DatasetShape(
         inputs={
@@ -284,9 +230,7 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
             "input_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length - 1 }),
             "target_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length }),
         },
-        targets={
-            "target": shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length }),
-        },
+        targets=shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length }),
         extra={
             "orig_angles": shapes["orig_angles"],
             "filename": shapes["filename"],

@@ -8,6 +8,8 @@ except KeyError:
     run_name = randomname.get_name()
     os.environ["RUN_NAME"] = run_name
 
+
+
 from mx import progress
 with progress.create_progress_manager(run_name) as pm:
 
@@ -95,17 +97,15 @@ with progress.create_progress_manager(run_name) as pm:
         )
 
         head = layers.circular_mse(
+            target_dims=shapes.train.targets,
             embd_dims=embd_shape,
         )
 
         def call(input, input_idxs, target_idxs):
             input_embd = inp_embedding(input)
             input_idxs_embd = inp_idx_embedding(input_idxs)
-            print("SHAPES", input_embd.shape, input_idxs_embd.shape)
             input_embd = input_embd + input_idxs_embd
-            print("SHAPES1", input_embd.shape)
             input_embd = prepend_begin_token(input_embd)
-            print("SHAPES2", input_embd.shape)
             target_idxs_embd = tar_idx_embedding(target_idxs)
             embd = input_embd + target_idxs_embd
             embd = backbone(embd)

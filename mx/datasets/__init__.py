@@ -1,5 +1,7 @@
 from pprint import pprint
 from re import I
+
+from mx.utils.tf import *
 from ._dataset_utils import *
 from . import tasks
 from . import bvh
@@ -18,6 +20,8 @@ def init_data_pipeline(
         if isinstance(task_cfg, tasks.NextVectorPrediction):
             dset, shapes = bvh.vector_ntp(data_cfg, task_cfg, force_cache_reload=force_cache_reload)
 
+    # count_calls_fn, count_var = count_calls()
+    # dset.train = dset.train.map(count_calls_fn)
 
     # setup task for train loop
     # - batch
@@ -25,59 +29,49 @@ def init_data_pipeline(
     # - window for epochs
     if not task_cfg.already_batched():
         dset, shapes = dset.batch(train_cfg.batch_size, train_cfg.test_batch_size, shapes)
-        
-    
-    print("ds train cardinality (after batch)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after batch)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after batch)", dset.val.cardinality().numpy())
 
-    def nonfucked_window(ds, window_length):
+    # count_calls_fn_2, count_var_2 = count_calls()
+    # dset.train = dset.train.map(count_calls_fn_2)
+
+    def window_nested(ds, window_size):
         """
-        Work around the frustrating behaviour of .window() where it applies the
-        windowing from the inside out instead of the outside in.
+        Work around the frustrating behaviour of tf.data.Dataset.window() which
+        windows from "the inside out" rather than "the outside in", when applied to
+        nested datasets.
         """
-        dd = ds.window(window_length).enumerate()
-        dd = dd.map(lambda i, x: (i, tf.data.Dataset.zip(x)))
-        return dd
+        ds = ds.window(window_size)
+        ds = ds.map(lambda *x: tf.data.Dataset.zip(x))
+        return ds
     
+    # dset = dset.map(inspect("pre_enumerate"))
+
+    n_fusedsteps_per_epoch = train_cfg.n_steps_per_epoch // train_cfg.fused_steps
+    dset.train = dset.train.take(8000).enumerate() # steps
+    dset.train = window_nested(dset.train, train_cfg.fused_steps).enumerate() # fused steps
+    dset.train = window_nested(dset.train, n_fusedsteps_per_epoch).enumerate() # epochs
     
-    dset.train = dset.train.take(train_cfg.n_steps).enumerate()
+    # n_epochs = dset.train.cardinality()
+    # print(f"n_epochs: {n_epochs}")
+    # for i_epoch, epoch in dset.train:
+    #     print(f"epoch {i_epoch} / {n_epochs}")
+    #     n_fusedsteps = epoch.cardinality()
+    #     print(f"n_fusedsteps: {n_fusedsteps}")
+    #     for i_fusedstep, fusedstep in epoch:
+    #         print(f"  fusedstep {i_fusedstep}")
+    #         n_steps = fusedstep.cardinality()
+    #         print(f"  n_steps: {n_steps}")
+    #         for i_step, step in fusedstep:
+    #             print(f"    step {i_step}")
     
-    print("ds train cardinality (after take)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after take)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after take)", dset.val.cardinality().numpy())
-
-    dset.train = dset.train.window(train_cfg.n_steps).enumerate()
-
-    print("ds train cardinality (after window)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after window)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after window)", dset.val.cardinality().numpy())
-
-    fusedsteps_per_epoch = train_cfg.n_steps_per_epoch // train_cfg.fused_steps
-    dset.train = dset.train.window(fusedsteps_per_epoch).enumerate()
+    # print(f"count (pre batch): {count_var.numpy()}")
+    # print(f"count (post batch): {count_var_2.numpy()}")
     
-    print("ds train cardinality (after window 2)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after window 2)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after window 2)", dset.val.cardinality().numpy())
+    # raise Exception("stop")
 
-    zzip = tf.data.Dataset.zip
+    # data_pipeline = DSet(
+    #     train=ds_train,
+    #     test=ds_test,
+    #     val=ds_val,
+    # )
 
-    # dset.train = dset.train.prefetch(tf.data.experimental.AUTOTUNE)
-    for i_e, epoch in dset.train.take(1):
-        print(f"epoch {i_e.numpy()}")
-        for i_fs, fusedstep in zzip(epoch).take(1):
-            print(f"  fusedstep {i_fs.numpy()}")
-            for i_s, val in zzip(fusedstep).take(1):
-                print(f"    step {i_s.numpy()}")
-                break
-                # pprint(depth=4, indent=2, object=tf.nest.map_structure(lambda x: tf.shape(x), val))
-    print("HIII")
-    raise Exception("stop")
-
-    data_pipeline = DSet(
-        train=ds_train,
-        test=ds_test,
-        val=ds_val,
-    )
-
-    return data_pipeline, shapes
+    return dset, shapes

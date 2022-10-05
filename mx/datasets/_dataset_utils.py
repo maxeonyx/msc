@@ -18,7 +18,7 @@ class BaseDatasetConfig(abc.ABC):
 @dataclass
 class DatasetShape:
     inputs: dict[str, Einshape]
-    targets: dict[str, Einshape]
+    targets: Einshape
     extra: dict[str, Einshape]
 
 @dataclass
@@ -38,27 +38,27 @@ class DSet:
 
     def map(self, fn) -> Self:
         return DSet(
-            train = self.train.map(fn),
-            test = self.test.map(fn),
-            val = self.val.map(fn),
+            train = self.train.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            test = self.test.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            val = self.val.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
         )
     
     def batch(self, batch_size, test_batch_size, shapes: DataPipelineShape) -> tuple[Self, DataPipelineShape]:
         dset = DSet(
-            train = self.train.batch(batch_size),
-            test = self.test.batch(test_batch_size),
-            val = self.val.batch(test_batch_size),
+            train = self.train.batch(batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            test = self.test.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            val = self.val.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
         )
 
         train_shapes = DatasetShape(
             inputs={ k: shp.batch(batch_size) for k, shp in shapes.inputs.items() },
-            targets={ k: shp.batch(batch_size) for k, shp in shapes.targets.items() },
+            targets=shapes.targets.batch(batch_size),
             extra={ k: shp.batch(batch_size) for k, shp in shapes.extra.items() },
         )
 
         test_val_shapes = DatasetShape(
             inputs={ k: shp.batch(test_batch_size) for k, shp in shapes.inputs.items() },
-            targets={ k: shp.batch(test_batch_size) for k, shp in shapes.targets.items() },
+            targets=shapes.targets.batch(test_batch_size),
             extra={ k: shp.batch(test_batch_size) for k, shp in shapes.extra.items() },
         )
 

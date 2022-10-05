@@ -122,7 +122,7 @@ class TrainingCfg:
     batch_size: int = 32
     n_steps: int = 5000
     n_steps_per_epoch: int = 500
-    fused_steps: int = 1
+    fused_steps: int = 8
 
     max_test_steps: int = 100
     test_batch_size: int = 32

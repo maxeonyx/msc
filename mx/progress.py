@@ -129,7 +129,7 @@ class Progress:
                     metric_header_bar.update(status_format=headers)
                     metric_value_bar.update(status_format=values)
                     
-                self.update_fns.add(metrics_update)
+                self.update_fns.append(metrics_update)
 
                 yield prog_bar
         finally:
@@ -159,7 +159,8 @@ def create_progress_manager(
                     for j in range(l):
                         prog.update_fns[j](i)
                     for f in prog.update_fns_to_remove:
-                        prog.update_fns.remove(f)
+                        if f in prog.update_fns:
+                            prog.update_fns.remove(f)
                     i += 1
                     time.sleep(prog.min_delta)
             
