@@ -101,7 +101,7 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
         rearrange_kv_embd_in = lambda t: ein.rearrange(t, f"... {kv_embd_shape.s_str} {kv_embd_shape.f_str} -> ... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str})", **kv_embd_shape.f, **kv_embd_shape.s)
         rearrange_kv_embd_out = lambda t: ein.rearrange(t, f"... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str}) -> ... {kv_embd_shape.s_str} {kv_embd_shape.f_str}", **kv_embd_shape.f, **kv_embd_shape.s)
 
-    def call(**inputs):
+    def call(inputs):
 
         if type == "self_attn":
             embd = rearrange_embd_in(inputs["embd"])
@@ -199,4 +199,4 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
         # *idx_inputs,
     )
 
-    return Model(inputs=inputs, outputs=call(**inputs), name=name)
+    return Model(inputs=inputs, outputs=call(inputs), name=name)

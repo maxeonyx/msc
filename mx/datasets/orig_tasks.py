@@ -2,7 +2,7 @@ import abc
 from dataclasses import dataclass
 from typing import Literal, Union
 
-from ._dataset_utils import DSet
+from ._datasets import DSet
 
 @dataclass
 class TaskCfg(abc.ABC):
@@ -121,8 +121,6 @@ class TrainingCfg:
     """
     batch_size: int = 32
     n_steps: int = 5000
-    n_steps_per_epoch: int = 500
-    fused_steps: int = 8
 
     max_test_steps: int = 100
     test_batch_size: int = 32

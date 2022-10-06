@@ -1,6 +1,6 @@
 import os
 
-from mx.datasets import tasks
+from mx.datasets import orig_tasks
 try:
     run_name = os.environ["RUN_NAME"]
 except KeyError:
@@ -28,10 +28,9 @@ with progress.create_progress_manager(run_name) as pm:
         task_config = datasets.tasks.NextVectorPrediction(
             sequence_length=seq_len,
         )
-        train_cfg = tasks.TrainingCfg(
+        train_cfg = orig_tasks.TrainingCfg(
             batch_size=64,
-            n_steps=5000,
-            n_steps_per_epoch=500,
+            n_steps=1000,
         )
         dataset, shapes = datasets.init_data_pipeline(dataset_config, task_config, train_cfg)
         inp_shape = shapes.train.inputs["input"]
@@ -117,7 +116,6 @@ with progress.create_progress_manager(run_name) as pm:
             Input(shape=tar_idxs_shape.s_f_shape, name="target_idxs"),
         )
 
-        print(inputs)
         
         model = Model(inputs=inputs, outputs=call(**inputs), name="model")
 

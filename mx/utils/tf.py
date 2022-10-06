@@ -1,10 +1,5 @@
 from math import pi, tau
 
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
-os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/opt/cuda/"
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=2 --tf_xla_cpu_global_jit"
-
 import numpy as np
 import einops as ein
 import tensorflow as tf
@@ -24,8 +19,6 @@ else:
     from tensorflow.keras.backend import is_keras_tensor
     from tensorflow.types.experimental import TensorLike
     import tensorflow.types.experimental as tft
-
-
 
 def shape_list(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int]:
     """

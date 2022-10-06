@@ -1,62 +1,53 @@
 import abc
 from dataclasses import dataclass
-from typing import Any, Collection, Literal, Optional, Union
+from typing import Any, Collection, Literal, Optional, Type, Union
 
 from mx.utils.tf import *
 
-from .. import tasks
-from .. import DSet, DatasetShape
+from .. import tasks as orig_tasks
+from mx import tasks
+from mx.tasks import Task, NextVectorPrediction
+from .. import DSet, DatasetShape, Dataset, DsToTaskAdaptor, DSets
 from mx import utils
 from mx.utils import tf_scope, Einshape, shape_list
 from . import _bvh
 
 @dataclass
-class _BvhCfg(abc.ABC):
+class BvhDataset(Dataset):
     """
     Config for the BVH dataset pipeline.
     """
     recluster: bool = False
     decimate: Union[Literal[False], float] = False
     n_hands: Literal[1, 2] = 2
-
-@dataclass
-class BvhSpecificColumns(_BvhCfg):
-    """
-    Config for the BVH dataset pipeline.
-    """
-    n_dof_per_hand: int = 23
-    columns: Literal["useful"] = "useful"
-    name = "bvh_all_columns"
-
-@dataclass
-class BvhAllColumns(_BvhCfg):
-    """
-    Config for the BVH dataset pipeline.
-    """
     n_joints_per_hand: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17
     n_dof_per_joint: Literal[1, 2, 3] = 3
     columns: Literal["all"] = "all"
     name = "bvh_all_columns"
 
-def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[str, Einshape]]:
-    
-    filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns=cfg.columns)
+    @property
+    def implementations(self) -> dict[Type[Task], DsToTaskAdaptor]:
+        return {
+            NextVectorPrediction: self._for_next_vector_prediction,
+        }
 
-    all_angles = tf.concat(angles, axis=0)
-    del angles
-    
-    # subset
-    if isinstance(cfg, BvhSpecificColumns):
-        all_angles = all_angles[:, :cfg.n_hands, :cfg.n_dof_per_hand]
-        angles_einshape = utils.Einshape(
-            batch_dims={},
-            sequence_dims={ "f": "ragged" },
-            feature_dims={
-                "h": cfg.n_hands,
-                "d": cfg.n_dof_per_hand,
-            },
-        )
-    elif isinstance(cfg, BvhAllColumns):
+    def _for_next_vector_prediction(self, dsets: DSets) -> DSets:
+        dsets = dsets.map(lambda x: {
+            "data": ein.rearrange(x["angles"], f"f h j d -> f (h j d)"),
+            "seq_idxs": ein.rearrange(x["frame_idxs"], f"f h j d i -> f (h j d) i"),
+            "orig_angles": x["orig_angles"],
+            "filename": x["filename"],
+        })
+
+        return dsets
+
+    def load(cfg, force_cache_reload: bool) -> tf.data.Dataset:
+        
+        filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns=cfg.columns)
+
+        all_angles = tf.concat(angles, axis=0)
+        del angles
+        
         all_angles = tf.reshape(all_angles, [-1, 2, 17, 3])
         all_angles = all_angles[:, :cfg.n_hands, :cfg.n_joints_per_hand, :cfg.n_dof_per_joint]
         angles_einshape = utils.Einshape(
@@ -68,93 +59,67 @@ def _load_bvh_data(cfg: _BvhCfg, force_cache_reload: bool) -> tuple[DSet, dict[s
                 "d": cfg.n_dof_per_joint,
             },
         )
-    else:
-        raise ValueError(f"Config type {type(cfg)} not implemented for BVH dataset")
+        
+        n_frames = tf.constant(n_frames)
+        ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
+        
+        orig_angles = tf.data.Dataset.from_tensor_slices(ragged_angles)
 
-    n_frames = tf.constant(n_frames)
-    ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
+        # orig_angles = orig_angles.map(inspect("orig_angles"))
+
+        orig_angles_einshape = angles_einshape
+        filenames = tf.data.Dataset.from_tensor_slices(filenames)
+        filenames_einshape = Einshape(
+            batch_dims={},
+            sequence_dims={ "f": "ragged" },
+            feature_dims={},
+        )
+        
+        dset = tf.data.Dataset.zip({ "filename": filenames, "orig_angles": orig_angles })
+        n = dset.cardinality()
+
+        dset = dset.map(lambda x: { **x, "angles": x["orig_angles"] })
+        def map_angles(dataset, fn):
+            return dataset.map(lambda x: { **x, "angles": fn(x["angles"]) })
+
+        if cfg.recluster:
+            circular_means = utils.circular_mean(all_angles, axis=0)
+            dset = map_angles(dset, lambda a: utils.recluster(a, circular_means))
+
+        dset = dset.map(lambda x: { **x, "idxs": utils.multidim_indices_of(x["angles"], flatten=False) })
+        index_einshape = angles_einshape.append_feature_dim("i", angles_einshape.rank)
+
+        if cfg.decimate:
+            decimate = make_decimate_fn(cfg.decimate, angles_einshape, other_params=[(index_einshape, tf.int32)])
+            def do_decimate(x):
+                angles, [idxs] = decimate(x["angles"], x["idxs"])
+                return {
+                    **x,
+                    "angles": angles,
+                    "idxs": idxs,
+                }
+            dset = dset.map(do_decimate)
+
+        return dset
+
+
+def next_vector_prediction(d_cfg: BvhDataset, t_cfg: orig_tasks.NextVectorPrediction, force_cache_reload: bool) -> tuple[DSet, DatasetShape]:
     
-    orig_angles = tf.data.Dataset.from_tensor_slices(ragged_angles)
-
-    # orig_angles = orig_angles.map(inspect("orig_angles"))
-
-    orig_angles_einshape = angles_einshape
-    filenames = tf.data.Dataset.from_tensor_slices(filenames)
-    filenames_einshape = Einshape(
-        batch_dims={},
-        sequence_dims={ "f": "ragged" },
-        feature_dims={},
-    )
-    
-
-    dset = tf.data.Dataset.zip({ "filename": filenames, "orig_angles": orig_angles })
-    n = dset.cardinality()
-
-    dset = dset.shuffle(buffer_size=n, seed=1234)
-
-
-    dset = dset.map(lambda x: { **x, "angles": x["orig_angles"] })
-    def map_angles(dataset, fn):
-        return dataset.map(lambda x: { **x, "angles": fn(x["angles"]) })
-
-    if cfg.recluster:
-        circular_means = utils.circular_mean(all_angles, axis=0)
-        dset = map_angles(dset, lambda a: utils.recluster(a, circular_means))
-
-    dset = dset.map(lambda x: { **x, "idxs": utils.multidim_indices_of(x["angles"], flatten=False) })
-    index_einshape = angles_einshape.append_feature_dim("i", angles_einshape.rank)
-
-    if cfg.decimate:
-        decimate = make_decimate_fn(cfg.decimate, angles_einshape, other_params=[(index_einshape, tf.int32)])
-        def do_decimate(x):
-            angles, [idxs] = decimate(x["angles"], x["idxs"])
-            return {
-                **x,
-                "angles": angles,
-                "idxs": idxs,
-            }
-        dset = dset.map(do_decimate)
-
-    dset = dset.snapshot(f"./_cache/tf/{cfg.name}", compression=None)
-
-    test_size = n // 10
-    dset = DSet(
-        test=dset.take(test_size),
-        val=dset.skip(test_size).take(test_size),
-        train=dset.skip(2 * test_size)
-    )
-    
-    dset = DSet(
-        train=dset.train.cache(),
-        test=dset.test.cache(),
-        val=dset.val.cache(),
-    )
-
-    return dset, {
-        "angles": angles_einshape,
-        "orig_angles": orig_angles_einshape,
-        "idxs": index_einshape,
-        "filename": filenames_einshape,
-    }
-
-
-def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_reload: bool) -> tuple[DSet, DatasetShape]:
-    
-    dset, shapes = _load_bvh_data(d_cfg, force_cache_reload=force_cache_reload)
+    dsets = d_cfg.load(force_cache_reload=force_cache_reload)
 
     # flatten angles feature dims (h, j, d) dims to single dim
-    dset = dset.map(lambda x: { **x, "angles": ein.rearrange(x["angles"], f"... {shapes['angles'].f_str} -> ... ({shapes['angles'].f_str})") })
+    dsets = dsets.map(lambda x: { **x, "angles": ein.rearrange(x["angles"], f"... {shapes['angles'].f_str} -> ... ({shapes['angles'].f_str})") })
     shapes["angles"] = shapes["angles"].with_feature_dims({ "vec": shapes["angles"].f_product })
 
-    # for vector ntp task we only need the sequence indices, and there's only
+    # for Next-vector-prediction task we only need the sequence indices, and there's only
     # one sequence dimension
-    dset = dset.map(lambda x: { **x, "idxs": x["idxs"][:, 0, 0, 0, :1] })
+    dsets = dsets.map(lambda x: { **x, "idxs": x["idxs"][:, 0, 0, 0, :1] })
     shapes["idxs"] = shapes["idxs"].with_feature_dims({ "i": 1})
 
     # repeat data to take many random chunks from each sequence
-    train, test, val = dset.destructure()
+    train, test, val = dsets.destructure()
     n_train = train.cardinality().numpy()
-    dset = DSet(
+    dsets = DSet(
         # repeat training data infinitely
         train=train.repeat().shuffle(n_train),
 
@@ -191,11 +156,11 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
         }
     
     # chunk
-    dset = dset.map(do_chunk)
+    dsets = dsets.map(do_chunk)
 
     # dset = dset.map(inspect("chunk"))
 
-    dset = dset.map(lambda x: {
+    dsets = dsets.map(lambda x: {
         "inputs": {
             "input": tf.identity(x["angles"][:-1], name="inputs_angles"),
             "input_idxs": tf.identity(x["idxs"][:-1], name="inputs_input_idxs"),
@@ -208,20 +173,12 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
         },
     })
 
-    print("ds train cardinality (after chunk)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after chunk)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after chunk)", dset.val.cardinality().numpy())
-
-    print("ds train cardinality (after repeat)", dset.train.cardinality().numpy())
-    print("ds test cardinality (after repeat)", dset.test.cardinality().numpy())
-    print("ds val cardinality (after repeat)", dset.val.cardinality().numpy())
-
-    dset = DSet(
-        train=dset.train.enumerate(),
-        test=dset.test.enumerate(),
-        val=dset.val.enumerate(),
+    dsets = DSet(
+        train=dsets.train.enumerate(),
+        test=dsets.test.enumerate(),
+        val=dsets.val.enumerate(),
     )
-    dset = dset.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
+    dsets = dsets.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
 
     # set shapes to chunk size and sequence length
     shapes = DatasetShape(
@@ -237,7 +194,7 @@ def vector_ntp(d_cfg: _BvhCfg, t_cfg: tasks.NextVectorPrediction, force_cache_re
         },
     )
 
-    return dset, shapes
+    return dsets, shapes
 
 def to_inputs_and_targets(x):
 

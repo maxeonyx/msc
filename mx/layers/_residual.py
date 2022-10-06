@@ -33,4 +33,4 @@ def residual(embd_shape: Einshape, n_layers: int=None, make_layer: Callable[[int
         Input(shape=embd_shape.s_f_shape, name="embd")
     )
 
-    return Model(inputs=inputs, outputs=call(**inputs), name=name)
+    return Model(inputs=inputs, outputs=call(inputs), name=name)

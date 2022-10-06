@@ -32,12 +32,13 @@ class MxMetric(abc.ABC, tf.Module):
 class TimeSinceLastCall(MxMetric):
     def __init__(self, name="time_since_last_call", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.last_call = tf.Variable(0., dtype=tf.float64, trainable=False, name="last_call")
+        self.last_call = tf.Variable(tf.timestamp(), dtype=tf.float64, trainable=False, name="last_call")
 
     def reset(self):
         self.last_call.assign(tf.timestamp())
         self.initialized = False
     
+    @property
     def unit(self) -> str:
         return "s"
 
