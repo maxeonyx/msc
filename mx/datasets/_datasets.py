@@ -212,7 +212,7 @@ def init_data_pipeline(
     # create task
     if isinstance(data_cfg, bvh.BvhAllColumns):
 
-        if isinstance(task_cfg, tasks.NextVectorPrediction):
+        if isinstance(task_cfg, tasks.NextUnitVectorPrediction):
             dset, shapes = bvh.vector_ntp(data_cfg, task_cfg, force_cache_reload=force_cache_reload)
 
     if not task_cfg.already_batched():

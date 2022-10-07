@@ -6,7 +6,7 @@ from mx.utils.tf import *
 
 from .. import tasks as orig_tasks
 from mx import tasks
-from mx.tasks import Task, NextVectorPrediction
+from mx.tasks import Task, NextUnitVectorPrediction
 from .. import DSet, DatasetShape, Dataset, DsToTaskAdaptor, DSets
 from mx import utils
 from mx.utils import tf_scope, Einshape, shape_list
@@ -28,35 +28,38 @@ class BvhDataset(Dataset):
     @property
     def implementations(self) -> dict[Type[Task], DsToTaskAdaptor]:
         return {
-            NextVectorPrediction: self._for_next_vector_prediction,
+            NextUnitVectorPrediction: self._for_next_vector_prediction,
         }
 
     def _for_next_vector_prediction(self, dsets: DSets) -> DSets:
+
         dsets = dsets.map(lambda x: {
+            # flatten hand/joint/dof dims into a single feature dim
             "data": ein.rearrange(x["angles"], f"f h j d -> f (h j d)"),
-            "seq_idxs": ein.rearrange(x["frame_idxs"], f"f h j d i -> f (h j d) i"),
-            "orig_angles": x["orig_angles"],
-            "filename": x["filename"],
+            # remove indices for the flattened feature dim, keep only
+            # frame indices
+            "seq_idxs": x["idxs"][:, 0, 0, 0, 0],
+            "extra": x["extra"],
         })
 
         return dsets
 
-    def load(cfg, force_cache_reload: bool) -> tf.data.Dataset:
+    def load(self, force_cache_reload: bool) -> tf.data.Dataset:
         
-        filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns=cfg.columns)
+        filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns=self.columns)
 
         all_angles = tf.concat(angles, axis=0)
         del angles
         
         all_angles = tf.reshape(all_angles, [-1, 2, 17, 3])
-        all_angles = all_angles[:, :cfg.n_hands, :cfg.n_joints_per_hand, :cfg.n_dof_per_joint]
+        all_angles = all_angles[:, :self.n_hands, :self.n_joints_per_hand, :self.n_dof_per_joint]
         angles_einshape = utils.Einshape(
             batch_dims={},
             sequence_dims={ "f": "ragged" },
             feature_dims={
-                "h": cfg.n_hands,
-                "j": cfg.n_joints_per_hand,
-                "d": cfg.n_dof_per_joint,
+                "h": self.n_hands,
+                "j": self.n_joints_per_hand,
+                "d": self.n_dof_per_joint,
             },
         )
         
@@ -65,32 +68,30 @@ class BvhDataset(Dataset):
         
         orig_angles = tf.data.Dataset.from_tensor_slices(ragged_angles)
 
-        # orig_angles = orig_angles.map(inspect("orig_angles"))
-
-        orig_angles_einshape = angles_einshape
         filenames = tf.data.Dataset.from_tensor_slices(filenames)
-        filenames_einshape = Einshape(
-            batch_dims={},
-            sequence_dims={ "f": "ragged" },
-            feature_dims={},
-        )
         
-        dset = tf.data.Dataset.zip({ "filename": filenames, "orig_angles": orig_angles })
-        n = dset.cardinality()
+        dset = tf.data.Dataset.zip((filenames, orig_angles))
 
-        dset = dset.map(lambda x: { **x, "angles": x["orig_angles"] })
+        dset = dset.map(lambda filename, orig_angles: {
+            "angles": orig_angles,
+            "extra": {
+                "filename": filename,
+                "orig_angles": orig_angles,
+            },
+        })
+
         def map_angles(dataset, fn):
             return dataset.map(lambda x: { **x, "angles": fn(x["angles"]) })
 
-        if cfg.recluster:
+        if self.recluster:
             circular_means = utils.circular_mean(all_angles, axis=0)
             dset = map_angles(dset, lambda a: utils.recluster(a, circular_means))
 
         dset = dset.map(lambda x: { **x, "idxs": utils.multidim_indices_of(x["angles"], flatten=False) })
         index_einshape = angles_einshape.append_feature_dim("i", angles_einshape.rank)
 
-        if cfg.decimate:
-            decimate = make_decimate_fn(cfg.decimate, angles_einshape, other_params=[(index_einshape, tf.int32)])
+        if self.decimate:
+            decimate = make_decimate_fn(self.decimate, angles_einshape, other_params=[(index_einshape, tf.int32)])
             def do_decimate(x):
                 angles, [idxs] = decimate(x["angles"], x["idxs"])
                 return {
@@ -101,119 +102,6 @@ class BvhDataset(Dataset):
             dset = dset.map(do_decimate)
 
         return dset
-
-
-def next_vector_prediction(d_cfg: BvhDataset, t_cfg: orig_tasks.NextVectorPrediction, force_cache_reload: bool) -> tuple[DSet, DatasetShape]:
-    
-    dsets = d_cfg.load(force_cache_reload=force_cache_reload)
-
-    # flatten angles feature dims (h, j, d) dims to single dim
-    dsets = dsets.map(lambda x: { **x, "angles": ein.rearrange(x["angles"], f"... {shapes['angles'].f_str} -> ... ({shapes['angles'].f_str})") })
-    shapes["angles"] = shapes["angles"].with_feature_dims({ "vec": shapes["angles"].f_product })
-
-    # for Next-vector-prediction task we only need the sequence indices, and there's only
-    # one sequence dimension
-    dsets = dsets.map(lambda x: { **x, "idxs": x["idxs"][:, 0, 0, 0, :1] })
-    shapes["idxs"] = shapes["idxs"].with_feature_dims({ "i": 1})
-
-    # repeat data to take many random chunks from each sequence
-    train, test, val = dsets.destructure()
-    n_train = train.cardinality().numpy()
-    dsets = DSet(
-        # repeat training data infinitely
-        train=train.repeat().shuffle(n_train),
-
-        # take 10 random chunks from each example
-        test=test.repeat(100),
-        val=val.repeat(100),
-    )
-
-    # dset = dset.map(inspect("repeat"))
-
-    get_chunk = make_get_chunk(
-        [
-            shapes["angles"],
-            shapes["orig_angles"],
-            shapes["idxs"],
-        ],
-        chunk_size=[t_cfg.sequence_length],
-        chunk_mode="simple",
-    )
-
-    def do_chunk(x):
-
-        angles, orig_angles, idxs = get_chunk([
-            x["angles"],
-            x["orig_angles"],
-            x["idxs"],
-        ])
-
-        return {
-            **x,
-            "angles": angles,
-            "orig_angles": orig_angles,
-            "idxs": idxs,
-        }
-    
-    # chunk
-    dsets = dsets.map(do_chunk)
-
-    # dset = dset.map(inspect("chunk"))
-
-    dsets = dsets.map(lambda x: {
-        "inputs": {
-            "input": tf.identity(x["angles"][:-1], name="inputs_angles"),
-            "input_idxs": tf.identity(x["idxs"][:-1], name="inputs_input_idxs"),
-            "target_idxs": tf.identity(x["idxs"], name="inputs_target_idxs"),
-        },
-        "targets": tf.identity(x["angles"], name="targets_targets"),
-        "extra": {
-            "orig_angles": tf.identity(x["orig_angles"], name="extra_orig_angles"),
-            "filename": tf.identity(x["filename"], name="extra_filename"),
-        },
-    })
-
-    dsets = DSet(
-        train=dsets.train.enumerate(),
-        test=dsets.test.enumerate(),
-        val=dsets.val.enumerate(),
-    )
-    dsets = dsets.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
-
-    # set shapes to chunk size and sequence length
-    shapes = DatasetShape(
-        inputs={
-            "input": shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length - 1 }),
-            "input_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length - 1 }),
-            "target_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length }),
-        },
-        targets=shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length }),
-        extra={
-            "orig_angles": shapes["orig_angles"],
-            "filename": shapes["filename"],
-        },
-    )
-
-    return dsets, shapes
-
-def to_inputs_and_targets(x):
-
-    input = x["angles"][:, :-1]
-    input_idxs = x["idxs"][:, :-1]
-    input_target_idxs = x["idxs"]
-
-    target = x["angles"]
-
-    return {
-        "input": input,
-        "input_idxs": input_idxs,
-        "input_target_idxs": input_target_idxs,
-    }, {
-        "target": target,
-    }, {
-        
-    }
-
 
 def random_subset(options, n, seed=None):
     options = tf.random.shuffle(options, seed=seed)

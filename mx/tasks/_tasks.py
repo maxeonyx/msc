@@ -1,11 +1,23 @@
 from abc import ABC, abstractmethod
 from dataclasses import KW_ONLY, dataclass
 from msilib import sequence
-from typing import Literal
+from typing import Callable, Generic, Literal, Type, TypeVar
+from mx import utils
 from mx.datasets import Dataset, DSets
-from mx.embedding import Embedding
-
+from mx.embedding import Embedding, TransformerAngleVectorEmbedding, TransformerVectorEmbedding, TransformerVectorEmbeddingConfig
+from mx.layers import input_dict
 from mx.utils.tf import *
+from mx.utils import Einshape, tf_scope
+
+@dataclass
+class TaskParts:
+    dsets: DSets
+    final_layer: tf.keras.layers.Layer
+    loss_fn: Callable[[tf.Tensor, tf.Tensor], tf.Tensor]
+    embedding_config: Type | None
+
+DataAndPredictionHead = tuple[DSets, tf.keras.layers.Layer, tf.keras.layers.Layer]
+TaskToEmbeddingAdaptor = Callable[[DSets], TaskParts]
 
 @dataclass
 class Task(ABC):
@@ -21,56 +33,197 @@ class Task(ABC):
     does_batching: bool = False
     "Whether the task does its own batching"
 
+    @property
     @abstractmethod
-    def adapt_for(self, embedding: Embedding, dataset: DSets):
+    def implementations(self) -> dict[Type[Embedding], TaskToEmbeddingAdaptor]:
         pass
+    
+    def is_compatible_with(self, embedding: Embedding) -> bool:
+        return type(embedding) in self.implementations
+    
+    def adapt_for(self, embedding: Embedding, data: DSets) -> DataAndPredictionHead:
+        if type(embedding) not in self.implementations:
+            raise NotImplementedError(f"Embedding {embedding.name} not implemented for task {self.name}")
+        else:
+            adaptor = self.implementations[type(embedding)]
 
-    @abstractmethod
-    def loss(self, targets, predictions):
-        pass
-
-    @abstractmethod
-    def predict(self, inputs):
-        pass
+        return adaptor(data)
 
 @dataclass
-class NextVectorPrediction(Task):
+class NextUnitVectorPrediction(Task):
+    """
+    Predict the next vector in a sequence, as a vector of unit vectors.
+    Because the outputs are (many-dimensional) vectors, this is a regression
+    task only.
+    
+    For a distribution prediction task, use NextTokenPrediction which
+    predicts a categorical distribution over a vocabulary of vectors.
+    """
 
-    n_sequence_dims: int
-    "Number of dimensions to treat as sequence dimensions. The rest are treated as feature dimensions."
+    chunk_size: int
+    "Length of chunks (sequence length)"
 
-    sequence_length: int
-    "Length of sequence to predict"
-
-    n_batch_dims = 0
-    "Number of dimensions to treat as batch dimensions. Default 0."
-
-    output_type: Literal["vector", "unit_vectors"] = "vector"
+    n_test_val_repeats: int = 100
+    """
+    Number of chunks to take out of each example to make validation and testing data.
+    In training, it's infinite and the number depends on the number of training steps
+    and batch size.
+    """
 
     _: KW_ONLY
 
     name: str = "Next Vector Prediction"
     identifier: str = "next-vector-prediction"
 
-    def adapt_for(self, embedding: Embedding, dataset: DSets):
-        return next_vector_prediction(dataset, self)
+    def implementations(self) -> dict[Type[Embedding], TaskToEmbeddingAdaptor]:
+        return {
+            TransformerVectorEmbedding: self._adapt_for_transformer_embedding,
+        }
+    
+    def _adapt_for_transformer_embedding(self, embedding: TransformerVectorEmbedding, dsets: DSets) -> TaskParts:
+        """
+        Adapt the task for standard transformer embedding.
+        """
+
+        n_input_dims = dsets.train.element_spec["inputs"]["input"].shape[-1]
+
+        return TaskParts(
+            dsets=dsets.map(lambda x: {
+                "input": x["inputs"]["input"],
+                "input_idxs": x["inputs"]["input_idxs"],
+            }),
+            final_layer=self.make_final_layer(embedding.n_embd),
+            loss_fn=self.loss,
+            embedding_config=TransformerVectorEmbedding.Config(
+                sequence_length=self.chunk_size,
+                n_input_dims=n_input_dims,
+            ),
+        )
+    
+    def _adapt_for_transformer_angle_embedding(self, embedding: TransformerAngleVectorEmbedding, dsets: DSets):
+        
+        return TaskParts(
+            dsets=dsets.map(lambda x: {
+                "angles": x["inputs"]["input"],
+                "input_idxs": x["inputs"]["input_idxs"],
+            }),
+            final_layer=self.make_final_layer(embedding.n_embd),
+            loss_fn=self.loss,
+            embedding_config=embedding.config_type,
+        )
+
+
+    def _process(self, dsets: DSets) -> DSets:
+        
+        element_spec = dsets.train.element_spec
+        
+        assert type(element_spec) is dict, "Next-vector-prediction requires a dataset of dicts"
+
+        for k in element_spec.keys():
+            assert k in dsets.test.element_spec, f"Test set was different from train set: {k} was missing"
+            assert k in dsets.val.element_spec, f"Val set was different from train set: {k} was missing"
+        
+        assert "data" in element_spec, "Next-vector-prediction requires a dataset with a 'data' key"
+        assert len(element_spec["data"].shape) == 2, f"Data for next-vector-prediction must have only a single sequence dimension, and a single feature dimension. Got shape {element_spec['data'].shape}"
+
+        assert "seq_idxs" in element_spec, "Next-vector-prediction requires a dataset with a 'seq_idxs' key"
+        assert len(element_spec["seq_idxs"].shape) == 1, f"seq_idxs for next-vector-prediction must have shape [seq]. Got shape {element_spec['seq_idxs'].shape}"
+
+        assert element_spec["data"].shape[0] == element_spec["seq_idxs"].shape[0], f"Data and seq_idxs must have the same sequence length. Got {element_spec['data'].shape[0]} ≠ {element_spec['seq_idxs'].shape[0]}"
+
+        data_shape = Einshape(
+            sequence_dims={"seq": element_spec["data"].shape[0]},
+            feature_dims={"feat": element_spec["data"].shape[1]},
+        )
+
+        seq_idxs_shape = Einshape(
+            sequence_dims={"seq": element_spec["seq_idxs"].shape[0]},
+            feature_dims={"index": element_spec["seq_idxs"].shape[1]},
+        )
+
+        # repeat data in order to take many random chunks from each sequence
+        train, test, val = dsets.destructure()
+        n_train = train.cardinality().numpy()
+        dsets = DSets(
+            # repeat training data infinitely. Shuffle before repeat ensures
+            # uniform distribution of sequences in each batch
+            train=train.shuffle(n_train).repeat(),
+            # Take n_repeats random chunks from each example. don't shuffle,
+            # because we want the test/val runs to be repeatable.
+            test=test.repeat(self.n_test_val_repeats),
+            val=val.repeat(self.n_test_val_repeats),
+        )
+
+        # dset = dset.map(inspect("repeat"))
+
+        get_chunk = make_get_chunk(
+            [
+                data_shape,
+                seq_idxs_shape,
+            ],
+            chunk_size=[self.sequence_length],
+            chunk_mode="simple",
+        )
+
+        def do_chunk(x):
+
+            data, seq_idxs = get_chunk([
+                x["data"],
+                x["seq_idxs"],
+            ])
+
+            return {
+                **x,
+                "data": data,
+                "seq_idxs": seq_idxs,
+            }
+        
+        # chunk
+        dsets = dsets.map(do_chunk)
+
+        dsets = dsets.map(lambda x: {
+            "inputs": {
+                "input": x["data"][:-1],
+                "input_idxs": x["seq_idxs"][:-1],
+                "target_idxs": x["seq_idxs"][1:],
+            },
+            "targets": x["data"][1:],
+            "extra": {
+                **x["extra"],
+            },
+        })
+
+        dsets = DSets(
+            train=dsets.train.enumerate(),
+            test=dsets.test.enumerate(),
+            val=dsets.val.enumerate(),
+        )
+        dsets = dsets.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
+
+        return dsets
+
+    def make_final_layer(self, n_embd: int) -> tf.keras.layers.Layer:
+
+        inputs = input_dict(
+            Input([None, n_embd], name="embd"),
+        )
+
+
+        return tf.keras.layers.Dense(2, activation="tanh")
 
     def loss(self, targets, outputs):
-        if self.output_type == "vector":
-            return tf.reduce_mean(tf.square(targets - outputs))
-        elif self.output_type == "unit_vectors":
-            target_sins = tf.sin(targets)
-            target_coss = tf.cos(targets)
-            output_sins = outputs[..., 0]
-            output_coss = outputs[..., 1]
-            return tf.reduce_mean(tf.square(target_sins - output_sins) + tf.square(target_coss - output_coss))
+        target_sins = tf.sin(targets)
+        target_coss = tf.cos(targets)
+        output_sins = outputs[..., 0]
+        output_coss = outputs[..., 1]
+        return tf.reduce_mean(tf.square(target_sins - output_sins) + tf.square(target_coss - output_coss))
 
     def predict(self, inputs):
         return inputs
 
 
 
-def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: Literal["simple", "random"], seed=None):
+def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], seed=None):
     """
     Cuts chunks of size chunk_size from the input sequence x.
     Returns a new sequence of the same rank as x, with the
@@ -114,19 +267,12 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
 
         seq_shape = tf.shape(seqs[0])[seq_einshape.b_rank:seq_einshape.b_rank+seq_einshape.s_rank]
 
-        if chunk_mode == "simple":
-
-            max_indices = seq_shape - tf.constant(chunk_size, tf.int32)
-            idxs = tf.map_fn(
-                lambda max_i: tf.random.uniform([], 0, max_i, dtype=tf.int32, seed=seed),
-                max_indices,
-            )
-            idxs = idxs[None, :] + utils.multidim_indices(chunk_size, flatten=True, elide_rank_1=False)
-        elif chunk_mode == "random":
-            idxs = utils.multidim_indices(seq_shape, flatten=False)
-            idxs = random_subset(idxs, chunk_size, seed=seed)
-        else:
-            raise ValueError(f"Unknown chunk mode {chunk_mode}.")
+        max_indices = seq_shape - tf.constant(chunk_size, tf.int32)
+        idxs = tf.map_fn(
+            lambda max_i: tf.random.uniform([], 0, max_i, dtype=tf.int32, seed=seed),
+            max_indices,
+        )
+        idxs = idxs[None, :] + utils.multidim_indices(chunk_size, flatten=True, elide_rank_1=False)
 
         # extract chunks from seqs
         seqs = [
@@ -151,118 +297,3 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
         return seqs
     
     return get_chunk
-
-def next_vector_prediction(t_cfg: NextVectorPrediction, dsets: DSets) -> tuple[DSet, DatasetShape]:
-    
-    element_spec = dsets.train.element_spec
-    
-    assert type(element_spec) is dict, "Next-vector-prediction requires a dataset of dicts"
-
-
-    for k in element_spec.keys():
-        assert k in dsets.test.element_spec, f"Test set was different from train set: {k} was missing"
-        assert k in dsets.val.element_spec, f"Val set was different from train set: {k} was missing"
-    
-    assert "data" in element_spec, "Next-vector-prediction requires a dataset with a 'data' key"
-    assert len(element_spec["data"].shape) == 2, f"Data for next-vector-prediction must have only a single sequence dimension, and a single feature dimension. Got shape {element_spec['data'].shape}"
-
-    assert "seq_idxs" in element_spec, "Next-vector-prediction requires a dataset with a 'seq_idxs' key"
-    assert len(element_spec["seq_idxs"].shape) == 3, f"seq_idxs for next-vector-prediction must have shape [seq, feat, index]. Got shape {element_spec['seq_idxs'].shape}"
-    assert element_spec["seq_idxs"].shape[-1] == t_cfg.n_sequence_dims, f"The final dimension of seq_idxs must have shape = n_sequence_dims dimensions. Expected {t_cfg.n_sequence_dims}, got {element_spec['seq_idxs'].shape[-1]}"
-
-
-    # flatten batch dims to a single batch dim, sequence dims to a single sequence dim, and feature dims to a single feature dim
-    dsets = dsets.map(lambda x: {
-        **x,
-        "data": tf.reshape()
-
-    # flatten angles feature dims (h, j, d) dims to single dim
-    dsets = dsets.map(lambda x: { **x, "data": ein.rearrange(x["data"], f"... {shapes["data"].f_str} -> ... ({shapes["angles"].f_str})") })
-    shapes["angles"] = shapes["angles"].with_feature_dims({ "vec": shapes["angles"].f_product })
-
-
-
-    # for Next-vector-prediction task we only need the sequence indices, and there's only
-    # one sequence dimension
-    dsets = dsets.map(lambda x: { **x, "idxs": x["idxs"][:, 0, 0, 0, :1] })
-    shapes["idxs"] = shapes["idxs"].with_feature_dims({ "i": 1 })
-
-    # repeat data to take many random chunks from each sequence
-    train, test, val = dsets.destructure()
-    n_train = train.cardinality().numpy()
-    dsets = DSet(
-        # repeat training data infinitely
-        train=train.repeat().shuffle(n_train),
-
-        # take 10 random chunks from each example
-        test=test.repeat(100),
-        val=val.repeat(100),
-    )
-
-    # dset = dset.map(inspect("repeat"))
-
-    get_chunk = make_get_chunk(
-        [
-            shapes["angles"],
-            shapes["orig_angles"],
-            shapes["idxs"],
-        ],
-        chunk_size=[t_cfg.sequence_length],
-        chunk_mode="simple",
-    )
-
-    def do_chunk(x):
-
-        angles, orig_angles, idxs = get_chunk([
-            x["angles"],
-            x["orig_angles"],
-            x["idxs"],
-        ])
-
-        return {
-            **x,
-            "angles": angles,
-            "orig_angles": orig_angles,
-            "idxs": idxs,
-        }
-    
-    # chunk
-    dsets = dsets.map(do_chunk)
-
-    # dset = dset.map(inspect("chunk"))
-
-    dsets = dsets.map(lambda x: {
-        "inputs": {
-            "input": tf.identity(x["angles"][:-1], name="inputs_angles"),
-            "input_idxs": tf.identity(x["idxs"][:-1], name="inputs_input_idxs"),
-            "target_idxs": tf.identity(x["idxs"], name="inputs_target_idxs"),
-        },
-        "targets": tf.identity(x["angles"], name="targets_targets"),
-        "extra": {
-            "orig_angles": tf.identity(x["orig_angles"], name="extra_orig_angles"),
-            "filename": tf.identity(x["filename"], name="extra_filename"),
-        },
-    })
-
-    dsets = DSet(
-        train=dsets.train.enumerate(),
-        test=dsets.test.enumerate(),
-        val=dsets.val.enumerate(),
-    )
-    dsets = dsets.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
-
-    # set shapes to chunk size and sequence length
-    shapes = DatasetShape(
-        inputs={
-            "input": shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length - 1 }),
-            "input_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length - 1 }),
-            "target_idxs": shapes["idxs"].with_sequence_dims({ "f": t_cfg.sequence_length }),
-        },
-        targets=shapes["angles"].with_sequence_dims({ "f": t_cfg.sequence_length }),
-        extra={
-            "orig_angles": shapes["orig_angles"],
-            "filename": shapes["filename"],
-        },
-    )
-
-    return dsets, shapes

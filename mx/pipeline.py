@@ -19,10 +19,10 @@ class Pipeline:
         if not embedding.compatible_with(model):
             raise NotImplementedError(f"{type(embedding)} cannot be used for {type(model)}")
 
-        self.dataset = dataset
-        self.task = task
-        self.embedding = embedding
-        self.model = model
+        task
+
+        
+    
     
     def _load(self) -> DSets:
 
