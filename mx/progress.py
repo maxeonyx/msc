@@ -1,3 +1,4 @@
+from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import count
@@ -9,6 +10,10 @@ import traceback
 from typing import Any, Callable
 
 import enlighten
+
+from mx.export import export
+
+from mx.metrics import MxMetric
 
 SPINNER_1X2 = "⠁⠂⠄⡀⢀⠠⠐⠈"
 SPINNER_2X2 = ["⠁ ", "⠂ ", "⠄ ", "⡀ ", "⢀ ", " ⡀", " ⢀", " ⠠", " ⠐", " ⠈", " ⠁", "⠈ "]
@@ -24,7 +29,8 @@ LEFT_STOP = "╼"
 RIGHT_STOP = "╾"
 RIGHT_CORNER = "╮"
 
-def metric_bar_format(metrics: list[Any]):
+def metric_bar_format(metrics: dict[str, MxMetric]):
+    metrics = metrics.values()
 
     if len(metrics) == 0:
         empty_format = f"{VERTICAL_BAR} {{fill}}"
@@ -36,13 +42,12 @@ def metric_bar_format(metrics: list[Any]):
     value_bar_format = f"{VERTICAL_BAR}{{fill}}{VERTICAL_BAR}{f'{VERTICAL_BAR}'.join(metric_formats)}{VERTICAL_BAR}{{fill}}"
     return header_bar_format, value_bar_format
 
-def metric_format(metrics: list[Any]):
+def metric_format(metrics_dict: dict[str, MxMetric]):
+    metrics = metrics_dict.values()
 
     if len(metrics) == 0:
         empty_format = f"{VERTICAL_BAR} {{fill}}"
         return empty_format, empty_format
-
-    headers = [(f"{m.name}", f" ({m.unit})" if m.unit else "") for m in metrics]
 
     def value_format(val, width):
 
@@ -57,7 +62,7 @@ def metric_format(metrics: list[Any]):
         elif isinstance(val, str):
             s = f"{val:<{width_nopad}}"
         else: # assume float or float-like
-            s = f"{val:> {width_nopad}.4g}"
+            s = f"{val:> {width_nopad}.3g}"
         
         return f" {s} "
 
@@ -65,7 +70,8 @@ def metric_format(metrics: list[Any]):
         return f"{ LEFT_STOP + ' ' + title + unit + ' ' + RIGHT_STOP :{HORIZONTAL_BAR}^{width}}"
 
     len_of_stoppers_and_gap = 4
-    max_len_of_numeric_val = 10
+    max_len_of_numeric_val = 13
+    headers = [(f"{m.name}", f" ({m.unit})" if m.unit else "") for m in metrics]
     widths = [max(len(title) + len(unit) + len_of_stoppers_and_gap, max_len_of_numeric_val) for title, unit in headers]
 
     headers = [(f"{m.name}", f" ({m.unit})" if m.unit else "") for m in metrics]
@@ -74,10 +80,10 @@ def metric_format(metrics: list[Any]):
     return {
         name: header_format(title, unit, width) for name, width, (title, unit) in zip(metric_names, widths, headers)
     }, {
-        name: value_format((m.result.numpy() if m.initialized else None), width) for name, width, m in zip(metric_names, widths, metrics)
+        name: value_format(m.result(), width) for name, width, m in zip(metric_names, widths, metrics)
     }
 
-
+@export
 @dataclass(frozen=False)
 class Progress:
     manager: enlighten.Manager
@@ -102,7 +108,7 @@ class Progress:
         return f"\"{self.run_name}\"{tasks}"
 
     @contextmanager
-    def enter_spinner(self, name: str, desc: str):
+    def enter_spinner(self, name: str, desc: str, delete_on_success=False):
         indent_level = self.indent_level
         indent = "    " * self.indent_level
 
@@ -110,15 +116,16 @@ class Progress:
         spinner_bar = self.manager.status_bar(status_format=status_format, desc=desc, spinner=SPINNER[0], indent=indent, min_delta=self.min_delta, leave=True)
         
         state = "running"
+        closed = False
         def update(i):
-            
-            if state == "running":
-                spinner = SPINNER[i % len(SPINNER)]
-            elif state == "success":
-                spinner = TICK
-            else: 
-                spinner = CROSS
-            spinner_bar.update(spinner=spinner)
+            if not closed:
+                if state == "running":
+                    spinner = SPINNER[i % len(SPINNER)]
+                elif state == "success":
+                    spinner = TICK
+                else: 
+                    spinner = CROSS
+                spinner_bar.update(spinner=spinner)
         
         try:
             self.indent_level += 1
@@ -128,19 +135,27 @@ class Progress:
 
             yield
 
-            state = "success"
+            if delete_on_success:
+                closed = True
+                spinner_bar.leave = False
+                spinner_bar.close()
+            else:
+                state = "success"
         except Exception as e:
             state = "error"
             raise e
         finally:
             self.indent_level = indent_level
             if update in self.update_fns:
-                self.update_fns_to_remove.append((update, lambda: spinner_bar.close()))
+                def close():
+                    if not closed:
+                        spinner_bar.close()
+                self.update_fns_to_remove.append((update, close))
             if len(self.tasks) > 0 and self.tasks[-1] == name:
                 self.tasks.pop()
 
     @contextmanager
-    def enter_progbar(self, total: int | None, name: str, desc: str, unit: str ='steps', start_at: int = 0, delete_if_success: bool = True):
+    def enter_progbar(self, total: int | None, name: str, desc: str, unit: str ='steps', start_at: int = 0, delete_on_success: bool = True):
         indent_level = self.indent_level
         indent = "    " * self.indent_level
 
@@ -169,7 +184,7 @@ class Progress:
 
             yield prog_bar
 
-            if delete_if_success:
+            if delete_on_success:
                 closed = True
                 prog_bar.leave = False
                 prog_bar.close()
@@ -207,7 +222,7 @@ class Progress:
             
             self.update_fns.append(metrics_update)
 
-            with self.enter_progbar(total=n_epochs, name=name, desc="Overall Progress", unit="epochs", delete_if_success=False) as prog_bar:
+            with self.enter_progbar(total=n_epochs, name=name, desc="Overall Progress", unit="epochs", delete_on_success=False) as prog_bar:
                 
                 yield prog_bar
 
@@ -219,6 +234,7 @@ class Progress:
                 self.update_fns_to_remove.append((metrics_update, close))
 
 
+@export
 @contextmanager
 def create_progress_manager(
     run_name: str,

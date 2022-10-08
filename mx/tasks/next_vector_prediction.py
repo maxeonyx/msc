@@ -1,54 +1,14 @@
-from abc import ABC, abstractmethod
-from dataclasses import KW_ONLY, dataclass
-from msilib import sequence
-from typing import Callable, Generic, Literal, Type, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable
 from mx import utils
-from mx.datasets import Dataset, DSets
-from mx.embedding import Embedding, TransformerAngleVectorEmbedding, TransformerVectorEmbedding, TransformerVectorEmbeddingConfig
+from mx.embedding import TransformerAngleVectorEmbedding
 from mx.layers import input_dict
-from mx.utils.tf import *
-from mx.utils import Einshape, tf_scope
+from mx.tf import *
+from mx.utils import Einshape, tf_scope, DSets
 
-@dataclass
-class TaskParts:
-    dsets: DSets
-    final_layer: tf.keras.layers.Layer
-    loss_fn: Callable[[tf.Tensor, tf.Tensor], tf.Tensor]
-    embedding_config: Type | None
+from mx.pipeline import Task, Embedding
 
-DataAndPredictionHead = tuple[DSets, tf.keras.layers.Layer, tf.keras.layers.Layer]
-TaskToEmbeddingAdaptor = Callable[[DSets], TaskParts]
-
-@dataclass
-class Task(ABC):
-
-    name: str
-    "Human-readable name"
-
-    identifier: str
-    "Unique, machine-readable identifier"
-
-    _: KW_ONLY
-
-    does_batching: bool = False
-    "Whether the task does its own batching"
-
-    @property
-    @abstractmethod
-    def implementations(self) -> dict[Type[Embedding], TaskToEmbeddingAdaptor]:
-        pass
-    
-    def is_compatible_with(self, embedding: Embedding) -> bool:
-        return type(embedding) in self.implementations
-    
-    def adapt_for(self, embedding: Embedding, data: DSets) -> DataAndPredictionHead:
-        if type(embedding) not in self.implementations:
-            raise NotImplementedError(f"Embedding {embedding.name} not implemented for task {self.name}")
-        else:
-            adaptor = self.implementations[type(embedding)]
-
-        return adaptor(data)
-
+@export
 @dataclass
 class NextUnitVectorPrediction(Task):
     """
@@ -60,61 +20,53 @@ class NextUnitVectorPrediction(Task):
     predicts a categorical distribution over a vocabulary of vectors.
     """
 
-    chunk_size: int
-    "Length of chunks (sequence length)"
-
-    n_test_val_repeats: int = 100
-    """
-    Number of chunks to take out of each example to make validation and testing data.
-    In training, it's infinite and the number depends on the number of training steps
-    and batch size.
-    """
-
-    _: KW_ONLY
-
-    name: str = "Next Vector Prediction"
-    identifier: str = "next-vector-prediction"
-
-    def implementations(self) -> dict[Type[Embedding], TaskToEmbeddingAdaptor]:
-        return {
-            TransformerVectorEmbedding: self._adapt_for_transformer_embedding,
-        }
-    
-    def _adapt_for_transformer_embedding(self, embedding: TransformerVectorEmbedding, dsets: DSets) -> TaskParts:
-        """
-        Adapt the task for standard transformer embedding.
-        """
-
-        n_input_dims = dsets.train.element_spec["inputs"]["input"].shape[-1]
-
-        return TaskParts(
-            dsets=dsets.map(lambda x: {
-                "input": x["inputs"]["input"],
-                "input_idxs": x["inputs"]["input_idxs"],
-            }),
-            final_layer=self.make_final_layer(embedding.n_embd),
-            loss_fn=self.loss,
-            embedding_config=TransformerVectorEmbedding.Config(
-                sequence_length=self.chunk_size,
-                n_input_dims=n_input_dims,
-            ),
-        )
-    
-    def _adapt_for_transformer_angle_embedding(self, embedding: TransformerAngleVectorEmbedding, dsets: DSets):
-        
-        return TaskParts(
-            dsets=dsets.map(lambda x: {
-                "angles": x["inputs"]["input"],
-                "input_idxs": x["inputs"]["input_idxs"],
-            }),
-            final_layer=self.make_final_layer(embedding.n_embd),
-            loss_fn=self.loss,
-            embedding_config=embedding.config_type,
+    def __init__(self, chunk_size: int, n_test_val_repeats: int = 100):
+        super().__init__(
+            name = "Next Vector Prediction",
+            identifier = "next-vector-prediction",
         )
 
+        self.chunk_size: int = chunk_size
+        "Length of chunks (sequence length)"
 
-    def _process(self, dsets: DSets) -> DSets:
+        self.n_test_val_repeats: int = n_test_val_repeats
+        """
+        Number of chunks to take out of each example to make validation and testing data.
+        In training, it's infinite and the number depends on the number of training steps
+        and batch size.
+        """
         
+    
+    def configure(self, embedding: Embedding) -> Any:
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+
+        n_input_dims = self.ds_cfg.n_input_dims
+        sequence_length = self.chunk_size
+
+        ### Set embedding down_cfg ###
+        if isinstance(embedding, TransformerAngleVectorEmbedding):
+            embedding.receive_task_config(embedding.task_config_type(
+                n_input_dims,
+                sequence_length,
+            ))
+            def fn(dsets: DSets) -> DSets:
+                return dsets.map(lambda x: {
+                    **x,
+                    "inputs": {
+                        "angles": x["inputs"]["input"],
+                        "input_idxs": x["inputs"]["input_idxs"],
+                    },
+                })
+            self._adaptor = fn
+        else:
+            raise NotImplementedError(f"Embedding type {type(embedding)} not implemented")
+
+    def process(self, dsets: DSets) -> DSets:
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+        assert self._adaptor is not None, "self.adaptor was not set by task.configure(embedding)"
+
         element_spec = dsets.train.element_spec
         
         assert type(element_spec) is dict, "Next-vector-prediction requires a dataset of dicts"
@@ -138,7 +90,7 @@ class NextUnitVectorPrediction(Task):
 
         seq_idxs_shape = Einshape(
             sequence_dims={"seq": element_spec["seq_idxs"].shape[0]},
-            feature_dims={"index": element_spec["seq_idxs"].shape[1]},
+            feature_dims={},
         )
 
         # repeat data in order to take many random chunks from each sequence
@@ -161,8 +113,7 @@ class NextUnitVectorPrediction(Task):
                 data_shape,
                 seq_idxs_shape,
             ],
-            chunk_size=[self.sequence_length],
-            chunk_mode="simple",
+            chunk_size=[self.chunk_size],
         )
 
         def do_chunk(x):
@@ -200,29 +151,53 @@ class NextUnitVectorPrediction(Task):
         )
         dsets = dsets.map(lambda i, x: { **x, "extra": x["extra"] | { "i": i } })
 
-        return dsets
+        return self._adaptor(dsets)
 
-    def make_final_layer(self, n_embd: int) -> tf.keras.layers.Layer:
+    def make_final_layer(self) -> tf.keras.layers.Layer:
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+        assert self.model_cfg is not None, "Must call task.configure(embedding) first"
 
         inputs = input_dict(
-            Input([None, n_embd], name="embd"),
+            Input([None, self.model_cfg.n_output_embd], name="embd"),
+        )
+        dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims * 2)
+        def call(inputs):
+            outs = dense(inputs["embd"])
+            outs = ein.rearrange(outs, "... seq (feat sincos) -> ... seq feat sincos", sincos=2)
+            return { "unit_vectors": outs, **inputs }
+
+        return Model(
+            inputs=inputs,
+            outputs=call(inputs),
+            name="outputs",
         )
 
+    def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
+        "Angular mean-squared-error loss."
 
-        return tf.keras.layers.Dense(2, activation="tanh")
+        @tf.function
+        @tf_scope
+        def angular_mse_loss(targets, outputs):
+            "Angular mean-squared-error loss."
 
-    def loss(self, targets, outputs):
-        target_sins = tf.sin(targets)
-        target_coss = tf.cos(targets)
-        output_sins = outputs[..., 0]
-        output_coss = outputs[..., 1]
-        return tf.reduce_mean(tf.square(target_sins - output_sins) + tf.square(target_coss - output_coss))
+            unit_vectors = outputs["unit_vectors"]
 
-    def predict(self, inputs):
-        return inputs
+            target_sin = tf.sin(targets)
+            target_cos = tf.cos(targets)
+            sin = unit_vectors[..., 0]
+            cos = unit_vectors[..., 1]
+            return tf.reduce_mean(tf.square(target_sin - sin) + tf.square(target_cos - cos))
+        
+        return angular_mse_loss
+
+    def make_predict_fn(self):
+        "Predict the next vector in the sequence, starting with optional seed data."
+
+        raise NotImplementedError("TODO")
 
 
-
+@export
 def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], seed=None):
     """
     Cuts chunks of size chunk_size from the input sequence x.

@@ -1,1 +1,1 @@
-from ._embedding import *
+from .vector_embeddings import *

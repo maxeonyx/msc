@@ -1,11 +1,13 @@
 holoviews[recommended]
-enlighten ~= 1.10
-wandb ~= 0.12
+enlighten
+wandb
 tensorflow
-tensorflow_datasets
 tensorflow_probability
-python-box ~= 6.0
-randomname ~= 0.1
+keras-nlp
+python-box
+randomname
 einops
-nvsmi ~= 0.4
+nvsmi
 tensorboard_plugin_profile
+
+datasets

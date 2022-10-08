@@ -1,52 +1,83 @@
-import abc
 from dataclasses import dataclass
-from typing import Any, Collection, Literal, Optional, Type, Union
+from typing import Any, Callable, Literal, Union
 
-from mx.utils.tf import *
-
-from .. import tasks as orig_tasks
-from mx import tasks
-from mx.tasks import Task, NextUnitVectorPrediction
-from .. import DSet, DatasetShape, Dataset, DsToTaskAdaptor, DSets
+from mx.tf import *
+from mx.tasks import NextUnitVectorPrediction
 from mx import utils
-from mx.utils import tf_scope, Einshape, shape_list
+from mx.utils import tf_scope, Einshape, DSets
+from mx.pipeline import MxDataset, Task
+
 from . import _bvh
 
 @dataclass
-class BvhDataset(Dataset):
+class BvhDataset(MxDataset):
     """
     Config for the BVH dataset pipeline.
     """
-    recluster: bool = False
-    decimate: Union[Literal[False], float] = False
-    n_hands: Literal[1, 2] = 2
-    n_joints_per_hand: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17
-    n_dof_per_joint: Literal[1, 2, 3] = 3
-    columns: Literal["all"] = "all"
-    name = "bvh_all_columns"
 
-    @property
-    def implementations(self) -> dict[Type[Task], DsToTaskAdaptor]:
-        return {
-            NextUnitVectorPrediction: self._for_next_vector_prediction,
-        }
+    def __init__(
+        self,
+        recluster: bool = False,
+        decimate: Union[Literal[False], float] = False,
+        n_hands: Literal[1, 2] = 2,
+        n_joints_per_hand: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17,
+        n_dof_per_joint: Literal[1, 2, 3] = 3,
+        name="BVH dataset",
+        identifier="bvh",
+        split=(0.8, 0.1, 0.1),
+        split_seed=1234,
+    ):
+        super().__init__(
+            name=name,
+            identifier=identifier,
+            split=split,
+            split_seed=split_seed,
+        )
+        self.recluster = recluster
+        """Whether to recluster the angles to have a circular mean of 0."""
+        self.decimate = decimate
+        """
+        Whether to decimate the dataset. If a float, this is min L2-dist
+        between two frames.
+        """
+        self.n_hands = n_hands
+        """Number of hands to use."""
+        self.n_joints_per_hand = n_joints_per_hand
+        """Number of joints per hand to use."""
+        self.n_dof_per_joint = n_dof_per_joint
+        """Number of degrees of freedom per joint to use."""
 
-    def _for_next_vector_prediction(self, dsets: DSets) -> DSets:
+        ## Set by self.configure(task) ##
+        self._adaptor: Callable[[DSets], DSets] | None = None
 
-        dsets = dsets.map(lambda x: {
-            # flatten hand/joint/dof dims into a single feature dim
-            "data": ein.rearrange(x["angles"], f"f h j d -> f (h j d)"),
-            # remove indices for the flattened feature dim, keep only
-            # frame indices
-            "seq_idxs": x["idxs"][:, 0, 0, 0, 0],
-            "extra": x["extra"],
-        })
+    def configure(self, task: Task):
 
-        return dsets
+        # vector of shape (h j d)
+        n_input_dims = self.n_hands * self.n_joints_per_hand * self.n_dof_per_joint
+
+        if isinstance(task, NextUnitVectorPrediction):
+            task.recieve_dataset_config(task.ds_config_type(
+                n_input_dims=n_input_dims,
+            ))
+            def adapt(dsets: DSets) -> DSets:
+                return dsets.map(lambda x: {
+                    # flatten hand/joint/dof dims into a single feature dim
+                    "data": ein.rearrange(x["angles"], f"f h j d -> f (h j d)"),
+                    # remove indices for the flattened feature dim, keep only
+                    # frame indices
+                    "seq_idxs": x["idxs"][:, 0, 0, 0, 0],
+                    "extra": x["extra"],
+                })
+            self._adaptor = adapt
+        else:
+            raise NotImplementedError(f"{type(task)} not supported by {type(self)}")
+
 
     def load(self, force_cache_reload: bool) -> tf.data.Dataset:
+
+        assert self._adaptor is not None, "Must call dataset.configure(task) before dataset.load()"
         
-        filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns=self.columns)
+        filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns="all")
 
         all_angles = tf.concat(angles, axis=0)
         del angles
@@ -100,8 +131,10 @@ class BvhDataset(Dataset):
                     "idxs": idxs,
                 }
             dset = dset.map(do_decimate)
+        
+        dset = self._adaptor(dset)
 
-        return dset
+        return self._snapshot_cache_split(dset, buffer_size=None)
 
 def random_subset(options, n, seed=None):
     options = tf.random.shuffle(options, seed=seed)
@@ -127,47 +160,6 @@ def weighted_random_n(n_max, D=2., B=10., seed=None):
  
     return tf.random.categorical(log_probabilities[None, :], 1, seed=seed)[0, 0]
 
-def flat_vector_batched_random_chunk(cfg, x, random_ahead=False, seed=None):
-
-    if random_ahead:
-        n_ahead = weighted_random_n(20, 2., 3., seed=seed)
-    else:
-        n_ahead = tf.constant(1, tf.int32)
-
-    chunk_size = cfg.n_hand_vecs + n_ahead
-
-    vecs, idxs = tf.map_fn(
-        lambda a: get_chunk(cfg, chunk_size, a, chunk_mode="simple", seed=seed),
-        x,
-        fn_output_signature=(
-            tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
-                        cfg.n_dof_per_joint], dtype=tf.float32),
-            tf.TensorSpec(shape=[None, 2], dtype=tf.int32),
-        ),
-        name="hand_map",
-        parallel_iterations=10,
-    )
-
-    n_frames = tf.shape(vecs)[1]
-    input = vecs[:, :n_frames-n_ahead, :, :]
-    input_idxs = idxs[:, :n_frames-n_ahead, :]
-    target = vecs[:, n_ahead:, :, :]
-    target_idxs = idxs[:, n_ahead:, :]
-
-    input = ein.rearrange(input, 'b fh j d -> b fh j d')
-    target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
-
-    return (
-        x | {
-            "input_angles": input,
-            "input_idxs": input_idxs,
-            "target_idxs": target_idxs,
-            # "n_ahead": n_ahead,
-        },
-        {
-            "target_output": target,
-        },
-    )
 
 
 def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: Literal["simple", "random"], seed=None):
@@ -314,6 +306,51 @@ def make_decimate_fn(threshold: float, dims: Einshape, other_params: list[tuple[
             return d
     
     return decimate
+
+
+
+# def flat_vector_batched_random_chunk(cfg, x, random_ahead=False, seed=None):
+
+#     if random_ahead:
+#         n_ahead = weighted_random_n(20, 2., 3., seed=seed)
+#     else:
+#         n_ahead = tf.constant(1, tf.int32)
+
+#     chunk_size = cfg.n_hand_vecs + n_ahead
+
+#     vecs, idxs = tf.map_fn(
+#         lambda a: get_chunk(cfg, chunk_size, a, chunk_mode="simple", seed=seed),
+#         x,
+#         fn_output_signature=(
+#             tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
+#                         cfg.n_dof_per_joint], dtype=tf.float32),
+#             tf.TensorSpec(shape=[None, 2], dtype=tf.int32),
+#         ),
+#         name="hand_map",
+#         parallel_iterations=10,
+#     )
+
+#     n_frames = tf.shape(vecs)[1]
+#     input = vecs[:, :n_frames-n_ahead, :, :]
+#     input_idxs = idxs[:, :n_frames-n_ahead, :]
+#     target = vecs[:, n_ahead:, :, :]
+#     target_idxs = idxs[:, n_ahead:, :]
+
+#     input = ein.rearrange(input, 'b fh j d -> b fh j d')
+#     target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
+
+#     return (
+#         x | {
+#             "input_angles": input,
+#             "input_idxs": input_idxs,
+#             "target_idxs": target_idxs,
+#             # "n_ahead": n_ahead,
+#         },
+#         {
+#             "target_output": target,
+#         },
+#     )
+
 
 if __name__ == '__main__':
     import doctest

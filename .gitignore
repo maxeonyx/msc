@@ -9,6 +9,8 @@ _models/*
 _cache/*
 _runs/*
 _logs/*
+_output/*
+_outputs/*
 
 !**/.gitkeep
 

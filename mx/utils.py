@@ -1,14 +1,52 @@
-import functools
-from typing import Literal, Union
-from typing_extensions import Self
+from __future__ import annotations
+from contextlib import contextmanager
 
-from .tf import *
+import functools
+import os
+from typing import Callable, Literal
+from typing_extensions import Self
+from dataclasses import dataclass
+
+from mx.tf import *
 
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake
 
+@export
+@dataclass
+class DSets:
+    train: tf.data.Dataset
+    test: tf.data.Dataset
+    val: tf.data.Dataset
 
+    def destructure(self) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
+        return self.train, self.test, self.val
+
+    def map(self, fn) -> DSets:
+        return DSets(
+            train = self.train.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            test = self.test.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            val = self.val.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+        )
+    
+    def batch(self, batch_size, test_batch_size) -> DSets:
+        dset = DSets(
+            train = self.train.batch(batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            test = self.test.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            val = self.val.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+        )
+
+        return dset
+
+    def cache(self) -> DSets:
+        return DSets(
+            train = self.train.cache(),
+            test = self.test.cache(),
+            val = self.val.cache(),
+        )
+
+@export
 def tf_scope(func):
     """
     Decorator to automatically enter the module name scope.
@@ -50,7 +88,7 @@ def tf_scope(func):
     
     return tf_decorator.make_decorator(func, func_with_name_scope)
 
-
+@export
 class Einshape:
 
     def __init__(self, batch_dims: dict[str, int | None] = {}, sequence_dims: dict[str, int | None | Literal["ragged"]] = {}, feature_dims: dict[str, int | None] = {}):
@@ -286,7 +324,8 @@ class Einshape:
             sequence_dims = self._s,
             feature_dims = self._f,
         )
-    
+
+@export
 @tf_scope
 def multidim_indices(shape, flatten=True, elide_rank_1=True):
     """
@@ -313,7 +352,7 @@ def multidim_indices(shape, flatten=True, elide_rank_1=True):
         indices = tf.reshape(indices, [-1, len(shape)])
     return indices
 
-
+@export
 @tf_scope
 def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     """
@@ -332,7 +371,7 @@ def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     shape = shape_list(tensor)
     return multidim_indices(shape, flatten=flatten, elide_rank_1=elide_rank_1)
 
-
+@export
 def angle_wrap(angles):
     """
     Wrap angle in radians to [-pi, pi] range
@@ -351,7 +390,7 @@ def circular_mean(angles, axis=0):
     circular_means = tf.math.atan2(means_sin_a, means_cos_a)
     return circular_means
 
-
+@export
 @tf_scope
 def recluster(angles, circular_means=None, frame_axis=0):
     if circular_means is None:
@@ -363,7 +402,7 @@ def recluster(angles, circular_means=None, frame_axis=0):
 
     return angles
 
-
+@export
 @tf_scope
 def unrecluster(angles, circular_means, n_batch_dims=0):
     # assuming the mean is currently 0, rotate the data so the mean is
@@ -375,3 +414,143 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
     angles = angle_wrap(angles)
 
     return angles
+
+@export
+@tf.function
+def tf_val_repr(x, indent="    ", depth=0, prefix=""):
+    if isinstance(x, dict):
+        return tf_dict_repr(x, indent=indent, depth=depth, prefix=prefix)
+    elif isinstance(x, tuple):
+        return tf_tuple_repr(x, indent=indent, depth=depth, prefix=prefix)
+    elif len(x.shape) == 0:
+        if x.dtype == tf.string:
+            str_x = tf.strings.join(["\"", x, "\""], separator="")
+        else:
+            str_x = tf.strings.as_string(x)
+    else:
+        str_x = tf.strings.join([
+            "`",
+            tf.constant(x.dtype.name, tf.string),
+            "[",
+            tf.strings.reduce_join(tf.strings.as_string(tf.shape(x)), separator=" "),
+            "]",
+        ])
+    
+    return tf.strings.join([
+        *([indent]*depth),
+        prefix,
+        str_x,
+    ])
+
+@export
+@tf.function
+def tf_dict_repr(x, indent="    ", depth=0, prefix=""):
+    return tf.strings.join([
+        *([indent]*depth),
+        prefix,
+        "{\n",
+        tf.strings.join([
+            tf.strings.join([
+                tf_val_repr(v, indent=indent, depth=depth+1, prefix=tf.strings.join([k, ": "], separator="")),
+                ",\n",
+            ], separator="")
+            for k, v in x.items()
+        ], separator=""),
+        *([indent]*depth),
+        "}",
+    ], separator="")
+
+@export
+@tf.function
+def tf_tuple_repr(x, indent="    ", depth=0, prefix=""):
+    return tf.strings.join([
+        *([indent]*depth),
+        prefix,
+        "(\n",
+        tf.strings.join([
+            tf.strings.join([
+                tf_val_repr(v, indent=indent, depth=depth+1),
+                ",\n",
+            ], separator="")
+            for v in x
+        ], separator=""),
+        *([indent]*depth),
+        ")",
+    ], separator="")
+
+@export
+def inspect(fn, tag: str|None = None):
+    @tf.function
+    def inspect_fn(*args, **kwargs):
+        if len(args) == 1:
+            val_fmt = "{}"
+            val = tf_val_repr(args[0])
+        else:
+            val_fmt = "args: {}"
+            val = tf_tuple_repr(args)
+
+        if len(kwargs) == 0:
+            kwarg_fmt = ""
+            vals = [val]
+        else:
+            kward_fmt = ", kwargs: {}"
+            vals = [val, tf_dict_repr(kwargs)]
+
+        format = f"inspect: function '{fn.__name__}' called with" + val_fmt + kwarg_fmt
+        if tag is not None:
+            format = f"#{tag} " + format
+        
+        tf.print(tf.strings.format(format, vals))
+        
+        return fn(*args, **kwargs)
+    return inspect_fn
+
+@export
+def count_calls(fn) -> tuple[Callable, tf.Variable]:
+    count = tf.Variable(0, dtype=tf.int32, synchronization=tf.VariableSynchronization.ON_READ, aggregation=tf.VariableAggregation.SUM)
+    
+    def count_calls_fn(*args, **kwargs):
+        count.assign_add(1)
+        return fn(*args, **kwargs)
+    
+    return count_calls_fn, count
+
+
+def _fileno(file_or_fd):
+    fd = getattr(file_or_fd, 'fileno', lambda: file_or_fd)()
+    if not isinstance(fd, int):
+        raise ValueError("Expected a file (`.fileno()`) or a file descriptor")
+    return fd
+
+@contextmanager
+def _stream_redirected(stream, to):
+
+    stdout_fd = _fileno(stream)
+    # copy stdout_fd before it is overwritten
+    #NOTE: `copied` is inheritable on Windows when duplicating a standard stream
+    with os.fdopen(os.dup(stdout_fd), 'wb') as copied: 
+        stream.flush()  # flush library buffers that dup2 knows nothing about
+        try:
+            os.dup2(_fileno(to), stdout_fd)  # $ exec >&to
+        except ValueError:  # filename
+            with open(to, 'wb') as to_file:
+                os.dup2(to_file.fileno(), stdout_fd)  # $ exec > to
+        try:
+            yield stream # allow code to be run with the redirected stdout
+        finally:
+            # restore stdout to its previous value
+            #NOTE: dup2 makes stdout_fd inheritable unconditionally
+            stream.flush()
+            os.dup2(copied.fileno(), stdout_fd)  # $ exec >&copied
+
+@export
+@contextmanager
+def stderr_captured(to=os.devnull):
+    with _stream_redirected(sys.stderr, to) as stderr:
+        yield stderr
+
+@export
+@contextmanager
+def stdout_captured(to=os.devnull):
+    with _stream_redirected(sys.stdout, to) as stdout:
+        yield stdout

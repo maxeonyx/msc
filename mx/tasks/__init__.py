@@ -1,1 +1,1 @@
-from ._tasks import Task, NextUnitVectorPrediction
+from .next_vector_prediction import *
