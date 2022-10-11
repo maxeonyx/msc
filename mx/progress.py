@@ -1,17 +1,19 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from itertools import count
 from math import isnan, pi
 import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable
+from typing import Callable
 
 import enlighten
 
 from mx.export import export
+
+## Note: we don't import using mx.prelude or mx.utils because we want this file
+## to be usable before tensorflow is imported.
 
 from mx.metrics import MxMetric
 
@@ -63,7 +65,7 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
             s = f"{val:<{width_nopad}}"
         else: # assume float or float-like
             s = f"{val:> {width_nopad}.3g}"
-        
+
         return f" {s} "
 
     def header_format(title, unit, width):
@@ -114,7 +116,7 @@ class Progress:
 
         status_format = VERTICAL_BAR + " {indent}{spinner} {desc}"
         spinner_bar = self.manager.status_bar(status_format=status_format, desc=desc, spinner=SPINNER[0], indent=indent, min_delta=self.min_delta, leave=True)
-        
+
         state = "running"
         closed = False
         def update(i):
@@ -123,14 +125,14 @@ class Progress:
                     spinner = SPINNER[i % len(SPINNER)]
                 elif state == "success":
                     spinner = TICK
-                else: 
+                else:
                     spinner = CROSS
                 spinner_bar.update(spinner=spinner)
-        
+
         try:
             self.indent_level += 1
             self.tasks.append(name)
-                
+
             self.update_fns.append(update)
 
             yield
@@ -163,7 +165,7 @@ class Progress:
         bar_format = VERTICAL_BAR + ' {indent}{spinner} {desc}{desc_pad}{percentage:3.0f}% |{bar}| {count:{len_total}d}/{total:d} {unit} [ {elapsed}<{eta}, {rate:.2f}{unit_pad}{unit}/s ]'
 
         prog_bar = self.manager.counter(total=total, spinner=SPINNER[0], desc=desc, indent=indent, unit=unit, min_delta=self.min_delta, bar_format=bar_format, counter_format=counter_format, count=start_at, leave=True)
-        
+
         state = "running"
         closed = False
         def update(i):
@@ -172,14 +174,14 @@ class Progress:
                     spinner = SPINNER[i % len(SPINNER)]
                 elif state == "success":
                     spinner = TICK
-                else: 
+                else:
                     spinner = CROSS
                 prog_bar.update(incr=0, spinner=spinner)
 
         try:
             self.indent_level += 1
             self.tasks.append(name)
-                
+
             self.update_fns.append(update)
 
             yield prog_bar
@@ -202,9 +204,9 @@ class Progress:
                 self.update_fns_to_remove.append((update, close))
             if len(self.tasks) > 0 and self.tasks[-1] == name:
                 self.tasks.pop()
-    
+
     @contextmanager
-    def enter_training(self, n_epochs: int, metrics: list[Any]):
+    def enter_training(self, n_epochs: int, metrics: list[MxMetric]):
         name = "Train"
         metrics_update = None
 
@@ -219,11 +221,11 @@ class Progress:
                 headers, values = metric_format(metrics)
                 metric_header_bar.update(**headers)
                 metric_value_bar.update(**values)
-            
+
             self.update_fns.append(metrics_update)
 
             with self.enter_progbar(total=n_epochs, name=name, desc="Overall Progress", unit="epochs", delete_on_success=False) as prog_bar:
-                
+
                 yield prog_bar
 
         finally:
@@ -256,17 +258,17 @@ def create_progress_manager(
                     l = len(prog.update_fns)
                     for j in range(l):
                         prog.update_fns[j](i)
-                    
+
                     for (f, close) in prog.update_fns_to_remove:
                         if f in prog.update_fns:
                             prog.update_fns.remove(f)
                             close()
                     i += 1
                     time.sleep(prog.min_delta)
-            
+
             def update_title_bar(i):
                 prog.title_bar.update(task_format=prog.task_format())
-            
+
             prog.update_fns.append(update_title_bar)
 
             t = threading.Thread(None, update).start()

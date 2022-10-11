@@ -1,21 +1,10 @@
-from typing import Callable, Collection, Literal, Tuple, TypedDict, Union, List
-from math import pi, tau
+from enum import Enum
 
-import tensorflow as tf
-import einops as ein
-
-import typing
-if typing.TYPE_CHECKING:
-    import keras.api._v2.keras as keras
-    from keras.api._v2.keras import Model, Input, layers
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
-
-from ._layer_utils import input_dict, make_causal_mask, shape_list
+from mx.prelude import *
 from ._blocks import featurewise_dense
 from mx.utils import Einshape
 
+@export
 def codebook(n_tokens: int, embd_shape: Einshape, add_begin_token: bool = True, name="codebook") -> Model:
 
     embedder = layers.Embedding(n_tokens, embd_shape.f_product, name=f"{name}/embd")
@@ -23,44 +12,53 @@ def codebook(n_tokens: int, embd_shape: Einshape, add_begin_token: bool = True, 
     def call(tokens):
 
         embd = embedder(tokens)
-        
+
         return embd
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=embd_shape.s_shape, dtype=tf.int32, name="tokens"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
-def prepend_begin_token(input_shape: Einshape, axis: Union[Literal["first_sequence_dim"], int] = "first_sequence_dim", name="prepend_begin_token") -> Model:
+@export
+class tokens(Enum):
+    BEGIN = 0
+    END   = 1
 
-    begin_token_embedding = layers.Embedding(1, input_shape.f_product, name=f"{name}/begin_embd")
+@export
+def prepend_token(token: tokens, n_embd: int, name="prepend_token") -> Model:
 
-    if axis == "first_sequence_dim":
-        axis = input_shape.b_rank
-    
-    begin_token_shape = input_shape.with_sequence_dims({ "seq": 1 }).with_feature_dims({ "embd": input_shape.f_product })
+    assert token in tokens, f"Unknown token {tokens!r}, must be one of {list(tokens.__members__)!r}"
+
+    token_embedding = layers.Embedding(len(tokens), n_embd, name=f"{name}/begin_embd")
+
+    tf_token = tf.constant(token.value, tf.int32)
 
     def call(embd):
-        begin_token = begin_token_embedding(tf.zeros(begin_token_shape.b_s_shape, tf.int32))
-        embd = tf.concat([begin_token, embd], axis=axis) # concat along first sequence dim
+        batch_size = shape(embd)[0]
+        tokens = tf.tile([tf_token], [batch_size])
+        token_embd = token_embedding(tokens)
+        token_embd = ein.rearrange(token_embd, 'b embd -> b () embd')
+        embd = tf.concat([token_embd, embd], axis=1) # concat along first sequence dim
         return embd
 
-    inputs = input_dict(
-        Input(shape=input_shape.s_f_shape, dtype=tf.float32, name="embd"),
+    inputs = u.input_dict(
+        Input(shape=[None, n_embd], dtype=tf.float32, name="embd"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
+@export
 def positional_embedding(seq_len, embd_dim) -> Model:
     assert embd_dim % 2 == 0, f"embd_dim must be divisible by 2 to use positional encoding, got embd_dim={embd_dim}"
-    
+
     i = tf.range(embd_dim//2)
     i = tf.cast(i, dtype=tf.float32)
     i = tf.expand_dims(i, -2)
-    
-    scale = tf.pow(scale, 2.*i/embd_dim) 
-    
+
+    scale = tf.pow(scale, 2.*i/embd_dim)
+
     def call(vals):
         vals = tf.expand_dims(vals, -1)
         vals = tf.cast(vals, tf.float32)
@@ -71,12 +69,13 @@ def positional_embedding(seq_len, embd_dim) -> Model:
         encoding = tf.concat([sin, cos], axis=-1)
         return encoding
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=[], dtype=tf.int32, name="index"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(inputs), name="embd")
 
+@export
 def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshape, name="angle_embd") -> Model:
     """
     Embed angles as unit vectors. Create many copies of them rotated
@@ -102,8 +101,8 @@ def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshap
 
         return embd
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=input_shape.s_f_shape, dtype=tf.float32, name="angles"),
     )
-    
+
     return Model(inputs=inputs, outputs=angle_call(**inputs), name=name)

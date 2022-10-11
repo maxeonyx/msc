@@ -9,5 +9,5 @@ randomname
 einops
 nvsmi
 tensorboard_plugin_profile
-
+icecream
 datasets

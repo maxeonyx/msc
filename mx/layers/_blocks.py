@@ -1,29 +1,14 @@
-from types import FunctionType
-import einops as ein
-import tensorflow as tf
-import numpy as np
-import functools
-from math import pi, tau
-from typing import Callable, Collection, Literal, Tuple, TypedDict, Union, List
-import typing
-if typing.TYPE_CHECKING:
-    import keras.api._v2.keras as keras
-    from keras.api._v2.keras import Model, Input, layers
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
-from tensorflow_probability import distributions as tfd
-
-from ._layer_utils import input_dict, make_causal_mask, shape_list
+from mx.prelude import *
 from mx.utils import Einshape
+from ._layer_utils import make_causal_mask
 
 def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer=None, name="mix") -> Model:
     """
     A dense layer across the feature dimensions.
     """
 
-    in_rearrange = lambda t: ein.rearrange(t, f"... {in_dims.f_str} -> ... ({in_dims.f_str})", **in_dims.f)
-    out_rearrange = lambda t: ein.rearrange(t, f"... ({out_dims.f_str}) -> ... {out_dims.f_str}", **out_dims.f)
+    in_rearrange = lambda t: ein.rearrange(t, f"... {in_dims.f_str} -> ... ({in_dims.f_str})", **in_dims.f_dict)
+    out_rearrange = lambda t: ein.rearrange(t, f"... ({out_dims.f_str}) -> ... {out_dims.f_str}", **out_dims.f_dict)
 
     dense = layers.Dense(
         out_dims.f_product,
@@ -40,10 +25,10 @@ def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer=None, n
 
         return embd
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=in_dims.s_f_shape, name="embd"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 def featurewise_dense_block(hidden_size: int, in_dims: Einshape, out_dims: Einshape, regularizer=None, name="mix") -> Model:
@@ -65,10 +50,10 @@ def featurewise_dense_block(hidden_size: int, in_dims: Einshape, out_dims: Einsh
 
         return embd
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=in_dims.s_f_shape, name="embd"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 
@@ -82,10 +67,10 @@ def mlp(embd_dim, hidden_units, dropout=0.1, name="mlp") -> Model:
         embd = layers.Dropout(dropout)(embd)
         return embd
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         Input(shape=[embd_dim], name="embd"),
     )
-    
+
     return Model(inputs=inputs, outputs=call(**inputs), name=name)
 
 
@@ -95,11 +80,11 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
     k_proj = layers.Dense(embd_shape.f_product, use_bias=False, name=f"{name}/k_proj")
     v_proj = layers.Dense(embd_shape.f_product, use_bias=False, name=f"{name}/v_proj")
 
-    rearrange_embd_in = lambda t: ein.rearrange(t, f"... {embd_shape.s_str} {embd_shape.f_str} -> ... ({embd_shape.s_str}) ({embd_shape.f_str})", **embd_shape.f, **embd_shape.s)
-    rearrange_embd_out = lambda t: ein.rearrange(t, f"... ({embd_shape.s_str}) ({embd_shape.f_str}) -> ... {embd_shape.s_str} {embd_shape.f_str}", **embd_shape.f, **embd_shape.s)
+    rearrange_embd_in = lambda t: ein.rearrange(t, f"... {embd_shape.s_str} {embd_shape.f_str} -> ... ({embd_shape.s_str}) ({embd_shape.f_str})", **embd_shape.f_dict, **embd_shape.s_dict)
+    rearrange_embd_out = lambda t: ein.rearrange(t, f"... ({embd_shape.s_str}) ({embd_shape.f_str}) -> ... {embd_shape.s_str} {embd_shape.f_str}", **embd_shape.f_dict, **embd_shape.s_dict)
     if kv_embd_shape is not None:
-        rearrange_kv_embd_in = lambda t: ein.rearrange(t, f"... {kv_embd_shape.s_str} {kv_embd_shape.f_str} -> ... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str})", **kv_embd_shape.f, **kv_embd_shape.s)
-        rearrange_kv_embd_out = lambda t: ein.rearrange(t, f"... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str}) -> ... {kv_embd_shape.s_str} {kv_embd_shape.f_str}", **kv_embd_shape.f, **kv_embd_shape.s)
+        rearrange_kv_embd_in = lambda t: ein.rearrange(t, f"... {kv_embd_shape.s_str} {kv_embd_shape.f_str} -> ... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str})", **kv_embd_shape.f_dict, **kv_embd_shape.s_dict)
+        rearrange_kv_embd_out = lambda t: ein.rearrange(t, f"... ({kv_embd_shape.s_str}) ({kv_embd_shape.f_str}) -> ... {kv_embd_shape.s_str} {kv_embd_shape.f_str}", **kv_embd_shape.f_dict, **kv_embd_shape.s_dict)
 
     def call(inputs):
 
@@ -124,11 +109,11 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
                 mask, mask_scales = make_causal_mask(embd_shape.s_product, kv_embd_shape.s_product)
 
         if normalization_type == "softmax":
-            
+
             # scale to unit vectors
             e = tf.cast(embd_shape.f_product, tf.float32)
             attn_logits = attn_logits * 1./tf.sqrt(e)
-            
+
             if causal_mask:
                 attn_logits -= mask * 1e9
             attn_weights = tf.nn.softmax(attn_logits, axis=-1)
@@ -144,22 +129,22 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
                 d = tf.cast(embd_shape.s_product, tf.float32)
                 scales = 1./tf.sqrt(d)
                 scales = scales[None]
-            
+
             # scale the attention weights according to the number of value vectors that
             # are being combined to produce the output vector. When we use the mask,
             # this is the number of non-masked-out values.
             attn_weights = attn_logits * scales
         else:
             raise ValueError(f"Unknown weight_type '{normalization_type}' for mha")
-        
+
         out = tf.einsum("b h m n, b h n d -> b h m d", attn_weights, v)
         out = ein.rearrange(out, "b h m d -> b m (h d)")
 
         if return_attn_weights:
             return out, attn_weights
-        
+
         return out
-    
+
     if type == "self_attn":
         embd_inputs = [
             Input(shape=embd_shape.s_f_shape, name="embd"),
@@ -182,7 +167,7 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
     #         idxs_shape = [seq_dim]
     #     else:
     #         raise ValueError("rel_idxs must be None, True or int. Got: ", rel_idxs)
-        
+
     #     if self_attn:
     #         idx_inputs = [
     #             Input(shape=idxs_shape, name="qk_idxs"),
@@ -194,7 +179,7 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
     #         ]
 
 
-    inputs = input_dict(
+    inputs = u.input_dict(
         *embd_inputs,
         # *idx_inputs,
     )

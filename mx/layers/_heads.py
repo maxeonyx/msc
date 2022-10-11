@@ -1,24 +1,8 @@
-import abc
-from dataclasses import dataclass
-from typing import Callable
+from mx.prelude import *
 
-import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow_probability import distributions as tfd
-
-import typing
-
-from ._layer_utils import input_dict
 from ._blocks import featurewise_dense
 from mx import layers
 from mx.utils import Einshape
-
-if typing.TYPE_CHECKING:
-    import keras.api._v2.keras as keras
-    from keras.api._v2.keras import Model, Input, layers
-else:
-    from tensorflow import keras
-    from tensorflow.keras import Input, Model, layers
 
 @dataclass
 class PredictionHead(tf.Module):
@@ -46,9 +30,9 @@ class PredictionHead(tf.Module):
 def mse(in_dims: Einshape, name="mse") -> PredictionHead:
 
     out_dims = in_dims
-    
-    
-    loss_fn_inputs = input_dict(
+
+
+    loss_fn_inputs = u.input_dict(
         Input(shape=out_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="output"),
     )
@@ -59,7 +43,7 @@ def mse(in_dims: Einshape, name="mse") -> PredictionHead:
         outputs=loss_fn_call(loss_fn_inputs),
         name="loss",
     )
-    
+
     return PredictionHead(
         final_layer=None,
         loss_fn=loss_fn,
@@ -72,10 +56,10 @@ def circular_mse(target_dims: Einshape, embd_dims: Einshape, name="mse") -> Pred
     """
     Circular mean squared error. Takes targets as angles in radians, and y_pred as unit vectors.
     """
-    
+
     out_dims = target_dims.append_feature_dim("sincos", 2)
 
-    final_layer_inputs = input_dict(
+    final_layer_inputs = u.input_dict(
         Input(shape=embd_dims.s_f_shape, name="embd"),
     )
     to_sincos_dense = featurewise_dense(
@@ -91,7 +75,7 @@ def circular_mse(target_dims: Einshape, embd_dims: Einshape, name="mse") -> Pred
         name="unit_vectors",
     )
 
-    loss_fn_inputs = input_dict(
+    loss_fn_inputs = u.input_dict(
         Input(shape=target_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
@@ -109,7 +93,7 @@ def circular_mse(target_dims: Einshape, embd_dims: Einshape, name="mse") -> Pred
         name="loss",
     )
 
-    to_angles_inputs = input_dict(
+    to_angles_inputs = u.input_dict(
         Input(shape=out_dims.s_f_shape, name="unit_vectors"),
     )
     def to_angles_call(inputs):
@@ -124,7 +108,7 @@ def circular_mse(target_dims: Einshape, embd_dims: Einshape, name="mse") -> Pred
             name="angles",
         ),
     }
-    
+
     return PredictionHead(
         final_layer=final_layer,
         loss_fn=loss_fn,
@@ -135,7 +119,7 @@ def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> P
 
     out_dims = in_dims.with_feature_dims({ "c": num_categories })
 
-    final_layer_inputs = input_dict(
+    final_layer_inputs = u.input_dict(
         Input(shape=in_dims.s_f_shape, name="embd"),
     )
     to_logits = featurewise_dense(
@@ -154,7 +138,7 @@ def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> P
     def dist(logits):
         return tfd.Categorical(logits=logits)
 
-    loss_fn_inputs = input_dict(
+    loss_fn_inputs = u.input_dict(
         Input(shape=out_dims.s_f_shape, name="targets"),
         Input(shape=out_dims.s_f_shape, name="logits"),
     )
@@ -169,17 +153,17 @@ def categorical(in_dims: Einshape, num_categories: int, name="categorical") -> P
 
     def mode_call(logits):
         return tf.argmax(logits, axis=-1)
-    
+
     def sample_call(logits):
         return dist(logits).sample()
-    
+
     def entropy_call(logits):
         return dist(logits).entropy()
 
-    logits = input_dict(
+    logits = u.input_dict(
         Input(shape=out_dims.s_f_shape, name="logits"),
     )
-    
+
     output_fns = {
         "Mode": Model(
             inputs=logits,

@@ -3,10 +3,11 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 import re
-from typing import Callable, Type
+from typing import Callable, Literal, Type
 
-from mx.tf import *
+from mx.prelude import *
 from mx.utils import DSets
+from mx.visualizer import StatefulVisualization, Visualizer, VizCfg
 
 @export
 class MxDataset(abc.ABC):
@@ -31,9 +32,35 @@ class MxDataset(abc.ABC):
         self.split_seed = split_seed
         "Change this to split different data into train/test/val sets"
 
+        ## set by dataset.configure(task) ##
+        self.adapt_in: Callable[[DSets], DSets] = None
+        """
+        Provided by subclass impl of configure().
+        Function to adapt a dataset from raw format to task-specific task-input format
+        """
+
+        self.adapt_out: Callable[[DSets], DSets] = None
+        """
+        Provided by subclass impl of configure().
+        Function to adapt a dataset from task-specific task-out format (output of predict_fn) to raw format
+        """
+
+
     @abc.abstractmethod
     def configure(self, task: Task):
         pass
+
+    def adapt(self, dsets: DSets) -> DSets:
+        """
+        Adapt a dataset from raw format to task-specific task-input format
+        """
+
+        assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.adapt(ds)"
+
+        dsets = dsets.map(self.adapt_in)
+        dsets = dsets.cache()
+
+        return dsets
 
     @abc.abstractmethod
     def load(self, force_cache_reload: bool) -> DSets:
@@ -45,9 +72,13 @@ class MxDataset(abc.ABC):
         """
         pass
 
-    def _snapshot_cache_split(self, d: tf.data.Dataset, buffer_size=None) -> DSets:
+    @abc.abstractmethod
+    def get_visualizations(self, viz_batch_size, task_specific_predict_fn) -> dict[str, StatefulVisualization]:
+        pass
+
+    def _snapshot_and_split(self, d: tf.data.Dataset, buffer_size=None) -> DSets:
         """
-        Split a dataset into train, val, and test sets, and snapshot the train set to a cache.
+        Split a dataset into train, val, and test sets, and snapshot the train set to disk.
 
         Args:
             d (tf.data.Dataset): The dataset to split.
@@ -55,7 +86,7 @@ class MxDataset(abc.ABC):
             buffer_size (int, optional):
                 The size of the buffer to use when shuffling the dataset.
                 Defaults to None, which means the buffer size will be the same as the dataset size.
-            
+
         Returns:
             dsets: A DSets instance containing the train, val, and test datasets.
         """
@@ -75,14 +106,24 @@ class MxDataset(abc.ABC):
         train_size = n - test_size - val_size
         dsets = DSets(
             test=d.take(test_size),
-            val=d.skip(test_size).take(val_size),
-            train=d.skip(test_size + val_size).take(train_size),
+
+            # remove "extra" from train and val
+            val=(
+                d
+                .map(lambda x: {**x, "extra": None })
+                .skip(test_size)
+                .take(val_size)
+            ),
+            train=(
+                d
+                .map(lambda x: {**x, "extra": None })
+                .skip(test_size + val_size)
+                .take(train_size)
+            ),
         )
         assert dsets.train.cardinality().numpy() == train_size
         assert dsets.test.cardinality().numpy() == test_size
         assert dsets.val.cardinality().numpy() == val_size
-
-        dsets = dsets.cache()
 
         return dsets
 
@@ -93,7 +134,7 @@ class Task(abc.ABC):
     class DatasetSpecificConfig:
         n_input_dims: int
         "Dimensionality of input vectors (recieved by run from dataset)"
-        
+
     @dataclass
     class ModelSpecificConfig:
         n_output_embd: int
@@ -125,16 +166,16 @@ class Task(abc.ABC):
         ## Configured by self.recieve_model_config(cfg) ##
         self.model_cfg = None
         ## Configured by task.configure(embedding) ##
-        self._adaptor: Callable[[DSets], DSets] | None = None
-    
+        self.adapt_in: Callable[[DSets], DSets] | None = None
+
     def recieve_dataset_config(self, cfg):
         assert isinstance(cfg, self.ds_config_type), f"Expected {self.ds_config_type}, got {type(cfg)}"
         self.ds_cfg = cfg
-    
+
     def recieve_model_config(self, cfg):
         assert isinstance(cfg, self.model_config_type), f"Expected {self.model_config_type}, got {type(cfg)}"
         self.model_cfg = cfg
-    
+
     @abc.abstractmethod
     def configure(self, cfg, embedding: Embedding):
         """
@@ -146,17 +187,28 @@ class Task(abc.ABC):
     @abc.abstractmethod
     def process(self, dsets: DSets) -> DSets:
         pass
-    
+
+    def adapt(self, dsets: DSets) -> DSets:
+        """
+        Adapt a dataset from raw format to task-specific task-input format
+        """
+
+        assert self.adapt_in is not None, "Must call task.configure(embedding) before task.adapt(dsets)"
+
+        dsets = dsets.map(self.adapt_in)
+
+        return dsets
+
     @abc.abstractmethod
     def make_final_layer(self) -> tf.keras.layers.Layer:
         pass
-    
+
     @abc.abstractmethod
     def make_loss_fn(self) -> Callable[..., tf.Tensor]:
         pass
 
     @abc.abstractmethod
-    def make_predict_fn(self) -> Callable:
+    def make_predict_fn(self, model) -> Callable:
         pass
 
 @export
@@ -243,11 +295,16 @@ class MxModel(abc.ABC):
 class Pipeline:
 
     def __init__(self, dataset: MxDataset, task: Task, embedding: Embedding, model: MxModel, identifier: str) -> None:
-        
+
+        # check identifier is machine-friendly
+        assert re.match(r"^[a-z][a-z0-9_\-]+$", identifier), f"'{identifier}' is not a valid identifier, use only a-z, 0-9, _, -"
+
+        self.identifier = identifier
+
         # configure:
         #     raw data --> data generator
         dataset.configure(task)
-        
+
         # configure:
         #     data generator --> input data
         task.configure(embedding)
@@ -264,17 +321,13 @@ class Pipeline:
         self.dataset = dataset
         self.task = task
         self.embedding = embedding
-        self.model = model
-        
-        # check identifier is machine-friendly
-        assert re.match(r"^[a-z][a-z0-9_\-]+$", identifier), f"'{identifier}' is not a valid identifier, use only a-z, 0-9, _, -"
-        
-        self.identifier = identifier
+        self.mx_model = model
 
-    def get_model(self) -> Model:
-        
+        self.model: Model = None
+
+    def new_model(self):
         embedder = self.embedding.make_embedder()
-        model = self.model.make_model()
+        model = self.mx_model.make_model()
         final_layer = self.task.make_final_layer()
 
         return Model(
@@ -283,31 +336,55 @@ class Pipeline:
             name=type(self.embedding).__name__ + '-' + type(self.model).__name__
         )
 
+    def get_model(self) -> Model:
+
+        if self.model is not None:
+            return self.model
+
+        self.model = self.new_model()
+
+        return self.model
+
     def get_loss_fn(self) -> Callable[..., tf.Tensor]:
         return self.task.make_loss_fn()
-    
+
     def get_train_data(self, batch_size: int, n_steps: int, force_cache_reload: bool = False) -> tf.data.Dataset:
 
         dsets = self.dataset.load(force_cache_reload=force_cache_reload)
+        dsets = self.dataset.adapt(dsets)
         dsets = self.task.process(dsets)
+        dsets = self.task.adapt(dsets)
 
-        ds_train = dsets.train.map(lambda x: {
-            "inputs": x["inputs"],
-            "targets": x["targets"],
-            # omit "extra" in training
-        })
-        
+        d = dsets.train
+
         if not self.task.does_batching:
-            ds_train = ds_train.batch(batch_size)
-        
-        ds_train = (
-            ds_train
+            d = d.batch(batch_size)
+
+        d = (
+            d
             .take(n_steps)
             .enumerate()
             .map(lambda i, x: (i, (x["inputs"], x["targets"])))
         )
 
-        return ds_train
+        d = d.prefetch(tf.data.experimental.AUTOTUNE)
 
+        return d
 
-    
+    def get_visualizer(self, output_dir, viz_batch_size: int, cfgs: dict[str, VizCfg]) -> Visualizer:
+
+        assert isinstance(cfgs, dict), f"cfgs must be a dict, got {type(cfgs)}"
+        model = self.get_model()
+        predict_fn = self.task.make_predict_fn(model)
+        vizs = self.dataset.get_visualizations(viz_batch_size, predict_fn)
+
+        for k, v in cfgs.items():
+            assert k in vizs, f"Vizualization '{k}' not found in visualizations. Available keys: {list(vizs.keys())}"
+
+        return Visualizer(
+            {
+                k: (vizs[k], cfg)
+                for k, cfg in cfgs.items()
+            },
+            output_dir,
+        )

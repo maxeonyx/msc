@@ -1,17 +1,50 @@
 from __future__ import annotations
 from contextlib import contextmanager
-
 import functools
-import os
-from typing import Callable, Literal
-from typing_extensions import Self
-from dataclasses import dataclass
-
-from mx.tf import *
 
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake
+
+from mx.prelude import *
+
+_default_indent = "  "
+@export
+def set_default_indent(indent: int | str):
+    global _default_indent
+    if isinstance(indent, int):
+        _default_indent = " " * indent
+    else:
+        _default_indent = indent
+
+
+def list_to_dict(l):
+    return { x.name: x for x in l }
+
+def shape(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int | tf.Tensor]:
+    """
+    Deal with dynamic shape "cleanly".
+
+    Returns:
+        `List[int | tf.Tensor]`: The shape of the tensor as a list. If a
+        particular dimension is only known dynamically, it will be a scalar
+        `tf.Tensor` object.
+    """
+    if isinstance(tensor, np.ndarray):
+        return list(tensor.shape)
+
+    dynamic = tf.shape(tensor)
+
+    if tensor.shape == tf.TensorShape(None):
+        return dynamic
+
+    static = tensor.shape.as_list()
+
+    return [dynamic[i] if s is None else s for i, s in enumerate(static)]
+
+@export
+def input_dict(*arr):
+    return list_to_dict(arr)
 
 @export
 @dataclass
@@ -25,16 +58,22 @@ class DSets:
 
     def map(self, fn) -> DSets:
         return DSets(
-            train = self.train.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
-            test = self.test.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
-            val = self.val.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # train = self.train.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # test = self.test.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # val = self.val.map(fn, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            train = self.train.map(fn),
+            test = self.test.map(fn),
+            val = self.val.map(fn),
         )
-    
+
     def batch(self, batch_size, test_batch_size) -> DSets:
         dset = DSets(
-            train = self.train.batch(batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
-            test = self.test.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
-            val = self.val.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # train = self.train.batch(batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # test = self.test.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            # val = self.val.batch(test_batch_size, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False),
+            train = self.train.batch(batch_size),
+            test = self.test.batch(test_batch_size),
+            val = self.val.batch(test_batch_size),
         )
 
         return dset
@@ -61,20 +100,20 @@ def tf_scope(func):
 
     is_init = func.__name__ == "__init__"
     is_call = func.__name__ == "__call__"
-    
+
     fn_name = func.__name__
 
     @functools.wraps(func)
     def func_with_name_scope(*args, **kwargs):
         is_module = len(args) > 0 and isinstance(args[0], tf.Module)
-        
+
         if is_module and is_init:
             # init happens before the tf.Module instance has a _name attribute
             if 'name' in kwargs and kwargs['name'] is not None:
                 name_prefix = kwargs['name']
             else:
                 name_prefix = camel_to_snake(type(args[0]).__name__)
-            
+
             scope_name = name_prefix + "_init"
         elif is_module and not is_call:
             scope_name = args[0].name + "_" + fn_name
@@ -82,10 +121,10 @@ def tf_scope(func):
             scope_name = args[0].name
         else:
             scope_name = fn_name
-        
+
         with tf.name_scope(scope_name):
             return func(*args, **kwargs)
-    
+
     return tf_decorator.make_decorator(func, func_with_name_scope)
 
 @export
@@ -102,20 +141,40 @@ class Einshape:
             for k, v in sequence_dims.items()
         }
         self._f = feature_dims
-    
+
     def is_ragged(self, key: str) -> bool:
         return self._is_ragged[key]
 
+
     @property
-    def b(self) -> dict[str, int | None]:
+    def b(self) -> int | None:
+        """Batch size."""
+        assert len(self._b) == 1, f"Einshape.b can only be used if there is exactly one batch dimension. Got {self.b_dict}."
+        return self._b.values()[0]
+
+    @property
+    def s(self) -> dict[str, int | None]:
+        """Sequence length."""
+        assert len(self._s) == 1, f"Einshape.s can only be used if there is exactly one sequence dimension. Got {self.s_dict}."
+        return self._s.values()[0]
+
+    @property
+    def f(self) -> dict[str, int | None]:
+        """Feature dimensions."""
+        assert len(self._f) == 1, f"Einshape.f can only be used if there is exactly one feature dimension. Got {self.f_dict}."
+        return self._f.values()[0]
+
+
+    @property
+    def b_dict(self) -> dict[str, int | None]:
         """Batch dimensions."""
         return self._b
     @property
-    def s(self) -> dict[str, int | None]:
+    def s_dict(self) -> dict[str, int | None]:
         """Sequence dimensions."""
         return self._s
     @property
-    def f(self) -> dict[str, int | None]:
+    def f_dict(self) -> dict[str, int | None]:
         """Feature dimensions."""
         return self._f
 
@@ -157,7 +216,7 @@ class Einshape:
     @property
     def rank(self) -> int:
         return len(self._b) + len(self._s) + len(self._f)
-    
+
     @property
     def b_rank(self) -> int:
         return len(self._b)
@@ -170,7 +229,7 @@ class Einshape:
 
     @staticmethod
     def _product(shape: list[int | None]) -> int:
-        
+
         def multiply_or_none(x, y):
             if x is None or y is None:
                 return None
@@ -193,7 +252,7 @@ class Einshape:
     def f_product(self) -> int:
         """Return the total length of the feature dimensions (product of all feature dimensions)."""
         return Einshape._product(self.f_shape)
-    
+
     @property
     def product(self) -> int:
         """Return the total length of the tensor (product of all dimensions)."""
@@ -211,7 +270,7 @@ class Einshape:
             sequence_dims = { k: dim for k, dim in zip(self._s.keys(), new_seq_dims) },
             feature_dims = self._f,
         )
-    
+
     def project(self, new_feature_dims: list[int | None]) -> Self:
         """Project the feature dimensions to the given lengths."""
 
@@ -223,22 +282,22 @@ class Einshape:
             sequence_dims = self._s,
             feature_dims = { k: dim for k, dim in zip(self._f.keys(), new_feature_dims) },
         )
-    
+
     def batch(self, new_batch_dim: int, name="b") -> Self:
         """Prepends a new batch dimension to the tensor."""
 
         assert isinstance(new_batch_dim, int) and new_batch_dim > 0, "Batch dimension must be a positive integer."
 
-        return self.with_batch_dims({ name: new_batch_dim, **self.b, })
+        return self.with_batch_dims({ name: new_batch_dim, **self.b_dict, })
 
     def f_indices(self, flatten=True, elide_rank_1=True):
         """
         Return a list of indices for the feature dimensions.
-        
+
         If flatten=True (the default), the returned indices will
         have shape [ product(f_shape), f_rank]. Otherwise, the
         returned indices will have shape [ *f_shape, f_rank ].
-        
+
         If elide_rank_1=True (the default), when there is only a
         single feature dimension, the returned indices will not have
         an extra dimension. Otherwise, the returned indices will have
@@ -251,11 +310,11 @@ class Einshape:
     def s_indices(self, flatten=True, elide_rank_1=True):
         """
         Return a list of indices for the sequence dimensions.
-        
+
         If flatten=True (the default), the returned indices will
         have shape [ s_product, s_rank]. Otherwise, the
         returned indices will have shape [ *s_shape, s_rank ].
-        
+
         If elide_rank_1=True (the default), when there is only a
         single sequence dimension, the returned indices will not have
         an extra dimension. Otherwise, the returned indices will have
@@ -264,7 +323,7 @@ class Einshape:
         """
 
         return multidim_indices(self.s_shape, flatten=flatten, elide_rank_1=elide_rank_1)
-    
+
     def b_indices(self, flatten=True, elide_rank_1=True):
         """
         Return a list of indices for the batch dimensions.
@@ -281,11 +340,11 @@ class Einshape:
         """
 
         return multidim_indices(self.b_shape, flatten=flatten, elide_rank_1=elide_rank_1)
-    
+
     def indices(self, flatten=True):
         """
         Return a list of indices for the batch, sequence, and feature dimensions.
-        
+
         If flatten=True (the default), the returned indices will
         have shape [ product, rank ]. Otherwise, the
         returned indices will have shape [ *shape, rank ].
@@ -308,7 +367,7 @@ class Einshape:
             sequence_dims = self._s,
             feature_dims = feature_dims,
         )
-    
+
     def with_sequence_dims(self, sequence_dims: dict[str, int | None | Literal["ragged"]]) -> Self:
         """Return a new shape with the given sequence dimensions."""
         return Einshape(
@@ -316,7 +375,7 @@ class Einshape:
             sequence_dims = sequence_dims,
             feature_dims = self._f,
         )
-    
+
     def with_batch_dims(self, batch_dims: dict[str, int | None]) -> Self:
         """Return a new shape with the given batch dimensions."""
         return Einshape(
@@ -327,10 +386,10 @@ class Einshape:
 
 @export
 @tf_scope
-def multidim_indices(shape, flatten=True, elide_rank_1=True):
+def multidim_indices(shpe, flatten=True, elide_rank_1=True):
     """
     Uses tf.meshgrid to get multidimensional indices in the given shape.
-    
+
     If flatten=True (the default), the returned indices will
     have shape [ product(shape), rank]. Otherwise, the
     returned indices will have shape [ *shape, rank ].
@@ -341,15 +400,15 @@ def multidim_indices(shape, flatten=True, elide_rank_1=True):
     an extra dimension with size equal to the rank of the tensor.
     """
 
-    if len(shape) == 0:
+    if len(shpe) == 0:
         raise ValueError("Shape must have at least one dimension.")
-    if len(shape) == 1 and elide_rank_1:
-        return tf.range(shape[0], dtype=tf.int32)
+    if len(shpe) == 1 and elide_rank_1:
+        return tf.range(shpe[0], dtype=tf.int32)
 
-    indices = tf.meshgrid(*[tf.range(s) for s in shape], indexing="ij")
+    indices = tf.meshgrid(*[tf.range(s) for s in shpe], indexing="ij")
     indices = tf.stack(indices, axis=-1)
     if flatten:
-        indices = tf.reshape(indices, [-1, len(shape)])
+        indices = tf.reshape(indices, [-1, len(shpe)])
     return indices
 
 @export
@@ -368,8 +427,8 @@ def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     an extra dimension with size equal to the rank of the tensor.
     """
 
-    shape = shape_list(tensor)
-    return multidim_indices(shape, flatten=flatten, elide_rank_1=elide_rank_1)
+    s = shape(tensor)
+    return multidim_indices(s, flatten=flatten, elide_rank_1=elide_rank_1)
 
 @export
 def angle_wrap(angles):
@@ -417,11 +476,20 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
 
 @export
 @tf.function
-def tf_val_repr(x, indent="    ", depth=0, prefix=""):
+def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
+
+    # container types
     if isinstance(x, dict):
         return tf_dict_repr(x, indent=indent, depth=depth, prefix=prefix)
     elif isinstance(x, tuple):
         return tf_tuple_repr(x, indent=indent, depth=depth, prefix=prefix)
+    elif isinstance(x, list):
+        return tf_list_repr(x, indent=indent, depth=depth, prefix=prefix)
+
+    # non-tf types
+    elif not tf.is_tensor(x):
+        str_x = tf.constant(repr(x))
+
     elif len(x.shape) == 0:
         if x.dtype == tf.string:
             str_x = tf.strings.join(["\"", x, "\""], separator="")
@@ -435,48 +503,79 @@ def tf_val_repr(x, indent="    ", depth=0, prefix=""):
             tf.strings.reduce_join(tf.strings.as_string(tf.shape(x)), separator=" "),
             "]",
         ])
-    
+
     return tf.strings.join([
-        *([indent]*depth),
+        indent*depth,
         prefix,
         str_x,
     ])
 
 @export
 @tf.function
-def tf_dict_repr(x, indent="    ", depth=0, prefix=""):
+def tf_dict_repr(x, indent=_default_indent, depth=0, prefix=""):
     return tf.strings.join([
-        *([indent]*depth),
+        indent*depth,
         prefix,
         "{\n",
         tf.strings.join([
             tf.strings.join([
-                tf_val_repr(v, indent=indent, depth=depth+1, prefix=tf.strings.join([k, ": "], separator="")),
+                tf_repr(v, indent=indent, depth=depth+1, prefix=tf.strings.join([k, ": "], separator="")),
                 ",\n",
             ], separator="")
             for k, v in x.items()
         ], separator=""),
-        *([indent]*depth),
+        indent*depth,
         "}",
     ], separator="")
 
 @export
 @tf.function
-def tf_tuple_repr(x, indent="    ", depth=0, prefix=""):
+def tf_tuple_repr(x, indent=_default_indent, depth=0, prefix=""):
     return tf.strings.join([
-        *([indent]*depth),
+        indent*depth,
         prefix,
         "(\n",
         tf.strings.join([
             tf.strings.join([
-                tf_val_repr(v, indent=indent, depth=depth+1),
+                tf_repr(v, indent=indent, depth=depth+1),
                 ",\n",
             ], separator="")
             for v in x
         ], separator=""),
-        *([indent]*depth),
+        indent*depth,
         ")",
     ], separator="")
+
+@export
+@tf.function
+def tf_list_repr(x, indent=_default_indent, depth=0, prefix=""):
+    return tf.strings.join([
+        indent*depth,
+        prefix,
+        "[\n",
+        tf.strings.join([
+            tf_repr(x[0], indent=indent, depth=depth+1),
+            ",\n",
+            indent*(depth+1),
+            "...\n",
+        ], separator=""),
+        indent*depth,
+        "]",
+    ], separator="")
+
+@export
+def tf_str(x) -> str:
+    return tf_repr(x).numpy().decode("utf-8")
+
+SomeT = TypeVar("SomeT")
+@export
+def tf_print(x: SomeT) -> SomeT:
+    """
+    Pretty-print tensorflow tensors, including within graph mode.
+    Returns the input so it can be used in an expression.
+    """
+    tf.print(tf_repr(x))
+    return x
 
 @export
 def inspect(fn, tag: str|None = None):
@@ -484,7 +583,7 @@ def inspect(fn, tag: str|None = None):
     def inspect_fn(*args, **kwargs):
         if len(args) == 1:
             val_fmt = "{}"
-            val = tf_val_repr(args[0])
+            val = tf_repr(args[0])
         else:
             val_fmt = "args: {}"
             val = tf_tuple_repr(args)
@@ -499,20 +598,20 @@ def inspect(fn, tag: str|None = None):
         format = f"inspect: function '{fn.__name__}' called with" + val_fmt + kwarg_fmt
         if tag is not None:
             format = f"#{tag} " + format
-        
+
         tf.print(tf.strings.format(format, vals))
-        
+
         return fn(*args, **kwargs)
     return inspect_fn
 
 @export
 def count_calls(fn) -> tuple[Callable, tf.Variable]:
     count = tf.Variable(0, dtype=tf.int32, synchronization=tf.VariableSynchronization.ON_READ, aggregation=tf.VariableAggregation.SUM)
-    
+
     def count_calls_fn(*args, **kwargs):
         count.assign_add(1)
         return fn(*args, **kwargs)
-    
+
     return count_calls_fn, count
 
 
@@ -528,7 +627,7 @@ def _stream_redirected(stream, to):
     stdout_fd = _fileno(stream)
     # copy stdout_fd before it is overwritten
     #NOTE: `copied` is inheritable on Windows when duplicating a standard stream
-    with os.fdopen(os.dup(stdout_fd), 'wb') as copied: 
+    with os.fdopen(os.dup(stdout_fd), 'wb') as copied:
         stream.flush()  # flush library buffers that dup2 knows nothing about
         try:
             os.dup2(_fileno(to), stdout_fd)  # $ exec >&to
@@ -554,3 +653,11 @@ def stderr_captured(to=os.devnull):
 def stdout_captured(to=os.devnull):
     with _stream_redirected(sys.stdout, to) as stdout:
         yield stdout
+
+
+def ensure_suffix(path: os.PathLike, suffix: str) -> Path:
+    suffix = suffix.lstrip(".")
+    path = Path(path)
+    if path.suffix != f".{suffix}":
+        path = path.with_suffix(f".{suffix}")
+    return path

@@ -3,10 +3,11 @@ import math
 from pathlib import Path
 from typing import Callable, Literal, Set, Union
 
-from mx.tf import *
+from mx.prelude import *
 
 from mx.progress import Progress
 from mx.metrics import MxMetric, RunningMean, Rolling, TimeSinceLastCall, InstantaneousMetric, wrap_loss_fn_for_metrics
+from mx.visualizer import Visualizer
 
 @export
 def default_make_train_step(
@@ -25,7 +26,7 @@ def default_make_train_step(
         grads = tape.gradient(loss, model.trainable_weights)
         optimizer.apply_gradients(zip(grads, model.trainable_weights))
         return outputs, loss, grads
-    
+
     return train_step
 
 @export
@@ -39,7 +40,7 @@ def make_train_step_wrapper(
 ):
     """
     Wraps a training step function. This is used to update metrics.
-    
+
     Args:
     :param model: The model to train.
     :param data: The data to train on.
@@ -49,7 +50,7 @@ def make_train_step_wrapper(
 
     def train_step_wrapper(data, do_log: bool):
         i_step, (inputs_batch, targets_batch) = data
-        
+
         with tb_writer.as_default(step=i_step):
             outputs_batch, loss, grads = train_step(inputs_batch, targets_batch)
 
@@ -60,10 +61,10 @@ def make_train_step_wrapper(
                 "outputs": outputs_batch,
                 "inputs": inputs_batch,
             }
-            
+
             for metric in metrics.values():
                 metric.update(metric_inputs)
-            
+
             if do_log:
                 tf.summary.scalar("loss", loss)
                 for grad in grads:
@@ -71,7 +72,7 @@ def make_train_step_wrapper(
                     tf.summary.scalar("grad_norm", tf.norm(grad))
                 for k, v in outputs_batch.items():
                     tf.summary.histogram(f"outputs/{k}", v)
-        
+
     return train_step_wrapper
 
 @export
@@ -110,16 +111,19 @@ def train_loop(
     loss_fn: Callable,
     pipeline_name: str,
     run_name: str,
+    vizr: Visualizer,
     optimizer: Literal["adam", "sgd"] | tf.keras.optimizers.Optimizer = "adam",
     n_steps_per_epoch: int = 500,
     checkpoint_interval: Union[int, Literal["epoch"], Literal["never"]] = "epoch",
     log_interval: Union[int, Literal["epoch"], Literal["never"]] = 10,
     log_type: Set[Literal["tensorboard", "wandb"]] = {"tensorboard"},
+    profile: bool = False,
     metrics: Union[
         Literal["default"],
         dict[str, dict[str, MxMetric]],
     ] = "default",
-    make_train_step: Callable = default_make_train_step
+    make_train_step: Callable = default_make_train_step,
+    compile = True,
 ) -> Callable[[Progress], None]:
     """
     Make the training loop.
@@ -136,7 +140,7 @@ def train_loop(
             optimizer = tf.keras.optimizers.SGD()
         else:
             raise ValueError(f"Unknown optimizer type: {optimizer}")
-    
+
     wrapped_loss_fn = wrap_loss_fn_for_metrics(loss_fn)
     if metrics == "default":
         metrics = default_metrics(wrapped_loss_fn)
@@ -156,7 +160,7 @@ def train_loop(
             tb_writer = tf.summary.create_file_writer(str(output_dir / "logs"))
         else:
             tb_writer = tf.summary.create_noop_writer()
-        
+
         with prog.enter_spinner("Saving model", "Saving initial model..."):
             checkpoint.save(output_dir / "checkpoints")
 
@@ -166,87 +170,107 @@ def train_loop(
                 data = next(steps)
         except StopIteration:
             raise ValueError("No data in dataset")
-        
+
         with tb_writer.as_default():
 
-            with prog.enter_spinner(name="Compile train loop", desc="Compiling train loop..."):
-                train_step_wrapper = make_train_step_wrapper(
-                    model,
-                    optimizer,
-                    loss_fn,
-                    metrics["train_step_metrics"],
-                    make_train_step,
-                    tb_writer,
-                )
-                train_step_wrapper = tf.function(train_step_wrapper)
-                do_log = log_interval != "never"
-                train_step_wrapper(data, do_log)
-                i_all_step += 1
+            vizr.before_train_start(step=i_all_step, pm=prog)
 
-            train_loop_metrics = metrics["train_step_metrics"] | metrics["epoch_metrics"]
-            with prog.enter_training(n_epochs, train_loop_metrics) as train_prog_bar:
-                i_epoch = 0
-                while i_epoch < n_epochs:
-                    if i_epoch == 0:
-                        start_at = 1 # because we already did the first training step when compiling the train loop
-                    else:
-                        start_at = 0
+            try:
+                if profile:
+                    tf.profiler.experimental.start(str(output_dir / "profile"))
 
-                    if (i_epoch+1) * n_steps_per_epoch > n_steps:
-                        n_steps_this_epoch = n_steps - i_epoch * n_steps_per_epoch
-                    else:
-                        n_steps_this_epoch = n_steps_per_epoch
-                    
-                    is_last_epoch = i_epoch == (n_epochs - 1)
+                with prog.enter_spinner(name="Compile train loop", desc="Compiling train loop..."):
+                    train_step_wrapper = make_train_step_wrapper(
+                        model,
+                        optimizer,
+                        loss_fn,
+                        metrics["train_step_metrics"],
+                        make_train_step,
+                        tb_writer,
+                    )
+                    if compile:
+                        train_step_wrapper = tf.function(train_step_wrapper)
+                    do_log = log_interval != "never"
+                    train_step_wrapper(data, do_log)
+                    i_all_step += 1
 
-                    last_epoch_loss = None
-                    with prog.enter_progbar(total=n_steps_this_epoch, name=f"Epoch {i_epoch}", desc=f"Epoch {i_epoch}", start_at=start_at, delete_on_success=not is_last_epoch) as epoch_prog_bar:
-                        
-                        i_step = start_at
-                        while i_step < n_steps_this_epoch:
-                            try:
-                                data = next(steps)
-                            except StopIteration:
-                                print("WARNING: Ran out of data before epoch was finished. This is probably a bug with your data generation code. Exiting training loop.")
-                                return
+                train_loop_metrics = metrics["train_step_metrics"] | metrics["epoch_metrics"]
+                with prog.enter_training(n_epochs, train_loop_metrics) as train_prog_bar:
 
-                            do_log = (
-                                (log_interval == "epoch" and i_step == start_at) or
-                                (type(log_interval) == int and i_step % log_interval == 0)
-                            ) # always false if log_interval == "never"
+                    i_epoch = 0
+                    while i_epoch < n_epochs:
+                        if i_epoch == 0:
+                            start_at = 1 # because we already did the first training step when compiling the train loop
+                        else:
+                            start_at = 0
 
-                            train_step_wrapper(data, do_log)
+                        if (i_epoch+1) * n_steps_per_epoch > n_steps:
+                            n_steps_this_epoch = n_steps - i_epoch * n_steps_per_epoch
+                        else:
+                            n_steps_this_epoch = n_steps_per_epoch
 
-                            if type(checkpoint_interval) == int and i_all_step % checkpoint_interval == 0:
-                                with prog.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
-                                    checkpoint.save(output_dir / "checkpoints")
+                        is_last_epoch = i_epoch == (n_epochs - 1)
 
-                            i_step += 1
-                            i_all_step += 1
-                            epoch_prog_bar.update()
-                    
-                    for _, m in metrics["epoch_metrics"].items():
-                            m.update({"epoch": i_epoch, "step": i_all_step})
-                    
-                    if "loss_epoch" in train_loop_metrics:
-                        epoch_loss_metric = train_loop_metrics["loss_epoch"]
-                        epoch_loss = epoch_loss_metric.result()
-                        if last_epoch_loss is not None:
-                            if epoch_loss > last_epoch_loss:
-                                print("WARNING: Epoch *training* loss increased from last epoch. This is probably a bug in your model. Exiting training loop.")
-                                return
-                        last_epoch_loss = epoch_loss
-                    
-                    # reset metrics
-                    for _, m in train_loop_metrics.items():
-                        if m.reset_every_epoch:
-                            m.reset()
-                    
-                    if checkpoint_interval == "epoch":
-                        with prog.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
-                            checkpoint.save(output_dir / "checkpoints")
+                        last_epoch_loss = None
+                        with prog.enter_progbar(total=n_steps_this_epoch, name=f"Epoch {i_epoch}", desc=f"Epoch {i_epoch}", start_at=start_at, delete_on_success=not is_last_epoch) as epoch_prog_bar:
 
-                    i_epoch += 1
-                    train_prog_bar.update()
+                            i_step = start_at
+                            while i_step < n_steps_this_epoch:
+
+                                with tf.profiler.experimental.Trace("train", step_num=i_all_step, _r=1):
+                                    try:
+                                        data = next(steps)
+                                    except StopIteration:
+                                        print("WARNING: Ran out of data before epoch was finished. This is probably a bug with your data generation code. Exiting training loop.")
+                                        return
+
+                                    do_log = (
+                                        (log_interval == "epoch" and i_step == start_at) or
+                                        (type(log_interval) == int and i_step % log_interval == 0)
+                                    ) # always false if log_interval == "never"
+
+                                    train_step_wrapper(data, do_log)
+
+                                if type(checkpoint_interval) == int and i_all_step % checkpoint_interval == 0:
+                                    with prog.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
+                                        checkpoint.save(output_dir / "checkpoints")
+
+                                i_step += 1
+                                i_all_step += 1
+                                epoch_prog_bar.update()
+
+                            vizr.on_epoch_end(step=i_all_step, pm=prog)
+
+                        for _, m in metrics["epoch_metrics"].items():
+                                m.update({"epoch": i_epoch, "step": i_all_step})
+
+                        if "loss_epoch" in train_loop_metrics:
+                            epoch_loss_metric = train_loop_metrics["loss_epoch"]
+                            epoch_loss = epoch_loss_metric.result()
+                            if last_epoch_loss is not None:
+                                if epoch_loss > last_epoch_loss:
+                                    print("WARNING: Epoch *training* loss increased from last epoch. This is probably a bug in your model. Exiting training loop.")
+                                    return
+                            last_epoch_loss = epoch_loss
+
+                        # reset metrics
+                        for _, m in train_loop_metrics.items():
+                            if m.reset_every_epoch:
+                                m.reset()
+
+                        if checkpoint_interval == "epoch":
+                            with prog.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
+                                checkpoint.save(output_dir / "checkpoints")
+
+                        i_epoch += 1
+                        train_prog_bar.update()
+            finally:
+                if profile:
+                    with prog.enter_spinner("Save profiler data", "Saving data from performance profiling..."):
+                        tf.profiler.experimental.stop(save=True)
+
+            vizr.after_train_end(pm=prog, step=i_all_step+1)
+
     except KeyboardInterrupt:
+        vizr.on_interrupt(pm=prog, step=i_all_step)
         print("User interrupted training.")

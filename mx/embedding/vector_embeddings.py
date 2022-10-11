@@ -1,10 +1,6 @@
-from dataclasses import dataclass
-from typing import Type
+from mx.prelude import *
 
 from mx.models import DecoderOnlyTransformer
-
-from mx.tf import *
-from mx.layers import input_dict
 
 from mx.pipeline import Embedding, MxModel
 
@@ -26,7 +22,7 @@ class TransformerAngleVectorEmbedding(Embedding):
         Max length of the sequence to be embedded.
         Max value among seq_idxs.
         """
-    
+
     def __init__(self, n_embd: int, n_repeats: int) -> None:
         super().__init__(
             name="TransformerAngleVectorEmbedding",
@@ -38,7 +34,7 @@ class TransformerAngleVectorEmbedding(Embedding):
 
         self.task_config_type: Type[TransformerAngleVectorEmbedding.TaskSpecificConfig] = TransformerAngleVectorEmbedding.TaskSpecificConfig
         self.task_cfg: TransformerAngleVectorEmbedding.TaskSpecificConfig | None = None
-    
+
     def configure(self, model: MxModel):
         if isinstance(model, DecoderOnlyTransformer):
             model.recieve_embd_config(model.embd_cfg_type(
@@ -49,12 +45,18 @@ class TransformerAngleVectorEmbedding(Embedding):
 
     def make_embedder(self) -> Model:
         "Creats the keras model for the embedding."
-        
+
         assert self.n_embd % 2 == 0, f"n_embd must be divisible by 2 to use angle embedding, got n_embd={self.n_embd}"
         assert self.task_cfg is not None, "Must call task.configure(embedding) before embedding.make_embedder()."
-        
+
         pos_embedder = tf.keras.layers.Embedding(self.task_cfg.sequence_length, self.n_embd, name="pos_embedder")
         dense_out = tf.keras.layers.Dense(self.n_embd, name="embd")
+
+        import mx.layers as mxl
+        prepend_begin_token = mxl.prepend_token(
+            token=mxl.tokens.BEGIN,
+            n_embd=self.n_embd,
+        )
 
         def embed(inputs):
 
@@ -75,9 +77,9 @@ class TransformerAngleVectorEmbedding(Embedding):
             pos_idxs = inputs["input_idxs"]
             pos_embd = pos_embedder(pos_idxs)
 
-            return angle_embd + pos_embd
-        
-        inputs = input_dict(
+            return prepend_begin_token(angle_embd + pos_embd)
+
+        inputs = u.input_dict(
             Input([None, self.task_cfg.n_input_dims], dtype=tf.float32, name="angles"),
             Input([None],                             dtype=tf.int32,   name="input_idxs"),
         )

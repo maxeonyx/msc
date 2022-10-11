@@ -1,7 +1,7 @@
 
 import abc
 
-from mx.tf import *
+from mx.prelude import *
 from mx.utils import tf_scope
 
 
@@ -53,7 +53,7 @@ class TimeSinceLastCall(MxMetric):
         return (tf.timestamp() - self.last_call).numpy()
 
 class RunningMean(MxMetric):
-    
+
     @tf_scope
     def __init__(self, fn, unit: str = None, element_shape=[], dtype=tf.float64, name="running_mean", reset_every_epoch=True):
         if isinstance(fn, MxMetric):
@@ -64,7 +64,7 @@ class RunningMean(MxMetric):
         super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch)
         self.total = tf.Variable(initial_value=tf.zeros(element_shape, dtype=dtype), name="total", trainable=False)
         self.count = tf.Variable(0, dtype=tf.int64, name="count", trainable=False)
-    
+
     def reset(self):
         self.total.assign(tf.zeros_like(self.total))
         self.count.assign(0)
@@ -113,7 +113,7 @@ class Rolling(MxMetric):
             aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
             synchronization=tf.VariableSynchronization.ON_READ,
         )
-        
+
     def reset(self):
         self.index.assign(0)
         self.initialized.assign(False)
@@ -126,12 +126,12 @@ class Rolling(MxMetric):
         val = self.fn(inputs)
         self.buffer[i].assign(val)
         return self._result()
-    
+
     @tf_scope
     def _result(self):
         i = tf.math.minimum(self.index, self.length)
         return self.reduction_fn(self.buffer[:i])
-    
+
     def result(self):
         if not self.initialized.numpy():
             return None
@@ -146,7 +146,7 @@ class InstantaneousMetric(MxMetric):
             self.fn = fn
         super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch)
         self.val = tf.Variable(0., trainable=False, name="val")
-    
+
     def reset(self):
         self.initialized.assign(False)
     @tf_scope

@@ -1,7 +1,4 @@
-import keras_nlp
-
-from mx.tf import *
-from mx.layers import input_dict
+from mx.prelude import *
 
 from mx.pipeline import MxModel, Task
 
@@ -31,14 +28,14 @@ class DecoderOnlyTransformer(MxModel):
         """Hidden size of the feedforward layers"""
         self.dropout = dropout
         """Dropout rate. 0 = no dropout. Defaults to 0."""
-    
+
     def configure(self, task: Task):
 
         assert self.embd_cfg is not None, "Must call embedding.configure(model) before calling model.configure(task)"
 
         # The dimensionality doesn't change -- easy.
         n_output_embd = self.embd_cfg.n_embd
-        
+
         if task.model_config_type == Task.ModelSpecificConfig:
             task.recieve_model_config(task.model_config_type(
                 n_output_embd,
@@ -50,7 +47,7 @@ class DecoderOnlyTransformer(MxModel):
 
         assert self.embd_cfg is not None, "Must call task.configure(model) before calling make_model()"
 
-        backbone = keras.Sequential([ 
+        backbone = keras.Sequential([
             keras_nlp.layers.TransformerDecoder(
                 intermediate_dim=self.n_hidden,
                 num_heads=self.n_heads,
@@ -61,7 +58,7 @@ class DecoderOnlyTransformer(MxModel):
         def call(inputs):
             return backbone(inputs["embd"])
 
-        inputs = input_dict(
+        inputs = u.input_dict(
             Input([None, self.embd_cfg.n_embd], name="embd"),
         )
         return Model(
@@ -69,4 +66,3 @@ class DecoderOnlyTransformer(MxModel):
             outputs=call(inputs),
             name=self.identifier,
         )
-        

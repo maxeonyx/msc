@@ -1,10 +1,14 @@
 from dataclasses import dataclass
+from os import PathLike
 from typing import Any, Callable, Literal, Union
 
-from mx.tf import *
+import holoviews as hv
+
+from mx.prelude import *
 from mx.tasks import NextUnitVectorPrediction
-from mx import utils
-from mx.utils import tf_scope, Einshape, DSets
+from mx import utils as u
+from mx.visualizer import HoloMapVisualization, StatefulVisualization
+from mx.utils import Einshape, DSets
 from mx.pipeline import MxDataset, Task
 
 from . import _bvh
@@ -47,8 +51,8 @@ class BvhDataset(MxDataset):
         self.n_dof_per_joint = n_dof_per_joint
         """Number of degrees of freedom per joint to use."""
 
-        ## Set by self.configure(task) ##
-        self._adaptor: Callable[[DSets], DSets] | None = None
+        self.n_features = self.n_hands * self.n_joints_per_hand * self.n_dof_per_joint
+        """Number of features when (hands joints dof) dims are flattened."""
 
     def configure(self, task: Task):
 
@@ -59,32 +63,50 @@ class BvhDataset(MxDataset):
             task.recieve_dataset_config(task.ds_config_type(
                 n_input_dims=n_input_dims,
             ))
-            def adapt(dsets: DSets) -> DSets:
-                return dsets.map(lambda x: {
+            def adapt_in(x):
+                return {
                     # flatten hand/joint/dof dims into a single feature dim
-                    "data": ein.rearrange(x["angles"], f"f h j d -> f (h j d)"),
+                    "data": ein.rearrange(x["angles"], f"... f h j d -> ... f (h j d)"),
                     # remove indices for the flattened feature dim, keep only
                     # frame indices
-                    "seq_idxs": x["idxs"][:, 0, 0, 0, 0],
+                    "seq_idxs": x["idxs"][..., :, 0, 0, 0, 0],
                     "extra": x["extra"],
-                })
-            self._adaptor = adapt
+                }
+            self.adapt_in = adapt_in
+            def adapt_out(x):
+                # adapt output from a task's predict_fn into dataset-specific format
+                return {
+                    "angles": (
+                        "Predicted Angles",
+                        ein.rearrange(
+                            x["angles"],
+                            f"... f (h j d) -> ... f h j d",
+                            h=self.n_hands,
+                            j=self.n_joints_per_hand,
+                            d=self.n_dof_per_joint
+                        ),
+                    )
+                }
+            self.adapt_out = adapt_out
         else:
             raise NotImplementedError(f"{type(task)} not supported by {type(self)}")
 
+        assert self.adapt_in is not None, "Forgot to set self.adapt_in"
+        assert self.adapt_out is not None, "Forgot to set self.adapt_out"
 
-    def load(self, force_cache_reload: bool) -> tf.data.Dataset:
 
-        assert self._adaptor is not None, "Must call dataset.configure(task) before dataset.load()"
-        
+    def load(self, force_cache_reload: bool) -> DSets:
+
+        assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.load()"
+
         filenames, angles, n_frames = _bvh.np_dataset_parallel_lists(force=force_cache_reload, columns="all")
 
         all_angles = tf.concat(angles, axis=0)
         del angles
-        
+
         all_angles = tf.reshape(all_angles, [-1, 2, 17, 3])
         all_angles = all_angles[:, :self.n_hands, :self.n_joints_per_hand, :self.n_dof_per_joint]
-        angles_einshape = utils.Einshape(
+        angles_einshape = Einshape(
             batch_dims={},
             sequence_dims={ "f": "ragged" },
             feature_dims={
@@ -93,14 +115,14 @@ class BvhDataset(MxDataset):
                 "d": self.n_dof_per_joint,
             },
         )
-        
+
         n_frames = tf.constant(n_frames)
         ragged_angles = tf.RaggedTensor.from_row_lengths(all_angles, n_frames)
-        
+
         orig_angles = tf.data.Dataset.from_tensor_slices(ragged_angles)
 
         filenames = tf.data.Dataset.from_tensor_slices(filenames)
-        
+
         dset = tf.data.Dataset.zip((filenames, orig_angles))
 
         dset = dset.map(lambda filename, orig_angles: {
@@ -115,10 +137,10 @@ class BvhDataset(MxDataset):
             return dataset.map(lambda x: { **x, "angles": fn(x["angles"]) })
 
         if self.recluster:
-            circular_means = utils.circular_mean(all_angles, axis=0)
-            dset = map_angles(dset, lambda a: utils.recluster(a, circular_means))
+            circular_means = u.circular_mean(all_angles, axis=0)
+            dset = map_angles(dset, lambda a: u.recluster(a, circular_means))
 
-        dset = dset.map(lambda x: { **x, "idxs": utils.multidim_indices_of(x["angles"], flatten=False) })
+        dset = dset.map(lambda x: { **x, "idxs": u.multidim_indices_of(x["angles"], flatten=False) })
         index_einshape = angles_einshape.append_feature_dim("i", angles_einshape.rank)
 
         if self.decimate:
@@ -126,21 +148,138 @@ class BvhDataset(MxDataset):
             def do_decimate(x):
                 angles, [idxs] = decimate(x["angles"], x["idxs"])
                 return {
-                    **x,
                     "angles": angles,
                     "idxs": idxs,
+                    "extra": x["extra"],
                 }
             dset = dset.map(do_decimate)
-        
-        dset = self._adaptor(dset)
 
-        return self._snapshot_cache_split(dset, buffer_size=None)
+        dsets = self._snapshot_and_split(dset, buffer_size=None)
+
+        return dsets
+
+    def get_visualizations(self, viz_batch_size, task_specific_predict_fn) -> dict[str, StatefulVisualization]:
+
+        assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.get_visualizations()"
+
+        viz_data = (
+            self.load(force_cache_reload=False)
+            .test
+            .take(viz_batch_size)
+        )
+        viz_data = [ d for d in viz_data ]
+        #  # add batch dim, tbc how i'm gonna do batching because i need to support ragged
+        #  # sequence dims and einops doesn't like RaggedTensor
+        # viz_data = tf.expand_dims(viz_data, axis=0)
+
+        return u.list_to_dict([
+            BVHImageViz(
+                data=viz_data,
+                task_predict_fn=task_specific_predict_fn,
+                adapt_in=self.adapt_in,
+                adapt_out=self.adapt_out,
+            ),
+        ])
+
+
+class BVHImageViz(HoloMapVisualization):
+
+    def __init__(self,
+        data: list[dict[str, tf.Tensor | dict[str, tf.Tensor]]],
+        task_predict_fn: Callable[[dict[str, tf.Tensor]], dict[str, tf.Tensor]],
+        adapt_in: Callable,
+        adapt_out: Callable,
+        name = "bvh_imgs",
+        desc = "BVH Image Viz",
+    ):
+        super().__init__(
+            name=name,
+            desc=desc,
+        )
+        self._data = data
+        self._task_predict_fn = task_predict_fn
+        self._adapt_in = adapt_in
+        self._adapt_out = adapt_out
+
+    def make_hmaps(self, i_step) -> list[hv.HoloMap]:
+        data = self._data
+        # data comes from dsets.test in "dataset" format
+
+        assert isinstance(data, list),                                       f"data must be a list of batches. Got: type(data)={type(data).__name__}"
+        batch_size = len(data)
+        assert isinstance(data[0], dict),                                    f"data must be a list of batches, each one a dict. Got: type(data[0])={type(data[0]).__name__}"
+        assert "angles" in data[0],                                          f"data[0] must contain 'angles'. Got keys: [{data[0].keys()}]"
+        assert tf.is_tensor(data[0]["angles"]),                              f"data[0]['angles'] must be a tensor. Got: type(data[0]['angles'])={type(data[0]['angles']).__name__}"
+        assert data[0]["angles"].dtype == tf.float32,                         "data[0]['angles'] must be a float32 tensor"
+        assert data[0]["angles"].shape.rank == 4,                            f"data[0]['angles'] must be a float32 tensor of shape [b f h j d]. Got {data[0]['angles'].shape}"
+        assert "idxs" in data[0],                                             "data[0] must contain 'idxs'"
+        assert tf.is_tensor(data[0]["idxs"]),                                 "data[0]['idxs'] must be a tensor"
+        assert data[0]["idxs"].dtype == tf.int32,                             "data[0]['idxs'] must be a int32 tensor"
+        assert data[0]["idxs"].shape.rank == 5,                              f"data[0]['idxs'] must be a int32 tensor of shape [b f h j d i]. Got {data[0]['idxs'].shape}"
+        assert isinstance(data[0]["extra"], dict),                            "data[0]['extra'] must be a dict"
+        assert "orig_angles" in data[0]["extra"],                             "data[0]['extra'] must contain 'orig_angles'"
+        assert tf.is_tensor(data[0]["extra"]["orig_angles"]),                f"data[0]['extra']['orig_angles'] must be a tensor. Got: type(data[0]['extra']['orig_angles'])={type(data[0]['extra']['orig_angles']).__name__}"
+        assert data[0]["extra"]["orig_angles"].dtype == tf.float32,           "data[0]['extra']['orig_angles'] must be a float32 tensor"
+        assert data[0]["extra"]["orig_angles"].shape.rank == 4,              f"data[0]['extra']['orig_angles'] must be a float32 tensor of shape [b f h j d]. Got {data[0]['extra']['orig_angles'].shape}"
+        assert "filename" in data[0]["extra"],                                "data[0]['extra'] must contain 'filename'"
+        assert tf.is_tensor(data[0]["extra"]["filename"]),                    "data[0]['extra']['filename'] must be a tensor"
+        assert data[0]["extra"]["filename"].dtype == tf.string,               "data[0]['extra']['filename'] must be a string tensor"
+
+        task_specific_input_data = [ self._adapt_in(d) for d in data ]
+        predict_outputs = [
+            self._adapt_out(
+                self._task_predict_fn(d)
+            )
+            for d in task_specific_input_data
+        ]
+
+        # use tf.nest.map_structure to stack all component tensors
+        predict_outputs = tf.nest.map_structure(
+            lambda *xs: tf.concat(xs, axis=0),
+            *predict_outputs,
+        )
+
+        assert isinstance(predict_outputs, dict), "predict_outputs must be a dict"
+
+        for ident, o in predict_outputs.items():
+            assert isinstance(o, tuple),           f"predict_outputs['{ident}'] must be a tuple"
+            assert len(o) == 2,                    f"predict_outputs['{ident}'] must be a tuple of length 2"
+            name, v = o
+
+            # assert isinstance(name, str),          f"predict_outputs['{ident}'][0] must be a string"
+            assert tf.is_tensor(name),             f"predict_outputs['{ident}'][0] must be a tensor"
+            assert name.dtype == tf.string,        f"predict_outputs['{ident}'][0] must be a string tensor"
+
+            assert tf.is_tensor(v),                f"predict_outputs['{ident}'][1] must be a tensor. Got type={type(v).__name__}"
+            assert v.dtype == tf.float32,          f"predict_outputs['{ident}'][1] must be a float32 tensor. Got {v.dtype}"
+            assert v.shape.rank == 5,              f"predict_outputs['{ident}'][1] must be a float32 tensor of shape [b f h j d]. Got {v.shape}"
+
+
+        key_dims = [
+            hv.Dimension(("step", "Step")),
+            hv.Dimension(("batch", "Batch")),
+        ]
+        def img(data, title):
+            data = ein.rearrange(data, "f h j d -> (h j d) f")
+            return hv.Raster(data.numpy()).opts(cmap='twilight', aspect='equal').opts(title=title)
+
+        return [
+            hv.HoloMap(
+                {
+                    (i_step, i_batch): img(data[i_batch], u.tf_str(titles[i_batch]))
+                    for i_batch in range(batch_size)
+                },
+                kdims=key_dims,
+                label=ident
+            )
+            for ident, (titles, data) in predict_outputs.items()
+        ]
 
 def random_subset(options, n, seed=None):
     options = tf.random.shuffle(options, seed=seed)
     return options[:n]
 
-@tf_scope
+@u.tf_scope
 def weighted_random_n(n_max, D=2., B=10., seed=None):
     """
     Picks random indices from [0, n_max) with skewed distribution
@@ -157,9 +296,8 @@ def weighted_random_n(n_max, D=2., B=10., seed=None):
     # probabilities = l1_norm(powf(D, -logb1p(B, tf.range(n_max))))
     # log probabilities base e
     log_probabilities = -logb1p(B, tf.range(n_max))*tf.math.log(D)
- 
-    return tf.random.categorical(log_probabilities[None, :], 1, seed=seed)[0, 0]
 
+    return tf.random.categorical(log_probabilities[None, :], 1, seed=seed)[0, 0]
 
 
 def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: Literal["simple", "random"], seed=None):
@@ -187,7 +325,7 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
     """
 
     assert len(seq_dims) > 0, "Must provide at least one sequence"
-    
+
     assert all([ e.b_shape == seq_dims[0].b_shape for e in seq_dims ]), "All sequences must have the same batch dimensions"
     assert all([ e.s_shape == seq_dims[0].s_shape for e in seq_dims ]), "All sequences must have the same sequence dimensions"
     seq_einshape = seq_dims[0]
@@ -196,11 +334,11 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
     assert all([seq_dim is None or chunk_dim <= seq_dim for chunk_dim, seq_dim in zip(chunk_size, seq_einshape.s_shape)]), f"All dims of chunk size ({chunk_size}) must be <= seq_dims ({seq_einshape.s_shape})"
 
     @tf.function
-    @tf_scope
+    @u.tf_scope
     def get_chunk(seqs):
         seqs = [ tf.ensure_shape(s, e.shape) for s, e in zip(seqs, seq_dims) ]
         seqs = [
-            ein.rearrange(s, f'... {e.f_str} -> ... ({e.f_str})', **e.f)
+            ein.rearrange(s, f'... {e.f_str} -> ... ({e.f_str})', **e.f_dict)
             for s, e in zip(seqs, seq_dims)
         ]
 
@@ -213,9 +351,9 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
                 lambda max_i: tf.random.uniform([], 0, max_i, dtype=tf.int32, seed=seed),
                 max_indices,
             )
-            idxs = idxs[None, :] + utils.multidim_indices(chunk_size, flatten=True, elide_rank_1=False)
+            idxs = idxs[None, :] + u.multidim_indices(chunk_size, flatten=True, elide_rank_1=False)
         elif chunk_mode == "random":
-            idxs = utils.multidim_indices(seq_shape, flatten=False)
+            idxs = u.multidim_indices(seq_shape, flatten=False)
             idxs = random_subset(idxs, chunk_size, seed=seed)
         else:
             raise ValueError(f"Unknown chunk mode {chunk_mode}.")
@@ -233,7 +371,7 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
 
         # restore shape of sequence and feature dimensions
         seqs = [
-            ein.rearrange(s, f'... ({e.s_str}) ({e.f_str}) -> ... {e.s_str} {e.f_str}', **e.s, **e.f)
+            ein.rearrange(s, f'... ({e.s_str}) ({e.f_str}) -> ... {e.s_str} {e.f_str}', **e.s_dict, **e.f_dict)
             for s, e in zip(seqs, new_seq_dims)
         ]
 
@@ -241,10 +379,10 @@ def make_get_chunk(seq_dims: list[Einshape], chunk_size: list[int], chunk_mode: 
         seqs = [ tf.ensure_shape(s, e.shape) for s, e in zip(seqs, new_seq_dims) ]
 
         return seqs
-    
+
     return get_chunk
 
-def make_decimate_fn(threshold: float, dims: Einshape, other_params: list[tuple[Einshape, Any]] = []):
+def make_decimate_fn(threshold: float, dims: Einshape, other_params: list[tuple[Einshape, ...]] = []):
     """
     Cut down a sequence along a single `seq_dim` to the regions where the feature
     values vary, as measured by the L2 norm across `feat_dims`.
@@ -264,12 +402,12 @@ def make_decimate_fn(threshold: float, dims: Einshape, other_params: list[tuple[
             tf.TensorSpec(shape=dims.s_f_shape, dtype=tf.float32),
             *other_seqs_tspec,
         ]
-    
+
     @tf.function(input_signature=input_signature)
-    @tf_scope
+    @u.tf_scope
     def decimate(data, *other_data):
-        data = ein.rearrange(data, f'f {dims.f_str} -> f ({dims.f_str})', **dims.f)
-        other_data = [ein.rearrange(o_data, f'f {o.f_str} -> f ({o.f_str})', **o.f) for o_data, o in zip(other_data, other_dims)]
+        data = ein.rearrange(data, f'f {dims.f_str} -> f ({dims.f_str})', **dims.f_dict)
+        other_data = [ein.rearrange(o_data, f'f {o.f_str} -> f ({o.f_str})', **o.f_dict) for o_data, o in zip(other_data, other_dims)]
         len_data = tf.shape(data)[0]
         decimated_data = data[:1, :]
         decimated_other_data = [o_data[:1, :] for o_data in other_data]
@@ -291,65 +429,21 @@ def make_decimate_fn(threshold: float, dims: Einshape, other_params: list[tuple[
             [tf.constant(1), decimated_data, decimated_other_data],
             shape_invariants=[
                 tf.TensorShape([]),
-                tf.TensorShape([None, *utils.shape_list(data)[1:]]),
-                [tf.TensorShape([None, *utils.shape_list(o_data)[1:]]) for o_data in other_data],
+                tf.TensorShape([None, *shape(data)[1:]]),
+                [tf.TensorShape([None, *shape(o_data)[1:]]) for o_data in other_data],
             ],
         )
-            
-        decimated_data = ein.rearrange(decimated_data, f'f ({dims.f_str}) -> f {dims.f_str}', **dims.f)
-        decimated_other_data = [ein.rearrange(o_data, f'f ({o.f_str}) -> f {o.f_str}', **o.f) for o_data, o in zip(decimated_other_data, other_dims)]
+
+        decimated_data = ein.rearrange(decimated_data, f'f ({dims.f_str}) -> f {dims.f_str}', **dims.f_dict)
+        decimated_other_data = [ein.rearrange(o_data, f'f ({o.f_str}) -> f {o.f_str}', **o.f_dict) for o_data, o in zip(decimated_other_data, other_dims)]
         return decimated_data, decimated_other_data
-    
+
     if len(other_params) == 0:
         def decimate(data):
             d, _other_d = decimate(data)
             return d
-    
+
     return decimate
-
-
-
-# def flat_vector_batched_random_chunk(cfg, x, random_ahead=False, seed=None):
-
-#     if random_ahead:
-#         n_ahead = weighted_random_n(20, 2., 3., seed=seed)
-#     else:
-#         n_ahead = tf.constant(1, tf.int32)
-
-#     chunk_size = cfg.n_hand_vecs + n_ahead
-
-#     vecs, idxs = tf.map_fn(
-#         lambda a: get_chunk(cfg, chunk_size, a, chunk_mode="simple", seed=seed),
-#         x,
-#         fn_output_signature=(
-#             tf.TensorSpec(shape=[None, cfg.n_joints_per_hand,
-#                         cfg.n_dof_per_joint], dtype=tf.float32),
-#             tf.TensorSpec(shape=[None, 2], dtype=tf.int32),
-#         ),
-#         name="hand_map",
-#         parallel_iterations=10,
-#     )
-
-#     n_frames = tf.shape(vecs)[1]
-#     input = vecs[:, :n_frames-n_ahead, :, :]
-#     input_idxs = idxs[:, :n_frames-n_ahead, :]
-#     target = vecs[:, n_ahead:, :, :]
-#     target_idxs = idxs[:, n_ahead:, :]
-
-#     input = ein.rearrange(input, 'b fh j d -> b fh j d')
-#     target = ein.rearrange(target, 'b fh j d -> b (fh j d)')
-
-#     return (
-#         x | {
-#             "input_angles": input,
-#             "input_idxs": input_idxs,
-#             "target_idxs": target_idxs,
-#             # "n_ahead": n_ahead,
-#         },
-#         {
-#             "target_output": target,
-#         },
-#     )
 
 
 if __name__ == '__main__':
