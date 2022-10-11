@@ -76,7 +76,6 @@ with progress.create_progress_manager(run_name) as pm:
         pipeline.identifier,
         run_name,
         vizr,
-        n_steps_per_epoch=500,
         profile=False,
         compile=True,
     )

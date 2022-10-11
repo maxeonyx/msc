@@ -7,18 +7,22 @@ from mx.prelude import *
 
 from mx.progress import Progress
 from mx.metrics import MxMetric, RunningMean, Rolling, TimeSinceLastCall, InstantaneousMetric, wrap_loss_fn_for_metrics
+from mx.tf_types import NestedTensor
 from mx.visualizer import Visualizer
+
+TrainStepReturn = tuple[tft.NestedTensor, tft.Tensor, list[tft.Tensor]]
+TrainStepFn = Callable[[tft.NestedTensor, tft.NestedTensor], TrainStepReturn]
 
 @export
 def default_make_train_step(
     model: Model,
     optimizer: keras.optimizers.Optimizer,
     loss_fn: Callable,
-) -> tuple[TensorLike, TensorLike]:
+) -> TrainStepFn:
     """
     Factory function for default training step.
     """
-    def train_step(inputs, targets):
+    def train_step(inputs, targets) -> TrainStepReturn:
         with tf.GradientTape() as tape:
             outputs = model(inputs)
             loss = loss_fn(targets, outputs)
@@ -34,8 +38,8 @@ def make_train_step_wrapper(
     model: Model,
     optimizer: tf.keras.optimizers.Optimizer,
     loss_fn: Callable,
-    metrics: Set[MxMetric],
-    make_train_step: Callable,
+    metrics: dict[str, MxMetric],
+    make_train_step: Callable[..., TrainStepFn],
     tb_writer: tf.summary.SummaryWriter,
 ):
     """
@@ -54,7 +58,7 @@ def make_train_step_wrapper(
         with tb_writer.as_default(step=i_step):
             outputs_batch, loss, grads = train_step(inputs_batch, targets_batch)
 
-            metric_inputs = {
+            metric_inputs: NestedTensor = {
                 "loss": loss,
                 "step": i_step,
                 "targets": targets_batch,
@@ -103,6 +107,28 @@ def default_metrics(loss_fn) -> dict[str, dict[str, MxMetric]]:
         ]),
     }
 
+def exponential_up_to(n, base=2):
+    i = 0
+    total = 0
+    while True:
+        e = base ** i
+        if total + e > n:
+            break
+        yield e
+        i += 1
+        total += e
+    yield n - total
+
+
+def constant_up_to(n, chunk):
+    total = 0
+    while True:
+        if total + chunk > n:
+            break
+        yield chunk
+        total += chunk
+    yield n - total
+
 @export
 def train_loop(
     prog: Progress,
@@ -113,7 +139,7 @@ def train_loop(
     run_name: str,
     vizr: Visualizer,
     optimizer: Literal["adam", "sgd"] | tf.keras.optimizers.Optimizer = "adam",
-    n_steps_per_epoch: int = 500,
+    n_steps_per_epoch: int | str = "exponential",
     checkpoint_interval: Union[int, Literal["epoch"], Literal["never"]] = "epoch",
     log_interval: Union[int, Literal["epoch"], Literal["never"]] = 10,
     log_type: Set[Literal["tensorboard", "wandb"]] = {"tensorboard"},
@@ -151,7 +177,13 @@ def train_loop(
 
     n_steps = data.cardinality().numpy()
     i_all_step = 0
-    n_epochs = math.ceil(n_steps / n_steps_per_epoch)
+    if n_steps_per_epoch == "exponential":
+        epoch_sizes = [ e for e in exponential_up_to(n_steps) ]
+        n_epochs = len(epoch_sizes)
+    else:
+        epoch_sizes = [ e for e in constant_up_to(n_steps, chunk=n_steps_per_epoch) ]
+        n_epochs = len(epoch_sizes)
+
     try:
 
         checkpoint = tf.train.Checkpoint(model, optimizer=optimizer)
@@ -204,10 +236,7 @@ def train_loop(
                         else:
                             start_at = 0
 
-                        if (i_epoch+1) * n_steps_per_epoch > n_steps:
-                            n_steps_this_epoch = n_steps - i_epoch * n_steps_per_epoch
-                        else:
-                            n_steps_this_epoch = n_steps_per_epoch
+                        n_steps_this_epoch = epoch_sizes[i_epoch]
 
                         is_last_epoch = i_epoch == (n_epochs - 1)
 

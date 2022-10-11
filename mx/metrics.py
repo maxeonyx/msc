@@ -18,7 +18,7 @@ class MxMetric(abc.ABC, tf.Module):
         pass
 
     @abc.abstractmethod
-    def update(self, **inputs: TensorLike) -> tf.Tensor:
+    def update(self, **inputs: tft.NestedTensor) -> tf.Tensor:
         pass
 
     @abc.abstractmethod
