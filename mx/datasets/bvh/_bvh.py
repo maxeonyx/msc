@@ -1,21 +1,19 @@
-
-import os
-import pathlib
 import re
-import sys
 import pickle
-from pathlib import Path
-import tensorflow as tf
-import numpy as np
 
 from dotmap import DotMap as dm
 
+from mx.prelude import *
+
 from ._bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
-from mx import utils
+
+__all__, export = exporter()
 
 # assumes running with working directory as root of the repo
 DEFAULT_BVH_DIR = Path(__file__).parent / "BVH"
 DEFAULT_OUTPUT_BVH_DIR = Path.cwd() / "_anims"
+export("DEFAULT_BVH_DIR")
+export("DEFAULT_OUTPUT_BVH_DIR")
 
 def extract_bvh_file(file_content):
     """
@@ -248,6 +246,7 @@ def get_bvh_data(columns, bvh_dir=None, convert_deg_to_rad=True):
 
         yield name, data, data.shape[0]
 
+@export
 def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None) -> tuple[list[str], list[np.ndarray], list[int]]:
     """
     Get a numpy dataset of all the BVH data in the manipnet dataset.
@@ -286,13 +285,13 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None
         angles.append(a)
         n_frames.append(n)
 
-    pathlib.Path(ds_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(ds_path).parent.mkdir(parents=True, exist_ok=True)
     with open(ds_path, "wb") as f:
         pickle.dump((filenames, angles, n_frames), f)
 
     return filenames, angles, n_frames
 
-
+@export
 def write_bvh_files(data, name, column_map, output_dir=None, convert_rad_to_deg=True):
     """
     Write a new pair of animation files (left and right hands) from a single data array.

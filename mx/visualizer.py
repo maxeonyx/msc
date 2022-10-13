@@ -122,6 +122,9 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
         fig = hv.Layout(hmaps).cols(1).opts(
             shared_axes=False,
             title=self.name,
+            width=1600,
+            height=900,
+            sizing_mode="stretch_both",
         )
 
         if do_update:
@@ -139,7 +142,9 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
         filename = self._filename(output_location)
         return filename.absolute().as_uri()
 
-VizCfg = dict[str, list[Literal["start", "end", "epoch", "exit"]]]
+events = ["start", "end", "interrupt", "epoch"]
+
+VizCfg = dict[str, list[Literal["start", "end", "interrupt", "epoch"]]]
 export("VizCfg")
 
 @export
@@ -153,66 +158,95 @@ class Visualizer:
         visualizations: dict of (Visualization, cfg) pairs
 
     cfg should be a dict with the following keys:
-        - update_on: "start", "end", "twice", or "epoch"
-            When to run this visualization.
-        - render_on: "start", "end", "twice", or "epoch"
-            When to save this visualization.
+    -   "render_on": list of strings, one of "start", "end", "epoch", "interrupt"
+    -   "show_on": list of strings, one of "start", "end", "epoch", "interrupt"
 
-    Frequency values:
+    Event values:
 
     "start" => before training
 
     "end" => after training
 
-    "twice" => before and after training
+    "interrupt" => user cancelled training
 
     "epoch" => after each epoch
     """
 
     def __init__(self,
-        visualizations: dict[str, tuple[Visualization, VizCfg]],
+        visualizations: dict[str, Visualization],
+        configs: dict[str, VizCfg],
         output_dir: PathLike,
     ):
         assert isinstance(visualizations, dict), "visualizations must be a dict"
 
-        for k, val in visualizations.items():
-            assert isinstance(val, tuple), f"visualization['{k}'] must be a tuple of (Visualization, cfg). Got visualization['{k}'] = {val}"
-            viz, cfg = val
-            assert isinstance(viz, Visualization), f"Visualizations must be of type Visualization. Got {viz}"
-            assert isinstance(cfg, dict), f"Configs must be of type dict. Got cfgs['{k}']={cfg}"
-
-            assert "render_on" in cfg, f"Visualizations must have a 'render_on' key in their config. Got cfgs['{k}']={cfg}"
-            assert "show_on" in cfg, f"Visualizations must have a 'show_on' key in their config. Got cfgs['{k}']={cfg}"
+        for k, viz in visualizations.items():
+            assert isinstance(viz, Visualization), f"Visualizations must be of type Visualization. Got type of visualizations['{k}'] = {type(viz).__name__}"
 
         self.visualizations = visualizations
+        self.set_cfgs(configs)
 
         self.output_dir = Path(output_dir)
 
-    def _do(self, viz: Visualization, cfg, event: str, timestep, pm: Progress):
-        if event in cfg["render_on"]:
-            with pm.enter_spinner(
-                name=f"Visualize '{viz.name}'",
-                desc=f"Visualizing '{viz.desc}'...",
-                delete_on_success=True
-            ):
-                viz.render(self.output_dir / viz.name, timestep=timestep)
+    def set_cfgs(self, cfgs: dict[str, VizCfg]):
 
-        if event in cfg["show_on"]:
-            # show the visualization
-            viz.show(self.output_dir / viz.name)
+        vizs = self.visualizations
+
+        assert isinstance(cfgs, dict), f"cfgs must be a dict, got {type(cfgs)}"
+        for k, cfg in cfgs.items():
+            assert k in vizs, f"Vizualization '{k}' not found in visualizations. Available visualizations: {list(vizs.keys())}"
+            assert isinstance(cfg, dict), f"cfgs['{k}'] must be a dict, got {type(cfg).__name__}"
+            assert "render_on" in cfg, f"cfgs['{k}'] must have a 'render_on' key"
+            assert "show_on" in cfg, f"cfgs['{k}'] must have a 'show_on' key"
+
+            assert all((e in events) for e in cfg["render_on"]), f"cfgs['{k}']['render_on'] can only be 'start', 'end', 'interrupt', or 'epoch', got {cfg['render_on']}"
+            assert all((e in events) for e in cfg["show_on"]), f"cfgs['{k}']['show_on'] can only be 'start', 'end', 'interrupt', or 'epoch', got {cfg['show_on']}"
+
+            # visualizations can't be shown until they have been rendered. Validate that here.
+            requires = {
+                "start": ["start"],
+                "epoch": ["start", "epoch"],
+                "end": ["start", "epoch", "end"],
+                "interrupt": ["start"],
+            }
+            for e in events:
+                if e in cfg["show_on"]:
+                    assert any((r in cfg["render_on"]) for r in requires[e]), f"cfgs['{k}'] cannot be shown before it is rendered. Add one of {requires[e]} to cfgs['{k}']['render_on']"
+
+
+
+        # if cfg not specified, use default
+        for k in vizs.keys():
+            if k not in cfgs:
+                cfgs[k] = {
+                    ## default config ##
+                    "render_on": ["start", "epoch"],
+                    "show_on": ["start", "end", "interrupt"],
+                }
+
+        self.cfgs = cfgs
+
+    def _do(self, event: str, timestep, pm: Progress):
+        for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
+            if event in cfg["render_on"]:
+                with pm.enter_spinner(
+                    name=f"Visualize '{viz.name}'",
+                    desc=f"Visualizing '{viz.desc}'...",
+                    delete_on_success=True
+                ):
+                    viz.render(self.output_dir / viz.name, timestep=timestep)
+
+            if event in cfg["show_on"]:
+                # show the visualization
+                viz.show(self.output_dir / viz.name)
 
     def before_train_start(self, step, pm: Progress):
-        for viz, cfg in self.visualizations.values():
-            self._do(viz, cfg, "start", timestep=step, pm=pm)
+        self._do("start", timestep=step, pm=pm)
 
     def after_train_end(self, step, pm: Progress):
-        for viz, cfg in self.visualizations.values():
-            self._do(viz, cfg, "end", timestep=step, pm=pm)
+        self._do("end", timestep=step, pm=pm)
 
     def on_epoch_end(self, step, pm: Progress):
-        for viz, cfg in self.visualizations.values():
-            self._do(viz, cfg, "epoch", timestep=step, pm=pm)
+        self._do("epoch", timestep=step, pm=pm)
 
     def on_interrupt(self, step, pm: Progress):
-        for viz, cfg in self.visualizations.values():
-            self._do(viz, cfg, "exit", timestep=step, pm=pm)
+        self._do("interrupt", timestep=step, pm=pm)

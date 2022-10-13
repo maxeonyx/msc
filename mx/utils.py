@@ -8,6 +8,42 @@ from tensorflow.python.module.module import camel_to_snake
 
 from mx.prelude import *
 
+__all__, export = exporter()
+
+from mx.run_name import get_run_name, random_run_name
+export("get_run_name")
+export("random_run_name")
+
+@export
+def exponential_up_to(n, base=2):
+    """
+    Yields from an exponential series, such that the sum of the series is `n`.
+    """
+    i = 0
+    total = 0
+    while True:
+        e = base ** i
+        if total + e > n:
+            break
+        yield e
+        i += 1
+        total += e
+    yield n - total
+
+@export
+def constant_up_to(n, chunk):
+    """
+    Yields from a constant series, such that the sum of the series is `n`.
+    """
+    total = 0
+    while True:
+        if total + chunk > n:
+            break
+        yield chunk
+        total += chunk
+    yield n - total
+
+
 _default_indent = "  "
 @export
 def set_default_indent(indent: int | str):
@@ -16,6 +52,47 @@ def set_default_indent(indent: int | str):
         _default_indent = " " * indent
     else:
         _default_indent = indent
+
+
+debug = False
+def set_debug(to: bool = True):
+    global debug
+    debug = to
+
+
+def primes():
+    """
+    Generate an infinite sequence of prime numbers.
+    """
+    # https://stackoverflow.com/a/568618/123879
+    D = {}
+    q = 2
+
+    while True:
+        if q not in D:
+            yield q
+            D[q * q] = [q]
+        else:
+            for p in D[q]:
+                D.setdefault(p + q, []).append(p)
+            del D[q]
+        q += 1
+
+def debug_numbers():
+    p = iter(primes)
+    def next_prime_or(val, multiple_of=1):
+        if debug:
+            return next(p)*multiple_of
+        else:
+            return val
+    return next_prime_or
+
+
+def nearest_prime_to(n):
+    for p in primes:
+        if p >= n:
+            return p
+    return primes[-1]
 
 
 def list_to_dict(l):
@@ -576,6 +653,16 @@ def tf_print(x: SomeT) -> SomeT:
     """
     tf.print(tf_repr(x))
     return x
+
+@export
+def dbg(s: SomeT, tag: str = "") -> SomeT:
+    """
+    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
+    Returns the input so it can be used in an expression.
+    """
+    if debug:
+        tf.print(tag + ":", tf_repr(s))
+    return s
 
 @export
 def inspect(fn, tag: str|None = None):

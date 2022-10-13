@@ -21,10 +21,10 @@ def exporter():
     def export(item):
         if isinstance(item, str):
             name = item
-        else:
-            if not hasattr(item, '__module__'):
-                raise ValueError(f'Cannot @export {item}, it has no __name__ attribute. Use `export( ... )` instead')
+        elif hasattr(item, '__name__'):
             name = item.__name__
+        else:
+            raise ValueError(f'Cannot @export {item}, it has no `__name__` attribute. Use `export( ... )` instead')
         all.append(name)
         return item
 

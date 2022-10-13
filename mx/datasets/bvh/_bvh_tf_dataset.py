@@ -13,6 +13,7 @@ from mx.pipeline import MxDataset, Task
 
 from . import _bvh
 
+@export
 @dataclass
 class BvhDataset(MxDataset):
     """
@@ -32,8 +33,8 @@ class BvhDataset(MxDataset):
         split_seed=1234,
     ):
         super().__init__(
-            name=name,
-            identifier=identifier,
+            desc=name,
+            name=identifier,
             split=split,
             split_seed=split_seed,
         )
@@ -181,7 +182,7 @@ class BvhDataset(MxDataset):
             ),
         ])
 
-
+@export
 class BVHImageViz(HoloMapVisualization):
 
     def __init__(self,
@@ -261,7 +262,11 @@ class BVHImageViz(HoloMapVisualization):
         ]
         def img(data, title):
             data = ein.rearrange(data, "f h j d -> (h j d) f")
-            return hv.Raster(data.numpy()).opts(cmap='twilight', aspect='equal').opts(title=title)
+            return hv.Raster(data.numpy()).opts(
+                title=title,
+                cmap='twilight',
+                aspect='equal',
+            )
 
         return [
             hv.HoloMap(

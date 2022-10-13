@@ -19,12 +19,15 @@ if typing.TYPE_CHECKING:
     import keras.api._v2.keras as keras
     from keras.api._v2.keras import Model, Input, layers
     from keras.api._v2.keras.backend import is_keras_tensor
+    from tensorflow.python.data.ops.dataset_ops import DatasetV2 as Dataset
 else:
     from tensorflow import keras
     from tensorflow.keras import Input, Model, layers
     from tensorflow.keras.backend import is_keras_tensor
     from tensorflow.types.experimental import TensorLike
     import tensorflow.types.experimental as tft
+    from tensorflow.data import Dataset
+
 
 from mx.export import export, exporter
 

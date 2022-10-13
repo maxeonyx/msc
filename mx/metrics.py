@@ -7,11 +7,12 @@ from mx.utils import tf_scope
 
 class MxMetric(abc.ABC, tf.Module):
 
-    def __init__(self, name: str, unit: str | None, reset_every_epoch: bool):
+    def __init__(self, name: str, unit: str | None, reset_every_epoch: bool, fmt: str = None):
         super().__init__(name=name)
         self.reset_every_epoch = reset_every_epoch
         self.initialized = tf.Variable(False, trainable=False, name="initialized")
         self.unit = unit
+        self.fmt = fmt
 
     @abc.abstractmethod
     def reset(self):
@@ -26,11 +27,12 @@ class MxMetric(abc.ABC, tf.Module):
         pass
 
 class TimeSinceLastCall(MxMetric):
-    def __init__(self, name="time_since_last_call", reset_every_epoch=True):
+    def __init__(self, name="time_since_last_call", reset_every_epoch=True, fmt: str = None):
         super().__init__(
             name=name,
             unit="s",
-            reset_every_epoch=reset_every_epoch
+            reset_every_epoch=reset_every_epoch,
+            fmt=fmt
         )
         self.last_call = tf.Variable(tf.timestamp(), dtype=tf.float64, trainable=False, name="last_call")
 
@@ -55,13 +57,13 @@ class TimeSinceLastCall(MxMetric):
 class RunningMean(MxMetric):
 
     @tf_scope
-    def __init__(self, fn, unit: str = None, element_shape=[], dtype=tf.float64, name="running_mean", reset_every_epoch=True):
+    def __init__(self, fn, unit: str = None, element_shape=[], dtype=tf.float64, name="running_mean", reset_every_epoch=True, fmt: str = None):
         if isinstance(fn, MxMetric):
             unit = fn.unit
             self.fn = fn.update
         else:
             self.fn = fn
-        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch)
+        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch, fmt=fmt)
         self.total = tf.Variable(initial_value=tf.zeros(element_shape, dtype=dtype), name="total", trainable=False)
         self.count = tf.Variable(0, dtype=tf.int64, name="count", trainable=False)
 
@@ -90,13 +92,13 @@ class RunningMean(MxMetric):
 class Rolling(MxMetric):
 
     @tf_scope
-    def __init__(self, length, fn, unit: str, element_shape=[], dtype=tf.float32, reduction_fn=tf.reduce_mean, name="rolling", reset_every_epoch=True):
+    def __init__(self, length, fn, unit: str = None, element_shape=[], dtype=tf.float32, reduction_fn=tf.reduce_mean, name="rolling", reset_every_epoch=True, fmt: str = None):
         if isinstance(fn, MxMetric):
             unit = fn.unit
             self.fn = fn.update
         else:
             self.fn = fn
-        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch)
+        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch, fmt=fmt)
         self.length = tf.constant(length, tf.int64)
         self.reduction_fn = reduction_fn
         self.buffer = tf.Variable(
@@ -138,14 +140,14 @@ class Rolling(MxMetric):
         return self._result().numpy()
 
 class InstantaneousMetric(MxMetric):
-    def __init__(self, fn, unit: str, name="instantaneous", reset_every_epoch=True):
+    def __init__(self, fn, unit: str = None, dtype=tf.float32, name="instantaneous", reset_every_epoch=True, fmt: str = None):
         if isinstance(fn, MxMetric):
             unit = fn.unit
             self.fn = fn.update
         else:
             self.fn = fn
-        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch)
-        self.val = tf.Variable(0., trainable=False, name="val")
+        super().__init__(name=name, unit=unit, reset_every_epoch=reset_every_epoch, fmt=fmt)
+        self.val = tf.Variable(0, dtype=dtype, trainable=False, name="val")
 
     def reset(self):
         self.initialized.assign(False)

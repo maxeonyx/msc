@@ -11,6 +11,7 @@ from typing import Callable
 import enlighten
 
 from mx.export import export
+from mx.run_name import get_run_name
 
 ## Note: we don't import using mx.prelude or mx.utils because we want this file
 ## to be usable before tensorflow is imported.
@@ -51,11 +52,14 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
         empty_format = f"{VERTICAL_BAR} {{fill}}"
         return empty_format, empty_format
 
-    def value_format(val, width):
+    def value_format(m: MxMetric, width):
+
+        val = m.result()
 
         width_nopad = width - 2
-
-        if val is None:
+        if m.fmt is not None:
+            s = m.fmt.format(val)
+        elif val is None:
             s = f"{' ... ':^{width_nopad}}"
         elif isnan(val):
             s = f"{' NaN ':^{width_nopad}}"
@@ -82,7 +86,7 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
     return {
         name: header_format(title, unit, width) for name, width, (title, unit) in zip(metric_names, widths, headers)
     }, {
-        name: value_format(m.result(), width) for name, width, m in zip(metric_names, widths, metrics)
+        name: value_format(m, width) for name, width, m in zip(metric_names, widths, metrics)
     }
 
 @export
@@ -98,16 +102,26 @@ class Progress:
 
     def __post_init__(self) -> None:
 
-        title_format = LEFT_CORNER + "{fill} {task_format} {fill}" + LEFT_STOP
+        title_format = LEFT_CORNER + "{fill}{task_format}{fill}" + LEFT_STOP
         self.title_bar=self.manager.status_bar(status_format=title_format, task_format=self.task_format(), fill=HORIZONTAL_BAR)
 
     def task_format(self):
-        if len(self.tasks) >= 1:
-            tasks = ": " + " > ".join(self.tasks)
-        else:
-            tasks = ""
 
-        return f"\"{self.run_name}\"{tasks}"
+        task_str = " > ".join(self.tasks)
+
+        if self.run_name is not None:
+            run_str = f"Run {self.run_name}"
+        else:
+            run_str = ""
+
+        if len(task_str) > 0 and len(run_str) > 0:
+            return f" {run_str}: {task_str} "
+        elif len(task_str) > 0:
+            return f" {task_str} "
+        elif len(run_str) > 0:
+            return f" {run_str} "
+        else:
+            return ""
 
     @contextmanager
     def enter_spinner(self, name: str, desc: str, delete_on_success=False):
@@ -127,7 +141,7 @@ class Progress:
                     spinner = TICK
                 else:
                     spinner = CROSS
-                spinner_bar.update(spinner=spinner)
+                spinner_bar.update(spinner=spinner, desc=desc)
 
         try:
             self.indent_level += 1
@@ -142,6 +156,7 @@ class Progress:
                 spinner_bar.leave = False
                 spinner_bar.close()
             else:
+                desc += " done."
                 state = "success"
         except Exception as e:
             state = "error"
@@ -236,17 +251,20 @@ class Progress:
                 self.update_fns_to_remove.append((metrics_update, close))
 
 
+manager = None
+
 @export
 @contextmanager
 def create_progress_manager(
-    run_name: str,
+    run_name: str | None = None,
 ):
+    global manager
     t = None
     update_title_bar = None
-    with enlighten.get_manager() as manager:
+    with enlighten.get_manager() as e_manager:
         try:
-            prog = Progress(
-                manager=manager,
+            manager = Progress(
+                manager=e_manager,
                 run_name=run_name,
             )
 
@@ -255,36 +273,37 @@ def create_progress_manager(
                 nonlocal done
                 i = 0
                 while not done:
-                    l = len(prog.update_fns)
+                    l = len(manager.update_fns)
                     for j in range(l):
-                        prog.update_fns[j](i)
+                        manager.update_fns[j](i)
 
-                    for (f, close) in prog.update_fns_to_remove:
-                        if f in prog.update_fns:
-                            prog.update_fns.remove(f)
+                    for (f, close) in manager.update_fns_to_remove:
+                        if f in manager.update_fns:
+                            manager.update_fns.remove(f)
                             close()
                     i += 1
-                    time.sleep(prog.min_delta)
+                    time.sleep(manager.min_delta)
 
             def update_title_bar(i):
-                prog.title_bar.update(task_format=prog.task_format())
+                manager.title_bar.update(task_format=manager.task_format())
 
-            prog.update_fns.append(update_title_bar)
+            manager.update_fns.append(update_title_bar)
 
             t = threading.Thread(None, update).start()
 
-            yield prog
+            yield manager
         except Exception as e:
             traceback.print_exc()
         finally:
             sys.stderr.flush()
             sys.stdout.flush()
-            time.sleep(prog.min_delta)
+            time.sleep(manager.min_delta)
             done = True
             if t is not None:
                 t.join()
-            if update_title_bar is not None and update_title_bar in prog.update_fns:
-                prog.update_fns_to_remove.append((update_title_bar, lambda: prog.title_bar.close()))
+            if update_title_bar is not None and update_title_bar in manager.update_fns:
+                manager.update_fns_to_remove.append((update_title_bar, lambda: manager.title_bar.close()))
+            manager = None
 
 if __name__ == '__main__':
     with create_progress_manager("Test") as prog:
@@ -298,3 +317,22 @@ if __name__ == '__main__':
         with prog.enter_progbar(10, "Visualize", "Visualizing Data") as prog_bar:
             for i in prog_bar(range(10)):
                 time.sleep(0.1)
+
+
+@export
+@contextmanager
+def spinner(desc: str):
+
+    if manager is None:
+        with create_progress_manager() as prog:
+            with prog.enter_spinner(desc, desc) as spinner:
+                yield spinner
+    else:
+        with manager.enter_spinner(desc, desc) as spinner:
+            yield spinner
+
+def init_with_progress():
+    run_name = get_run_name()
+    with create_progress_manager(run_name) as pm:
+        with pm.enter_spinner("Init Tensorflow", "Initializing Tensorflow..."):
+            import mx.prelude

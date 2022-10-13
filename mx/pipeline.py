@@ -15,15 +15,15 @@ class MxDataset(abc.ABC):
 
     def __init__(
         self,
+        desc: str,
         name: str,
-        identifier: str,
         split = (0.8, 0.1, 0.1),
         split_seed = 1234,
     ):
-        self.name = name
+        self.desc = desc
         "Human-readable name"
 
-        self.identifier = identifier
+        self.name = name
         "Unique, machine-readable identifier"
 
         self.split = split
@@ -97,7 +97,7 @@ class MxDataset(abc.ABC):
             if n == -1:
                 raise ValueError("Dataset cardinality is unknown - must specify a buffer size when calling `snapshot_cache_split`.")
             buffer_size = n
-        d = d.snapshot(f"./_cache/tf/{self.identifier}", compression=None)
+        d = d.snapshot(f"./_cache/tf/{self.name}", compression=None)
         d = d.shuffle(buffer_size=buffer_size, seed=self.split_seed)
 
         # default split is 80/10/10
@@ -294,12 +294,18 @@ class MxModel(abc.ABC):
 @dataclass
 class Pipeline:
 
-    def __init__(self, dataset: MxDataset, task: Task, embedding: Embedding, model: MxModel, identifier: str) -> None:
+    def __init__(self, batch_size: int,  n_steps: int, dataset: MxDataset, task: Task, embedding: Embedding, model: MxModel, name: str, desc: str, test_batch_size: int = None, viz_batch_size: int = 3) -> None:
+
+        self.batch_size = batch_size
+        self.test_batch_size = test_batch_size or batch_size
+        self.viz_batch_size = viz_batch_size
+        self.n_steps = n_steps
 
         # check identifier is machine-friendly
-        assert re.match(r"^[a-z][a-z0-9_\-]+$", identifier), f"'{identifier}' is not a valid identifier, use only a-z, 0-9, _, -"
+        assert re.match(r"^[a-z][a-z0-9_\-]+$", name), f"'{name}' is not a valid identifier, use only a-z, 0-9, _, -"
 
-        self.identifier = identifier
+        self.name = name
+        self.desc = desc
 
         # configure:
         #     raw data --> data generator
@@ -323,32 +329,34 @@ class Pipeline:
         self.embedding = embedding
         self.mx_model = model
 
-        self.model: Model = None
+        self._model: Model = None
+
 
     def new_model(self):
+        "Create a new model instance."
         embedder = self.embedding.make_embedder()
         model = self.mx_model.make_model()
         final_layer = self.task.make_final_layer()
 
-        return Model(
+        self._model = Model(
             inputs=embedder.inputs,
             outputs=final_layer(model(embedder.outputs)),
-            name=type(self.embedding).__name__ + '-' + type(self.model).__name__
+            name=type(self.embedding).__name__ + '-' + type(self._model).__name__
         )
 
+        return self._model
+
     def get_model(self) -> Model:
+        "Create a new model, or return the existing one if it exists."
+        if self._model is not None:
+            return self._model
 
-        if self.model is not None:
-            return self.model
-
-        self.model = self.new_model()
-
-        return self.model
+        return self.new_model()
 
     def get_loss_fn(self) -> Callable[..., tf.Tensor]:
         return self.task.make_loss_fn()
 
-    def get_train_data(self, batch_size: int, n_steps: int, force_cache_reload: bool = False) -> tf.data.Dataset:
+    def get_train_data(self, force_cache_reload: bool = False) -> tf.data.Dataset:
 
         dsets = self.dataset.load(force_cache_reload=force_cache_reload)
         dsets = self.dataset.adapt(dsets)
@@ -358,11 +366,11 @@ class Pipeline:
         d = dsets.train
 
         if not self.task.does_batching:
-            d = d.batch(batch_size)
+            d = d.batch(self.batch_size)
 
         d = (
             d
-            .take(n_steps)
+            .take(self.n_steps)
             .enumerate()
             .map(lambda i, x: (i, (x["inputs"], x["targets"])))
         )
@@ -371,20 +379,15 @@ class Pipeline:
 
         return d
 
-    def get_visualizer(self, output_dir, viz_batch_size: int, cfgs: dict[str, VizCfg]) -> Visualizer:
+    def get_visualizer(self, output_dir, viz_cfgs: dict[str, VizCfg], viz_batch_size: int = None) -> Visualizer:
 
-        assert isinstance(cfgs, dict), f"cfgs must be a dict, got {type(cfgs)}"
+        viz_batch_size = viz_batch_size or self.viz_batch_size
+
         model = self.get_model()
         predict_fn = self.task.make_predict_fn(model)
         vizs = self.dataset.get_visualizations(viz_batch_size, predict_fn)
-
-        for k, v in cfgs.items():
-            assert k in vizs, f"Vizualization '{k}' not found in visualizations. Available keys: {list(vizs.keys())}"
-
         return Visualizer(
-            {
-                k: (vizs[k], cfg)
-                for k, cfg in cfgs.items()
-            },
+            vizs,
+            viz_cfgs,
             output_dir,
         )
