@@ -7,7 +7,7 @@ from typing import Callable, Literal, Type
 
 from mx.prelude import *
 from mx.utils import DSets
-from mx.visualizer import StatefulVisualization, Visualizer, VizCfg
+from mx.visualizer import StatefulVisualization, Visualization, Visualizer, VizCfg
 
 @export
 class MxDataset(abc.ABC):
@@ -17,20 +17,12 @@ class MxDataset(abc.ABC):
         self,
         desc: str,
         name: str,
-        split = (0.8, 0.1, 0.1),
-        split_seed = 1234,
     ):
         self.desc = desc
         "Human-readable name"
 
         self.name = name
         "Unique, machine-readable identifier"
-
-        self.split = split
-        "Ratios of train/test/val split"
-
-        self.split_seed = split_seed
-        "Change this to split different data into train/test/val sets"
 
         ## set by dataset.configure(task) ##
         self.adapt_in: Callable[[DSets], DSets] = None
@@ -73,7 +65,7 @@ class MxDataset(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_visualizations(self, viz_batch_size, task_specific_predict_fn) -> dict[str, StatefulVisualization]:
+    def get_visualizations(self, viz_batch_size, task_specific_predict_fn) -> dict[str, Visualization]:
         pass
 
     def _snapshot_and_split(self, d: tf.data.Dataset, buffer_size=None) -> DSets:
@@ -169,11 +161,11 @@ class Task(abc.ABC):
         self.adapt_in: Callable[[DSets], DSets] | None = None
 
     def recieve_dataset_config(self, cfg):
-        assert isinstance(cfg, self.ds_config_type), f"Expected {self.ds_config_type}, got {type(cfg)}"
+        assert isinstance(cfg, self.ds_config_type), f"Expected {self.ds_config_type}, got {type_name(cfg)}"
         self.ds_cfg = cfg
 
     def recieve_model_config(self, cfg):
-        assert isinstance(cfg, self.model_config_type), f"Expected {self.model_config_type}, got {type(cfg)}"
+        assert isinstance(cfg, self.model_config_type), f"Expected {self.model_config_type}, got {type_name(cfg)}"
         self.model_cfg = cfg
 
     @abc.abstractmethod
@@ -243,7 +235,7 @@ class Embedding(abc.ABC):
         self.task_cfg: Embedding.TaskSpecificConfig = None
 
     def receive_task_config(self, cfg: TaskSpecificConfig):
-        assert isinstance(cfg, self.task_config_type), f"Expected {self.task_config_type}, got {type(cfg)}"
+        assert isinstance(cfg, self.task_config_type), f"Expected {self.task_config_type}, got {type_name(cfg)}"
         self.task_cfg = cfg
 
     @abc.abstractmethod
@@ -279,7 +271,7 @@ class MxModel(abc.ABC):
         self.embd_cfg: MxModel.EmbeddingSpecificConfig = None
 
     def recieve_embd_config(self, cfg):
-        assert isinstance(cfg, self.embd_cfg_type), f"Expected {self.embd_cfg_type}, got {type(cfg)}"
+        assert isinstance(cfg, self.embd_cfg_type), f"Expected {self.embd_cfg_type}, got {type_name(cfg)}"
         self.embd_cfg = cfg
 
     @abc.abstractmethod

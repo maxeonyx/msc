@@ -1,1 +1,1 @@
-from .next_vector_prediction import *
+from .vector_sequence_mse import *

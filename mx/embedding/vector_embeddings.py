@@ -41,7 +41,7 @@ class TransformerAngleVectorEmbedding(Embedding):
                 n_embd=self.n_embd,
             ))
         else:
-            raise NotImplementedError(f"TransformerAngleVectorEmbedding does not support {type(model)}")
+            raise NotImplementedError(f"TransformerAngleVectorEmbedding does not support {type_name(model)}")
 
     def make_embedder(self) -> Model:
         "Creats the keras model for the embedding."
@@ -74,14 +74,14 @@ class TransformerAngleVectorEmbedding(Embedding):
             angle_embd = dense_out(angles)
 
             ## make position embeddings
-            pos_idxs = inputs["input_idxs"]
+            pos_idxs = inputs["seq_idxs"]
             pos_embd = pos_embedder(pos_idxs)
 
             return prepend_begin_token(angle_embd + pos_embd)
 
         inputs = u.input_dict(
             Input([None, self.task_cfg.n_input_dims], dtype=tf.float32, name="angles"),
-            Input([None],                             dtype=tf.int32,   name="input_idxs"),
+            Input([None],                             dtype=tf.int32,   name="seq_idxs"),
         )
         return Model(
             inputs=inputs,

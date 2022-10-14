@@ -41,7 +41,7 @@ class DecoderOnlyTransformer(MxModel):
                 n_output_embd,
             ))
         else:
-            raise NotImplementedError(f"Model {type(self)} does not support task {type(task)}")
+            raise NotImplementedError(f"Model {type_name(self)} does not support task {type(task)}")
 
     def make_model(self) -> Model:
 

@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-import icecream as ic
+from icecream import ic
 import numpy as np
 import einops as ein
 import tensorflow as tf
@@ -36,4 +36,4 @@ import mx.tf_types as tft
 ## utils.py imports this file, so can't use anything after this line
 import mx.utils as u
 
-from mx.utils import tf_print as tp, export, exporter, shape
+from mx.utils import dbg as tp, export, exporter, shape, type_name

@@ -180,7 +180,7 @@ class Visualizer:
         assert isinstance(visualizations, dict), "visualizations must be a dict"
 
         for k, viz in visualizations.items():
-            assert isinstance(viz, Visualization), f"Visualizations must be of type Visualization. Got type of visualizations['{k}'] = {type(viz).__name__}"
+            assert isinstance(viz, Visualization), f"Visualizations must be of type Visualization. Got type of visualizations['{k}'] = {type_name(viz)}"
 
         self.visualizations = visualizations
         self.set_cfgs(configs)
@@ -191,10 +191,10 @@ class Visualizer:
 
         vizs = self.visualizations
 
-        assert isinstance(cfgs, dict), f"cfgs must be a dict, got {type(cfgs)}"
+        assert isinstance(cfgs, dict), f"cfgs must be a dict, got {type_name(cfgs)}"
         for k, cfg in cfgs.items():
             assert k in vizs, f"Vizualization '{k}' not found in visualizations. Available visualizations: {list(vizs.keys())}"
-            assert isinstance(cfg, dict), f"cfgs['{k}'] must be a dict, got {type(cfg).__name__}"
+            assert isinstance(cfg, dict), f"cfgs['{k}'] must be a dict, got {type_name(cfg)}"
             assert "render_on" in cfg, f"cfgs['{k}'] must have a 'render_on' key"
             assert "show_on" in cfg, f"cfgs['{k}'] must have a 'show_on' key"
 

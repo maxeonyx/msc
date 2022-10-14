@@ -1,6 +1,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 import functools
+import itertools
 
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
@@ -18,6 +19,11 @@ export("random_run_name")
 def exponential_up_to(n, base=2):
     """
     Yields from an exponential series, such that the sum of the series is `n`.
+
+    >>> list(exponential_up_to(10))
+    [1, 2, 4, 3]
+    >>> list(exponential_up_to(10, base=3))
+    [1, 3, 6]
     """
     i = 0
     total = 0
@@ -34,6 +40,11 @@ def exponential_up_to(n, base=2):
 def constant_up_to(n, chunk):
     """
     Yields from a constant series, such that the sum of the series is `n`.
+
+    >>> list(constant_up_to(10, 2))
+    [2, 2, 2, 2, 2]
+    >>> list(constant_up_to(10, 3))
+    [3, 3, 3, 1]
     """
     total = 0
     while True:
@@ -41,7 +52,9 @@ def constant_up_to(n, chunk):
             break
         yield chunk
         total += chunk
-    yield n - total
+
+    if total < n:
+        yield n - total
 
 
 _default_indent = "  "
@@ -63,6 +76,9 @@ def set_debug(to: bool = True):
 def primes():
     """
     Generate an infinite sequence of prime numbers.
+
+    >>> list(itertools.islice(primes(), 10))
+    [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
     """
     # https://stackoverflow.com/a/568618/123879
     D = {}
@@ -88,14 +104,34 @@ def debug_numbers():
     return next_prime_or
 
 
-def nearest_prime_to(n):
-    for p in primes:
+def next_prime_after(n):
+    """
+    Returns the very next prime number after `n`.
+
+    >>> next_prime_after(10)
+    11
+    >>> next_prime_after(11)
+    11
+    >>> next_prime_after(20)
+    23
+    """
+    for p in primes():
         if p >= n:
             return p
-    return primes[-1]
 
 
 def list_to_dict(l):
+    """
+    Turns a list of objs with `name` attributes into a dict of name -> obj.
+
+    >>> class Foo:
+    ...     def __init__(self, name):
+    ...         self.name = name
+    ...     def __repr__(self):
+    ...         return f"Foo({self.name})"
+    >>> list_to_dict([Foo("a"), Foo("b")])
+    {'a': Foo(a), 'b': Foo(b)}
+    """
     return { x.name: x for x in l }
 
 def shape(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int | tf.Tensor]:
@@ -122,6 +158,10 @@ def shape(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int | tf.Tensor]:
 @export
 def input_dict(*arr):
     return list_to_dict(arr)
+
+@export
+def type_name(x):
+    return type(x).__name__
 
 @export
 @dataclass
@@ -551,35 +591,50 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
 
     return angles
 
-@export
-@tf.function
 def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
-
+    ic(x)
     # container types
-    if isinstance(x, dict):
+    if ic(isinstance(x, dict)):
         return tf_dict_repr(x, indent=indent, depth=depth, prefix=prefix)
-    elif isinstance(x, tuple):
+    elif ic(isinstance(x, tuple)):
         return tf_tuple_repr(x, indent=indent, depth=depth, prefix=prefix)
-    elif isinstance(x, list):
+    elif ic(isinstance(x, list)):
         return tf_list_repr(x, indent=indent, depth=depth, prefix=prefix)
 
+    elif ic(isinstance(x, Dataset)):
+        cardinality = x.cardinality()
+        if cardinality == tf.data.INFINITE_CARDINALITY:
+            cardinality = "∞"
+        else:
+            cardinality = tf.strings.as_string(cardinality)
+        prefix = tf.strings.join(["Dataset(", cardinality, ") "])
+        str_x = tf_repr(x.element_spec, indent=indent, depth=depth, prefix=prefix)
+    elif ic(isinstance(x, tf.TensorSpec)):
+        ic(x)
+        if x.shape.rank == 0:
+            str_x = tf.constant(f"~{x.dtype.name}[]")
+        else:
+            str_x = tf.strings.join([
+                "~", # ~ means it's not concrete
+                x.dtype.name,
+                tf_shape_repr(x.shape),
+            ])
     # non-tf types
-    elif not tf.is_tensor(x):
-        str_x = tf.constant(repr(x))
+    elif ic(not tf.is_tensor(x)):
+        str_x = tf.constant(repr(x), tf.string)
 
-    elif len(x.shape) == 0:
+    elif ic(x.shape.rank == 0):
         if x.dtype == tf.string:
-            str_x = tf.strings.join(["\"", x, "\""], separator="")
+            str_x = tf.strings.join(["\"", x, "\""])
         else:
             str_x = tf.strings.as_string(x)
     else:
         str_x = tf.strings.join([
-            "`",
-            tf.constant(x.dtype.name, tf.string),
-            "[",
-            tf.strings.reduce_join(tf.strings.as_string(tf.shape(x)), separator=" "),
-            "]",
+            "!", # ! means concrete
+            x.dtype.name,
+            tf_shape_repr(shape(x)),
         ])
+    ic(str_x)
 
     return tf.strings.join([
         indent*depth,
@@ -587,8 +642,21 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
         str_x,
     ])
 
-@export
-@tf.function
+def tf_shape_repr(x):
+    """
+    The [1 2 3] part of e.g. !int32[1 2 3]
+    """
+    assert len(x) > 0, "shape must have at least one dimension"
+    vals = tf.strings.join([
+        tf.strings.as_string(x_i) if x_i is not None else tf.constant("?")
+        for x_i in x
+    ], separator=" "),
+    return tf.strings.join([
+        "[",
+        vals,
+        "]",
+    ])
+
 def tf_dict_repr(x, indent=_default_indent, depth=0, prefix=""):
     return tf.strings.join([
         indent*depth,
@@ -596,17 +664,15 @@ def tf_dict_repr(x, indent=_default_indent, depth=0, prefix=""):
         "{\n",
         tf.strings.join([
             tf.strings.join([
-                tf_repr(v, indent=indent, depth=depth+1, prefix=tf.strings.join([k, ": "], separator="")),
+                tf_repr(v, indent=indent, depth=depth+1, prefix=tf.strings.join([k, ": "])),
                 ",\n",
-            ], separator="")
+            ])
             for k, v in x.items()
-        ], separator=""),
+        ]),
         indent*depth,
         "}",
-    ], separator="")
+    ])
 
-@export
-@tf.function
 def tf_tuple_repr(x, indent=_default_indent, depth=0, prefix=""):
     return tf.strings.join([
         indent*depth,
@@ -616,15 +682,13 @@ def tf_tuple_repr(x, indent=_default_indent, depth=0, prefix=""):
             tf.strings.join([
                 tf_repr(v, indent=indent, depth=depth+1),
                 ",\n",
-            ], separator="")
+            ])
             for v in x
-        ], separator=""),
+        ]),
         indent*depth,
         ")",
-    ], separator="")
+    ])
 
-@export
-@tf.function
 def tf_list_repr(x, indent=_default_indent, depth=0, prefix=""):
     return tf.strings.join([
         indent*depth,
@@ -635,34 +699,60 @@ def tf_list_repr(x, indent=_default_indent, depth=0, prefix=""):
             ",\n",
             indent*(depth+1),
             "...\n",
-        ], separator=""),
+        ]),
         indent*depth,
         "]",
-    ], separator="")
+    ])
+
+SomeT = TypeVar("SomeT")
+@export
+def dbg(s: SomeT, tag: str = None) -> SomeT:
+    """
+    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
+    Returns the input so it can be used in an expression.
+    """
+    if tag is None:
+        tag = ""
+    else:
+        tag = tag + ":"
+    if debug:
+        tf.print(tf.strings.join([tag, tf_repr(s)]), output_stream=sys.stderr)
+    return s
+
+@export
+def tf_print(s: SomeT, tag: str = None) -> SomeT:
+    """
+    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
+    Returns the input so it can be used in an expression.
+    """
+    if tag is None:
+        tag = ""
+    else:
+        tag = tag + ":"
+    tf.print(tf.strings.join([tag, tf_repr(s)]), output_stream=sys.stdout)
+    return s
+
 
 @export
 def tf_str(x) -> str:
     return tf_repr(x).numpy().decode("utf-8")
 
-SomeT = TypeVar("SomeT")
-@export
-def tf_print(x: SomeT) -> SomeT:
-    """
-    Pretty-print tensorflow tensors, including within graph mode.
-    Returns the input so it can be used in an expression.
-    """
-    tf.print(tf_repr(x))
-    return x
+doc = """
+Implements a human-friendly of {} for tensorflow objects,
+which can be used in a tf.function.
 
-@export
-def dbg(s: SomeT, tag: str = "") -> SomeT:
-    """
-    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
-    Returns the input so it can be used in an expression.
-    """
-    if debug:
-        tf.print(tag + ":", tf_repr(s))
-    return s
+>>> tf_str(tf.constant(1))
+'1'
+>>> tf_str(tf.zeros([3]))
+'!float32[3]'
+>>> tf_str(tf.zeros([2, 3]))
+'!float32[2 3]'
+"""
+
+tf_repr.__doc__ = doc.format("repr()")
+tf_str.__doc__ = doc.format("str()")
+dbg.__doc__ = doc.format("print()")
+
 
 @export
 def inspect(fn, tag: str|None = None):
@@ -748,3 +838,8 @@ def ensure_suffix(path: os.PathLike, suffix: str) -> Path:
     if path.suffix != f".{suffix}":
         path = path.with_suffix(f".{suffix}")
     return path
+
+
+if __name__ == '__main__':
+    import doctest
+    doctest.testmod()
