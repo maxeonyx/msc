@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from mx.prelude import *
 
 from mx.pipeline import Pipeline
-from mx.progress import Progress, create_progress_manager
+from mx.progress import Progress, SubProgressManager, create_progress_manager
 from mx.metrics import MxMetric, RunningMean, Rolling, TimeSinceLastCall, InstantaneousMetric, wrap_loss_fn_for_metrics
 from mx.tf_types import NestedTensor
 from mx.visualizer import Visualizer, VizCfg
@@ -47,6 +47,9 @@ def make_train_step_wrapper(
     metrics: dict[str, MxMetric],
     make_train_step: Callable[..., TrainStepFn],
     tb_writer: tf.summary.SummaryWriter,
+    do_log: bool,
+    log_every: int,
+    do_profile: bool,
 ):
     """
     Wraps a training step function. This is used to update metrics.
@@ -62,10 +65,7 @@ def make_train_step_wrapper(
         data,
         step_var: tf.Variable,
         until_step: int,
-        do_break: tf.Variable,
-        do_log: bool,
-        log_every: int,
-        do_profile: bool,
+        break_var: tf.Variable,
     ):
         for i_step, (inputs_batch, targets_batch) in data:
 
@@ -76,6 +76,12 @@ def make_train_step_wrapper(
                 outputs_batch, loss, grads = train_step(inputs_batch, targets_batch)
 
                 step_var.assign(i_step)
+
+                if break_var:
+                    break
+
+                if i_step >= until_step:
+                    break
 
                 metric_inputs: NestedTensor = {
                     "loss": loss,
@@ -88,21 +94,15 @@ def make_train_step_wrapper(
                 for metric in metrics.values():
                     metric.update(metric_inputs)
 
-
-                if do_log and i_step % log_every == 0:
-                    with tb_writer.as_default(step=i_step):
-                        tf.summary.scalar("loss", loss)
-                        for grad in grads:
-                            tf.summary.histogram("grad", grad)
-                            tf.summary.scalar("grad_norm", tf.norm(grad))
-                        for k, v in outputs_batch.items():
-                            tf.summary.histogram(f"outputs/{k}", v)
-
-                if do_break:
-                    break
-
-                if i_step >= until_step:
-                    break
+                if do_log:
+                    if i_step % log_every == 0:
+                        with tb_writer.as_default(step=i_step):
+                            tf.summary.scalar("loss", loss)
+                            for grad in grads:
+                                tf.summary.histogram("grad", grad)
+                                tf.summary.scalar("grad_norm", tf.norm(grad))
+                            for k, v in outputs_batch.items():
+                                tf.summary.histogram(f"outputs/{k}", v)
 
     return train_step_wrapper
 
@@ -275,7 +275,13 @@ def make_train_loop(
         # They are here and not simply anonymously in the outer scope
         # so that they can be accessed by the caller
         if not hasattr(train_loop, "i_step"):
-            train_loop.i_step = tf.Variable(0, dtype=tf.int64)
+            train_loop.i_step = tf.Variable(
+                0,
+                dtype=tf.int64,
+                trainable=False,
+                synchronization=tf.VariableSynchronization.NONE,
+                name="i_step",
+            )
         if not hasattr(train_loop, "i_epoch"):
             train_loop.i_epoch = 0
         if not hasattr(train_loop, "checkpoints"):
@@ -325,7 +331,7 @@ def make_train_loop(
                         train_loop_metrics = metrics["train_step_metrics"] | metrics["epoch_metrics"]
 
 
-                        do_break = tf.Variable(
+                        break_var = tf.Variable(
                             initial_value=False,
                             dtype=tf.bool,
                             trainable=False,
@@ -344,6 +350,8 @@ def make_train_loop(
                         elif isinstance(log_interval, int):
                             do_log = True
                             log_every = log_interval
+                        else:
+                            raise ValueError(f"Invalid log_interval: {log_interval}. Must be 'epoch', 'never', or an int.")
 
                         if not created_train_step:
                             with pm.enter_spinner(name="Compile train step", desc="Compiling / Running first training step..."):
@@ -354,36 +362,33 @@ def make_train_loop(
                                     metrics["train_step_metrics"],
                                     make_train_step,
                                     tb_writer,
+                                    do_log=do_log,
+                                    log_every=log_every,
+                                    do_profile=profile,
                                 )
                                 train_loop.train_step_fn = tf.function(train_loop.train_step_fn)
                                 train_loop.train_step_fn(
                                     data=train_loop.data_iterator,
                                     step_var=train_loop.i_step,
                                     until_step=train_loop.i_step + 1,
-                                    do_break=do_break,
-                                    do_log=do_log,
-                                    log_every=log_every,
-                                    do_profile=profile,
+                                    break_var=break_var,
                                 )
                             created_train_step = True
 
                         ######################
                         ######################
-                        def run_for(n_steps, is_last_epoch):
+                        def run_for(sub_pm: SubProgressManager, n_steps, is_last_epoch):
                             nonlocal created_train_step
 
                             last_epoch_loss = None
-                            with pm.enter_progbar(total=n_steps, name=f"Epoch {train_loop.i_epoch + 1}", desc=f"Epoch {train_loop.i_epoch + 1}", delete_on_success=not is_last_epoch) as epoch_prog_bar:
+                            with sub_pm.enter_progbar(total=n_steps, name=f"Epoch {train_loop.i_epoch + 1}", desc=f"Epoch {train_loop.i_epoch + 1}", delete_on_success=not is_last_epoch) as (sub_sub_pm, epoch_prog_bar):
 
                                 def run_in_thread():
                                     train_loop.train_step_fn(
                                         data=train_loop.data_iterator,
                                         step_var=train_loop.i_step,
                                         until_step=train_loop.i_step + n_steps,
-                                        do_break=do_break,
-                                        do_log=do_log,
-                                        log_every=log_every,
-                                        do_profile=profile,
+                                        break_var=break_var,
                                     )
                                 t = Thread(target=run_in_thread)
 
@@ -392,28 +397,25 @@ def make_train_loop(
                                 try:
                                     t.start()
 
-                                    i = 0
                                     while t.is_alive():
                                         step = train_loop.i_step.value().numpy()
                                         epoch_prog_bar.count = step - start_step
-                                        epoch_prog_bar.refresh()
-                                        i += 1
-                                        time.sleep(0.1)
+                                        time.sleep(0.01)
 
                                     t.join()
                                 except KeyboardInterrupt as e:
-                                    do_break.assign(True)
+                                    break_var.assign(True)
                                     t.join()
                                     raise e
                                 finally:
                                     t.join()
 
                                 if type(checkpoint_interval) == int and train_loop.i_step % checkpoint_interval == 0:
-                                        with pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
+                                        with sub_pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
                                             train_loop.checkpoints.append(train_loop.checkpointer.save(output_dir / "checkpoints"))
 
                                 if vizr is not None:
-                                    vizr.on_epoch_end(step=train_loop.i_step, pm=pm)
+                                    vizr.on_epoch_end(step=train_loop.i_step, pm=sub_pm)
 
                             for _, m in metrics["epoch_metrics"].items():
                                     m.update({"epoch": train_loop.i_epoch, "step": train_loop.i_step})
@@ -432,20 +434,20 @@ def make_train_loop(
                                     m.reset()
 
                             if checkpoint_interval == "epoch":
-                                with pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
+                                with sub_pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
                                     train_loop.checkpointer.save(output_dir / "checkpoints")
                         ######################
                         ######################
 
 
                         if n_steps is None:
-                            with pm.enter_training(len(epoch_sizes), train_loop_metrics) as train_prog_bar:
+                            with pm.enter_training(len(epoch_sizes), train_loop_metrics) as (sub_pm, train_prog_bar):
                                 while train_loop.i_epoch < len(epoch_sizes):
                                     step = train_loop.i_step.value().numpy()
                                     n_steps = get_remaining_steps_in_epoch(epoch_sizes, train_loop.i_epoch, step)
                                     if n_steps == 0:
                                         raise TrainLoopError("WARNING: No steps left. Exiting training loop.")
-                                    run_for(n_steps, train_loop.i_epoch == (len(epoch_sizes) - 1))
+                                    run_for(sub_pm, n_steps, train_loop.i_epoch == (len(epoch_sizes) - 1))
                                     step = train_loop.i_step.value().numpy()
                                     train_loop.i_epoch = get_epoch(step, epoch_sizes)
                                     train_prog_bar.count = train_loop.i_epoch

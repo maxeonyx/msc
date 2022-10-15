@@ -96,7 +96,6 @@ class BvhDataset(MxDataset):
                 }
             self.adapt_out = adapt_out
         else:
-            ic(task)
             raise NotImplementedError(f"{type_name(task)} not supported by {type_name(self)}")
 
         assert self.adapt_in is not None, "Forgot to set self.adapt_in"

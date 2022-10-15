@@ -97,7 +97,7 @@ class MxMNIST(MxDataset):
 
                 image = x["values"]
                 # to uint8 in [0, 255]
-                image = tf.cast(image * 255., tf.uint8)
+                image = tf.cast(tf.clip_by_value(image * 255., 0., 255.), tf.uint8)
                 # unflatten x y from a single sequence dimension
                 image = ein.rearrange(image, f"... (w h) c -> ... w h c", w=28)
 
@@ -178,7 +178,7 @@ class MNISTImageViz(HoloMapVisualization):
 
         assert isinstance(data[0], dict), f"Expected data to be a list of dicts, got {type_name(data[0])}"
         assert "image" in data[0], f"Expected data to have 'image' key, got {data[0].keys()}"
-        assert isinstance(data[0]["image"], tf.Tensor), f"Expected data['image'] to be a tf.Tensor, got {type_name(data[0]['image'])}"
+        assert tf.is_tensor(data[0]["image"]), f"Expected data['image'] to be a tf.Tensor, got {type_name(data[0]['image'])}"
         assert data[0]["image"].shape == (28, 28, 1), f"Expected data['image'] to have shape (28, 28, 1), got {data[0]['image'].shape}"
 
         def img(data, title):
@@ -212,31 +212,26 @@ class MNISTImageViz(HoloMapVisualization):
             key_dims = [
                 hv.Dimension(("batch", "Batch")),
             ]
-            if isinstance(timestep, int):
+            if timestep is not None:
                 key_dims.append(hv.Dimension(("timestep", "Timestep")))
 
             def key(batch, timestep):
 
-                if isinstance(timestep, tf.Tensor) and timestep.dtype == tf.string:
+                if tf.is_tensor(timestep) and timestep.dtype == tf.string:
                     timestep = u.tf_str(timestep)
-                elif isinstance(timestep, tf.Tensor) and timestep.dtype == tf.int32:
+                elif tf.is_tensor(timestep) and timestep.dtype == tf.int32:
                     timestep = timestep.numpy()
 
                 if timestep is None:
                     return (batch,)
-                elif isinstance(timestep, int):
-                    # we need to do this as a hack to reverse the order of the GridSpace
-                    # so that time goes down the screen instead of up the screen.
-                    timestep = -timestep
-                    return (batch, timestep)
                 else:
                     return (batch, timestep)
 
             def title(batch, timestep):
 
-                if isinstance(timestep, tf.Tensor) and timestep.dtype == tf.string:
+                if tf.is_tensor(timestep) and timestep.dtype == tf.string:
                     timestep = u.tf_str(timestep)
-                elif isinstance(timestep, tf.Tensor) and timestep.dtype == tf.int32:
+                elif tf.is_tensor(timestep) and timestep.dtype == tf.int32:
                     timestep = timestep.numpy()
 
                 if timestep is None:

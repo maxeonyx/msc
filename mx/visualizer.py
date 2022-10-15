@@ -53,14 +53,22 @@ class Visualization(abc.ABC):
         """
         Make a visualization, save it, and show it.
         """
-        if isinstance(timestep, tf.Tensor):
-            timestep = timestep.numpy()
+
         self.render(timestep, output_dir)
         self.show(output_dir)
 
     def show(self, output_dir=None):
         import webbrowser
         uri = self._get_uri(output_dir)
+        uri_message = f"""
+╭───────────────────────────────────╼
+│ Open to view viz: "{self.desc}"
+│
+│     {uri}
+│
+╰───────────────────────────────────╼
+"""
+        print(uri_message.strip())
         if not hasattr(self, 'shown'):
             webbrowser.open_new_tab(uri)
             self.shown = True
@@ -92,8 +100,7 @@ class StatefulVisualization(Visualization, abc.ABC):
         """
         Create and save a visualization. Update the held visualization. Don't show it.
         """
-        if isinstance(timestep, tf.Tensor):
-            timestep = timestep.numpy()
+
         self._make_and_save_visualization(do_update=True, timestep=timestep, output_dir=output_dir)
 
     def __call__(self, timestep=None, output_dir=None):
@@ -101,8 +108,7 @@ class StatefulVisualization(Visualization, abc.ABC):
         Create and save a visualization. Don't update the held visualization. Show it.
         For interactive usage.
         """
-        if isinstance(timestep, tf.Tensor):
-            timestep = timestep.numpy()
+
         self._make_and_save_visualization(do_update=False, timestep=timestep, output_dir=output_dir)
         self.show(output_dir=output_dir)
 
@@ -206,8 +212,6 @@ class Visualizer:
         else:
             self.output_dir = None
 
-        self.thread = None
-
     def set_cfgs(self, cfgs: dict[str, VizCfg]):
 
         vizs = self.visualizations
@@ -245,41 +249,34 @@ class Visualizer:
         self.cfgs = cfgs
 
     def _do(self, event: str, timestep, pm: Progress):
+        if tf.is_tensor(timestep):
+            timestep = timestep.numpy()
 
-        def _do_on_thread():
-            for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
-                if self.output_dir is not None:
-                    output_dir = self.output_dir / viz.name
-                else:
-                    output_dir = None
-                if event in cfg["render_on"]:
-                    with pm.enter_spinner(
-                        name=f"Visualize '{viz.name}'",
-                        desc=f"Visualizing '{viz.desc}'...",
-                        delete_on_success=True
-                    ):
-                        viz.render(timestep=timestep, output_dir=output_dir)
+        for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
+            if self.output_dir is not None:
+                output_dir = self.output_dir / viz.name
+            else:
+                output_dir = None
+            if event in cfg["render_on"]:
+                with pm.enter_spinner(
+                    name=f"Visualize '{viz.name}'",
+                    desc=f"Visualizing '{viz.desc}'...",
+                    delete_on_success=True
+                ):
+                    viz.render(timestep=timestep, output_dir=output_dir)
 
-                if event in cfg["show_on"]:
-                    # show the visualization
-                    viz.show(output_dir=output_dir)
-
-        if self.thread is not None:
-            self.thread.join()
-
-        self.thread = threading.Thread(target=_do_on_thread)
-        self.thread.start()
+            if event in cfg["show_on"]:
+                # show the visualization
+                viz.show(output_dir=output_dir)
 
     def before_train_start(self, step, pm: Progress):
         self._do("start", timestep=step, pm=pm)
 
     def after_train_end(self, step, pm: Progress):
         self._do("end", timestep=step, pm=pm)
-        self.thread.join()
 
     def on_epoch_end(self, step, pm: Progress):
         self._do("epoch", timestep=step, pm=pm)
 
     def on_interrupt(self, step, pm: Progress):
         self._do("interrupt", timestep=step, pm=pm)
-        self.thread.join()

@@ -214,8 +214,9 @@ class VectorSequenceMSE(Task):
                 out_var[:, i, :].assign(out[:, -1, :])
             return out_var
 
+        warned = False
         def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
-
+            nonlocal warned
 
             assert isinstance(inputs, dict),           f"inputs must be a dict. Got {type_name(inputs)}"
 
@@ -249,6 +250,7 @@ class VectorSequenceMSE(Task):
 
             if output_len > self.chunk_size:
                 print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.chunk_size}", file=sys.stderr)
+                warned = True
 
             seed_input = data[:, :seed_len, :]
 
@@ -469,8 +471,9 @@ class VectorSequenceAngleMSE(Task):
                 out_var[:, i, :].assign(out)
             return out_var
 
+        warned = False
         def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
-
+            nonlocal warned
 
             assert isinstance(inputs, dict),           f"inputs must be a dict. Got {type_name(inputs)}"
 
@@ -504,6 +507,7 @@ class VectorSequenceAngleMSE(Task):
 
             if output_len > self.chunk_size:
                 print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.chunk_size}", file=sys.stderr)
+                warned = True
 
             seed_input = data[:, :seed_len, :]
 
