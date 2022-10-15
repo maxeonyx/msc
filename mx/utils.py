@@ -2,6 +2,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 import functools
 import itertools
+from typing import Dict
+
+from box import Box
 
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
@@ -14,6 +17,42 @@ __all__, export = exporter()
 from mx.run_name import get_run_name, random_run_name
 export("get_run_name")
 export("random_run_name")
+
+@export
+def funky_punky(n_0, n_max, n_total, base=2):
+    """
+    Yields from a funky-punky series, such that the sum of the series is `n`.
+
+    >>> list(funky_punky(5, 99, 10))
+    [5, 5]
+    >>> list(funky_punky(5, 99, 200))
+    [5, 8, 16, 32, 64, 75]
+    >>> sum(funky_punky(5, 99, 200)) == 200
+    True
+    >>> list(funky_punky(5, 30, 200))
+    [5, 8, 16, 30, 30, 30, 30, 30, 21]
+    """
+    if n_0 > n_total:
+        yield n_0 - n_total
+        return
+    yield n_0
+    total = n_0
+    i = 0
+    while base**i < n_0:
+        i += 1
+
+    while True:
+        if base ** i > n_max:
+            n = n_max
+        else:
+            n = base ** i
+            i += 1
+        if total + n > n_total:
+            break
+        yield n
+        total += n
+    yield n_total - total
+
 
 @export
 def exponential_up_to(n, base=2):
@@ -164,11 +203,17 @@ def type_name(x):
     return type(x).__name__
 
 @export
-@dataclass
-class DSets:
-    train: tf.data.Dataset
-    test: tf.data.Dataset
-    val: tf.data.Dataset
+class DSets(Box):
+
+    def __init__(
+        self,
+        train: Dataset,
+        test: Dataset,
+        val: Dataset,
+    ):
+        self.train = train
+        self.test = test
+        self.val = val
 
     def destructure(self) -> tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
         return self.train, self.test, self.val
@@ -592,49 +637,59 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
     return angles
 
 def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
-    ic(x)
+
     # container types
-    if ic(isinstance(x, dict)):
+    if isinstance(x, dict):
         return tf_dict_repr(x, indent=indent, depth=depth, prefix=prefix)
-    elif ic(isinstance(x, tuple)):
+    elif isinstance(x, tuple):
         return tf_tuple_repr(x, indent=indent, depth=depth, prefix=prefix)
-    elif ic(isinstance(x, list)):
+    elif isinstance(x, list):
         return tf_list_repr(x, indent=indent, depth=depth, prefix=prefix)
 
-    elif ic(isinstance(x, Dataset)):
+    elif isinstance(x, Dataset):
         cardinality = x.cardinality()
         if cardinality == tf.data.INFINITE_CARDINALITY:
             cardinality = "∞"
         else:
             cardinality = tf.strings.as_string(cardinality)
-        prefix = tf.strings.join(["Dataset(", cardinality, ") "])
-        str_x = tf_repr(x.element_spec, indent=indent, depth=depth, prefix=prefix)
-    elif ic(isinstance(x, tf.TensorSpec)):
-        ic(x)
+        prefix = tf.strings.join([
+            prefix,
+            "Dataset[",
+            cardinality,
+            "]",
+        ])
+        return tf_repr(x.element_spec, indent=indent, depth=depth, prefix=prefix)
+    elif isinstance(x, tf.TensorSpec):
+        x.shape
+        c = "○" # ○ means it's not concrete
         if x.shape.rank == 0:
-            str_x = tf.constant(f"~{x.dtype.name}[]")
+            str_x = tf.constant(f"{c}{x.dtype.name}[]")
         else:
             str_x = tf.strings.join([
-                "~", # ~ means it's not concrete
+                c,
                 x.dtype.name,
                 tf_shape_repr(x.shape),
             ])
-    # non-tf types
-    elif ic(not tf.is_tensor(x)):
+    elif isinstance(x, tft.NoneTensorSpec):
+        str_x = tf.constant("○None")
+    elif isinstance(x, tft.NoneTensor):
+        str_x = tf.constant("●None")
+    elif x is None:
+        str_x = tf.constant("None")
+    elif not tf.is_tensor(x):
         str_x = tf.constant(repr(x), tf.string)
-
-    elif ic(x.shape.rank == 0):
+    elif x.shape.rank == 0:
         if x.dtype == tf.string:
             str_x = tf.strings.join(["\"", x, "\""])
         else:
             str_x = tf.strings.as_string(x)
     else:
         str_x = tf.strings.join([
-            "!", # ! means concrete
+            "●", # ● means concrete
             x.dtype.name,
             tf_shape_repr(shape(x)),
         ])
-    ic(str_x)
+    str_x
 
     return tf.strings.join([
         indent*depth,
@@ -650,7 +705,7 @@ def tf_shape_repr(x):
     vals = tf.strings.join([
         tf.strings.as_string(x_i) if x_i is not None else tf.constant("?")
         for x_i in x
-    ], separator=" "),
+    ], separator=" ")
     return tf.strings.join([
         "[",
         vals,
@@ -706,30 +761,29 @@ def tf_list_repr(x, indent=_default_indent, depth=0, prefix=""):
 
 SomeT = TypeVar("SomeT")
 @export
+def tf_print(s: SomeT, tag: str = None, output_stream=sys.stdout) -> SomeT:
+    """
+    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
+    Returns the input so it can be used in an expression.
+    """
+    if tag is None:
+        tag = ""
+        tail = ""
+        depth = 0
+    else:
+        tag = "--- @ " + tag + "\n"
+        tail = "\n---"
+        depth = 1
+    tf.print(tf.strings.join([tag, tf_repr(s, depth=depth), tail]), output_stream=output_stream)
+
+@export
 def dbg(s: SomeT, tag: str = None) -> SomeT:
     """
     If debug mode, then pretty-print tensorflow tensors, including within graph mode.
     Returns the input so it can be used in an expression.
     """
-    if tag is None:
-        tag = ""
-    else:
-        tag = tag + ":"
     if debug:
-        tf.print(tf.strings.join([tag, tf_repr(s)]), output_stream=sys.stderr)
-    return s
-
-@export
-def tf_print(s: SomeT, tag: str = None) -> SomeT:
-    """
-    If debug mode, then pretty-print tensorflow tensors, including within graph mode.
-    Returns the input so it can be used in an expression.
-    """
-    if tag is None:
-        tag = ""
-    else:
-        tag = tag + ":"
-    tf.print(tf.strings.join([tag, tf_repr(s)]), output_stream=sys.stdout)
+        tf_print(s, tag=tag, output_stream=sys.stderr)
     return s
 
 
@@ -737,21 +791,28 @@ def tf_print(s: SomeT, tag: str = None) -> SomeT:
 def tf_str(x) -> str:
     return tf_repr(x).numpy().decode("utf-8")
 
-doc = """
-Implements a human-friendly of {} for tensorflow objects,
+def docstring_for_tf_repr_and_friends(fn_name):
+    return """
+Implements a human-friendly of """ + fn_name + """ for tensorflow objects,
 which can be used in a tf.function.
 
 >>> tf_str(tf.constant(1))
 '1'
 >>> tf_str(tf.zeros([3]))
-'!float32[3]'
+'●float32[3]'
 >>> tf_str(tf.zeros([2, 3]))
-'!float32[2 3]'
+'●float32[2 3]'
+>>> tf_str(tf.constant("hi"))
+'"hi"'
+>>> tf_str(tf.TensorSpec([2, 3], tf.float32))
+'○float32[2 3]'
+>>> tf_str({ 'a': tf.constant(1), 'b': tf.constant(2) })
+'{\\n  a: 1,\\n  b: 2,\\n}'
 """
 
-tf_repr.__doc__ = doc.format("repr()")
-tf_str.__doc__ = doc.format("str()")
-dbg.__doc__ = doc.format("print()")
+tf_repr.__doc__ = docstring_for_tf_repr_and_friends("repr()")
+tf_str.__doc__ = docstring_for_tf_repr_and_friends("str()")
+tf_print.__doc__ = docstring_for_tf_repr_and_friends("print()")
 
 
 @export

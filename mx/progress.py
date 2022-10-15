@@ -2,6 +2,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from math import isnan, pi
+from icecream import ic
 import sys
 import threading
 import time
@@ -32,6 +33,23 @@ LEFT_STOP = "╼"
 RIGHT_STOP = "╾"
 RIGHT_CORNER = "╮"
 
+class Counter(enlighten.Counter):
+    __slots__ = (
+        'enter_progbar',
+        'enter_spinner',
+        'enter_training',
+        *enlighten.Counter.__slots__
+    )
+
+class StatusBar(enlighten.StatusBar):
+    __slots__ = (
+        'enter_progbar',
+        'enter_spinner',
+        'enter_training',
+        *enlighten.StatusBar.__slots__
+    )
+
+
 def metric_bar_format(metrics: dict[str, MxMetric]):
     metrics = metrics.values()
 
@@ -49,8 +67,7 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
     metrics = metrics_dict.values()
 
     if len(metrics) == 0:
-        empty_format = f"{VERTICAL_BAR} {{fill}}"
-        return empty_format, empty_format
+        return {}, {}
 
     def value_format(m: MxMetric, width):
 
@@ -90,17 +107,20 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
     }
 
 @export
-@dataclass(frozen=False)
 class Progress:
-    manager: enlighten.Manager
-    run_name: str
-    min_delta: float = 0.5 / 8
-    indent_level: int = 0
-    tasks: list[str] = field(default_factory=list)
-    update_fns: list[Callable[[int], None]] = field(default_factory=list)
-    update_fns_to_remove = []
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        manager: enlighten.Manager,
+        run_name: str,
+        min_delta: float = 0.5 / 8,
+    ):
+        self.manager = manager
+        self.run_name = run_name
+        self.min_delta = min_delta
+        self.tasks: list[str] = []
+        self.update_fns: list[Callable[[int], None]] = []
+        self.update_fns_to_remove = []
 
         title_format = LEFT_CORNER + "{fill}{task_format}{fill}" + LEFT_STOP
         self.title_bar=self.manager.status_bar(status_format=title_format, task_format=self.task_format(), fill=HORIZONTAL_BAR)
@@ -124,12 +144,26 @@ class Progress:
             return ""
 
     @contextmanager
-    def enter_spinner(self, name: str, desc: str, delete_on_success=False):
-        indent_level = self.indent_level
-        indent = "    " * self.indent_level
+    def enter_spinner(
+        self,
+        name: str,
+        desc: str,
+        delete_on_success=False,
+        indent_level: int = 0,
+    ):
+        indent = "    " * indent_level
 
         status_format = VERTICAL_BAR + " {indent}{spinner} {desc}"
-        spinner_bar = self.manager.status_bar(status_format=status_format, desc=desc, spinner=SPINNER[0], indent=indent, min_delta=self.min_delta, leave=True)
+
+        spinner_bar = StatusBar(
+            manager=self.manager,
+            status_format=status_format,
+            desc=desc,
+            spinner=SPINNER[0],
+            indent=indent,
+            min_delta=self.min_delta,
+            leave=True,
+        )
 
         state = "running"
         closed = False
@@ -144,12 +178,11 @@ class Progress:
                 spinner_bar.update(spinner=spinner, desc=desc)
 
         try:
-            self.indent_level += 1
             self.tasks.append(name)
 
             self.update_fns.append(update)
 
-            yield
+            yield self._make_sub_manager(spinner_bar, indent_level=indent_level)
 
             if delete_on_success:
                 closed = True
@@ -162,7 +195,6 @@ class Progress:
             state = "error"
             raise e
         finally:
-            self.indent_level = indent_level
             if update in self.update_fns:
                 def close():
                     if not closed:
@@ -172,14 +204,34 @@ class Progress:
                 self.tasks.pop()
 
     @contextmanager
-    def enter_progbar(self, total: int | None, name: str, desc: str, unit: str ='steps', start_at: int = 0, delete_on_success: bool = True):
-        indent_level = self.indent_level
-        indent = "    " * self.indent_level
+    def enter_progbar(
+        self,
+        total: int | None,
+        name: str,
+        desc: str,
+        unit: str ='steps',
+        start_at: int = 0,
+        delete_on_success: bool = True,
+        indent_level: int = 0
+    ):
+        indent = "    " * indent_level
 
         counter_format = VERTICAL_BAR + ' {indent}{spinner} {desc}{desc_pad}{count:d}{unit}{unit_pad}{fill}[ {elapsed}, {rate:.2f}{unit_pad}{unit}/s]'
         bar_format = VERTICAL_BAR + ' {indent}{spinner} {desc}{desc_pad}{percentage:3.0f}% |{bar}| {count:{len_total}d}/{total:d} {unit} [ {elapsed}<{eta}, {rate:.2f}{unit_pad}{unit}/s ]'
 
-        prog_bar = self.manager.counter(total=total, spinner=SPINNER[0], desc=desc, indent=indent, unit=unit, min_delta=self.min_delta, bar_format=bar_format, counter_format=counter_format, count=start_at, leave=True)
+        prog_bar: Counter = Counter(
+            manager=self.manager,
+            total=total,
+            spinner=SPINNER[0],
+            desc=desc,
+            indent=indent,
+            unit=unit,
+            min_delta=self.min_delta,
+            bar_format=bar_format,
+            counter_format=counter_format,
+            count=start_at,
+            leave=True,
+        )
 
         state = "running"
         closed = False
@@ -194,12 +246,11 @@ class Progress:
                 prog_bar.update(incr=0, spinner=spinner)
 
         try:
-            self.indent_level += 1
             self.tasks.append(name)
 
             self.update_fns.append(update)
 
-            yield prog_bar
+            yield self._make_sub_manager(prog_bar, indent_level=indent_level)
 
             if delete_on_success:
                 closed = True
@@ -211,7 +262,6 @@ class Progress:
             state = "error"
             raise e
         finally:
-            self.indent_level = indent_level
             if update in self.update_fns:
                 def close():
                     if not closed:
@@ -221,16 +271,29 @@ class Progress:
                 self.tasks.pop()
 
     @contextmanager
-    def enter_training(self, n_epochs: int, metrics: list[MxMetric]):
+    def enter_training(self, n_epochs: int, metrics: dict[str, MxMetric] = {}, indent_level: int = 0):
         name = "Train"
         metrics_update = None
 
         header_fmt, value_fmt = metric_bar_format(metrics=metrics)
         headers, values = metric_format(metrics)
-
+        ic(headers)
+        ic(values)
         try:
-            metric_header_bar = self.manager.status_bar(status_format=header_fmt, min_delta=self.min_delta, leave=True, **headers)
-            metric_value_bar = self.manager.status_bar(status_format=value_fmt, min_delta=self.min_delta, leave=True, **values)
+            metric_header_bar = StatusBar(
+                manager=self.manager,
+                status_format=header_fmt,
+                min_delta=self.min_delta,
+                leave=True,
+                **headers,
+            )
+            metric_value_bar = StatusBar(
+                manager=self.manager,
+                status_format=value_fmt,
+                min_delta=self.min_delta,
+                leave=True,
+                **values,
+            )
 
             def metrics_update(i_step):
                 headers, values = metric_format(metrics)
@@ -241,7 +304,7 @@ class Progress:
 
             with self.enter_progbar(total=n_epochs, name=name, desc="Overall Progress", unit="epochs", delete_on_success=False) as prog_bar:
 
-                yield prog_bar
+                yield self._make_sub_manager(prog_bar, indent_level=indent_level)
 
         finally:
             if metrics_update is not None and metrics_update in self.update_fns:
@@ -250,15 +313,36 @@ class Progress:
                     metric_value_bar.close()
                 self.update_fns_to_remove.append((metrics_update, close))
 
+    def _make_sub_manager(self, obj, indent_level):
 
-manager = None
+        def with_increased_indent(fn):
+            def wrapper(*args, **kwargs):
+                kwargs["indent_level"] = indent_level+1
+                return fn(*args, **kwargs)
+            return wrapper
+
+        # obj.enter_spinner = with_increased_indent(self.enter_spinner)
+        # obj.enter_progbar = with_increased_indent(self.enter_progbar)
+        # obj.enter_training = with_increased_indent(self.enter_training)
+        # ic(self)
+        # ic(type(obj))
+        # ic(obj)
+        _enter_spinner = self.enter_spinner
+        _enter_progbar = self.enter_progbar
+        _enter_training = self.enter_training
+
+        setattr(obj, "enter_spinner", with_increased_indent(_enter_spinner))
+        setattr(obj, "enter_progbar", with_increased_indent(_enter_progbar))
+        setattr(obj, "enter_training", with_increased_indent(_enter_training))
+
+        return obj
+
 
 @export
 @contextmanager
 def create_progress_manager(
     run_name: str | None = None,
 ):
-    global manager
     t = None
     update_title_bar = None
     with enlighten.get_manager() as e_manager:
@@ -303,33 +387,19 @@ def create_progress_manager(
                 t.join()
             if update_title_bar is not None and update_title_bar in manager.update_fns:
                 manager.update_fns_to_remove.append((update_title_bar, lambda: manager.title_bar.close()))
-            manager = None
 
 if __name__ == '__main__':
     with create_progress_manager("Test") as prog:
         with prog.enter_spinner("Loading", "Loading Data"):
             time.sleep(2)
-        with prog.enter_training(3, []) as prog_bar:
+        with prog.enter_training(3) as prog_bar:
             for i in prog_bar(range(3)):
-                with prog.enter_progbar(3, f"Epoch {i}", f"Epoch {i}") as epoch_bar:
+                with prog_bar.enter_progbar(3, f"Epoch {i}", f"Epoch {i}") as epoch_bar:
                     for j in epoch_bar(range(3)):
                         time.sleep(0.1)
         with prog.enter_progbar(10, "Visualize", "Visualizing Data") as prog_bar:
             for i in prog_bar(range(10)):
                 time.sleep(0.1)
-
-
-@export
-@contextmanager
-def spinner(desc: str):
-
-    if manager is None:
-        with create_progress_manager() as prog:
-            with prog.enter_spinner(desc, desc) as spinner:
-                yield spinner
-    else:
-        with manager.enter_spinner(desc, desc) as spinner:
-            yield spinner
 
 def init_with_progress():
     run_name = get_run_name()

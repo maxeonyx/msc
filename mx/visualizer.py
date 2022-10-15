@@ -1,5 +1,6 @@
 import abc
 from os import PathLike
+import threading
 
 import holoviews as hv
 from mx.progress import Progress
@@ -16,34 +17,50 @@ class Visualization(abc.ABC):
     Base class for vizualizations.
     """
 
-    def __init__(self, name: str, desc: str):
+    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
         self.name = name
         self.desc = desc
+        if run_name is not None:
+            self.desc = f"Run '{run_name}': {self.desc}"
+        self.output_dir = output_dir
+
+    def output_location(self, output_dir=None) -> Path:
+
+        output_dir = (
+            output_dir
+            or self.output_dir
+            or Path("_outputs") / "viz"
+        )
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / self.name
 
     @abc.abstractmethod
-    def render(self, output_location, timestep=None):
+    def render(self, timestep=None, output_dir=None):
         """
         Make a visualization, save it, but don't show it.
         """
         pass
 
     @abc.abstractmethod
-    def _get_uri(self, output_location) -> str:
+    def _get_uri(self, output_dir) -> str:
         """
         Get the URI of the visualization.
         """
         pass
 
-    def __call__(self, output_location, timestep=None):
+    def __call__(self, timestep=None, output_dir=None):
         """
         Make a visualization, save it, and show it.
         """
-        self.render(output_location, timestep)
-        self.show(output_location)
+        if isinstance(timestep, tf.Tensor):
+            timestep = timestep.numpy()
+        self.render(timestep, output_dir)
+        self.show(output_dir)
 
-    def show(self, output_location):
+    def show(self, output_dir=None):
         import webbrowser
-        uri = self._get_uri(output_location)
+        uri = self._get_uri(output_dir)
         if not hasattr(self, 'shown'):
             webbrowser.open_new_tab(uri)
             self.shown = True
@@ -63,27 +80,31 @@ class StatefulVisualization(Visualization, abc.ABC):
 
     """
 
-    def __init__(self, name: str, desc: str):
-        self.name = name
-        self.desc = desc
+    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
+        super().__init__(name, desc, run_name, output_dir)
+
 
     @abc.abstractmethod
-    def make_and_save_visualization(self, do_update, output_location, timestep=None):
+    def _make_and_save_visualization(self, do_update, timestep=None, output_dir=None):
         pass
 
-    def render(self, output_location, timestep=None):
+    def render(self, timestep=None, output_dir=None):
         """
         Create and save a visualization. Update the held visualization. Don't show it.
         """
-        self.make_and_save_visualization(do_update=True, output_location=output_location, timestep=timestep)
+        if isinstance(timestep, tf.Tensor):
+            timestep = timestep.numpy()
+        self._make_and_save_visualization(do_update=True, timestep=timestep, output_dir=output_dir)
 
-    def __call__(self, output_location, timestep=None):
+    def __call__(self, timestep=None, output_dir=None):
         """
         Create and save a visualization. Don't update the held visualization. Show it.
         For interactive usage.
         """
-        self.make_and_save_visualization(do_update=False, output_location=output_location, timestep=timestep)
-        self.show(output_location)
+        if isinstance(timestep, tf.Tensor):
+            timestep = timestep.numpy()
+        self._make_and_save_visualization(do_update=False, timestep=timestep, output_dir=output_dir)
+        self.show(output_dir=output_dir)
 
 
 @export
@@ -95,33 +116,29 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
     the data returned by the "fn" function.
     """
 
-    def __init__(self, name: str, desc: str):
-        super().__init__(
-            name=name,
-            desc=desc,
-        )
-        self._fig = None
+    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
+        super().__init__(name, desc, run_name, output_dir)
+        self._fig: hv.Layout = None
 
     @abc.abstractmethod
-    def make_hmaps(self, timestep) -> list[hv.HoloMap]:
+    def _make_hmaps(self, timestep) -> list[hv.HoloMap]:
         """
         Implements the figure.
         """
         pass
 
-    def _filename(self, output_location) -> Path:
-        f = u.ensure_suffix(Path(output_location), ".html")
-        f.parent.mkdir(parents=True, exist_ok=True)
-        return f
+    def output_location(self, output_dir=None) -> Path:
+        output_location = super().output_location(output_dir)
+        return u.ensure_suffix(output_location, ".html")
 
-    def make_and_save_visualization(self, do_update: bool, output_location: PathLike, timestep=None):
+    def _make_and_save_visualization(self, do_update: bool, timestep=None, output_dir=None):
         """
         Display figure to screen. (Note: Also saves to file.)
         """
-        hmaps = self.make_hmaps(timestep)
+        hmaps = self._make_hmaps(timestep)
         fig = hv.Layout(hmaps).cols(1).opts(
             shared_axes=False,
-            title=self.name,
+            title=self.desc,
             width=1600,
             height=900,
             sizing_mode="stretch_both",
@@ -135,12 +152,11 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
                     existing_hmap.update(new_hmap)
             fig = self._fig
 
-        filename = self._filename(output_location)
+        filename = self.output_location(output_dir)
         hv.save(fig, filename, fmt='html', backend='bokeh')
 
-    def _get_uri(self, output_location) -> str:
-        filename = self._filename(output_location)
-        return filename.absolute().as_uri()
+    def _get_uri(self, output_dir=None) -> str:
+        return self.output_location(output_dir).absolute().as_uri()
 
 events = ["start", "end", "interrupt", "epoch"]
 
@@ -174,8 +190,8 @@ class Visualizer:
 
     def __init__(self,
         visualizations: dict[str, Visualization],
-        configs: dict[str, VizCfg],
-        output_dir: PathLike,
+        configs: dict[str, VizCfg] = {},
+        output_dir: PathLike = None,
     ):
         assert isinstance(visualizations, dict), "visualizations must be a dict"
 
@@ -185,7 +201,12 @@ class Visualizer:
         self.visualizations = visualizations
         self.set_cfgs(configs)
 
-        self.output_dir = Path(output_dir)
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+        else:
+            self.output_dir = None
+
+        self.thread = None
 
     def set_cfgs(self, cfgs: dict[str, VizCfg]):
 
@@ -212,8 +233,6 @@ class Visualizer:
                 if e in cfg["show_on"]:
                     assert any((r in cfg["render_on"]) for r in requires[e]), f"cfgs['{k}'] cannot be shown before it is rendered. Add one of {requires[e]} to cfgs['{k}']['render_on']"
 
-
-
         # if cfg not specified, use default
         for k in vizs.keys():
             if k not in cfgs:
@@ -226,27 +245,41 @@ class Visualizer:
         self.cfgs = cfgs
 
     def _do(self, event: str, timestep, pm: Progress):
-        for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
-            if event in cfg["render_on"]:
-                with pm.enter_spinner(
-                    name=f"Visualize '{viz.name}'",
-                    desc=f"Visualizing '{viz.desc}'...",
-                    delete_on_success=True
-                ):
-                    viz.render(self.output_dir / viz.name, timestep=timestep)
 
-            if event in cfg["show_on"]:
-                # show the visualization
-                viz.show(self.output_dir / viz.name)
+        def _do_on_thread():
+            for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
+                if self.output_dir is not None:
+                    output_dir = self.output_dir / viz.name
+                else:
+                    output_dir = None
+                if event in cfg["render_on"]:
+                    with pm.enter_spinner(
+                        name=f"Visualize '{viz.name}'",
+                        desc=f"Visualizing '{viz.desc}'...",
+                        delete_on_success=True
+                    ):
+                        viz.render(timestep=timestep, output_dir=output_dir)
+
+                if event in cfg["show_on"]:
+                    # show the visualization
+                    viz.show(output_dir=output_dir)
+
+        if self.thread is not None:
+            self.thread.join()
+
+        self.thread = threading.Thread(target=_do_on_thread)
+        self.thread.start()
 
     def before_train_start(self, step, pm: Progress):
         self._do("start", timestep=step, pm=pm)
 
     def after_train_end(self, step, pm: Progress):
         self._do("end", timestep=step, pm=pm)
+        self.thread.join()
 
     def on_epoch_end(self, step, pm: Progress):
         self._do("epoch", timestep=step, pm=pm)
 
     def on_interrupt(self, step, pm: Progress):
         self._do("interrupt", timestep=step, pm=pm)
+        self.thread.join()

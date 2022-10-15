@@ -65,7 +65,7 @@ class MxDataset(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def get_visualizations(self, viz_batch_size, task_specific_predict_fn) -> dict[str, Visualization]:
+    def get_visualizations(self, viz_batch_size, task_specific_predict_fn, run_name) -> dict[str, Visualization]:
         pass
 
     def _snapshot_and_split(self, d: tf.data.Dataset, buffer_size=None) -> DSets:
@@ -216,15 +216,15 @@ class Embedding(abc.ABC):
 
     def __init__(
         self,
+        desc: str,
         name: str,
-        identifier: str,
         n_embd: int
     ):
-        self.name = name
-        "Human-readable name"
+        self.desc = desc
+        "Human-friendly description"
 
-        self.identifier = identifier
-        "Unique, machine-readable identifier"
+        self.name = name
+        "Unique, machine-friendly name"
 
         self.n_embd = n_embd
         "Number of embedding dimensions"
@@ -371,15 +371,19 @@ class Pipeline:
 
         return d
 
-    def get_visualizer(self, output_dir, viz_cfgs: dict[str, VizCfg], viz_batch_size: int = None) -> Visualizer:
+    def get_visualizer(self, viz_cfgs: dict[str, VizCfg] = {}, viz_batch_size: int = None, run_name=None, output_dir=None) -> Visualizer:
 
         viz_batch_size = viz_batch_size or self.viz_batch_size
 
         model = self.get_model()
         predict_fn = self.task.make_predict_fn(model)
-        vizs = self.dataset.get_visualizations(viz_batch_size, predict_fn)
+        vizs = self.dataset.get_visualizations(
+            viz_batch_size=viz_batch_size,
+            task_specific_predict_fn=predict_fn,
+            run_name=run_name,
+        )
         return Visualizer(
-            vizs,
-            viz_cfgs,
-            output_dir,
+            visualizations=vizs,
+            configs=viz_cfgs,
+            output_dir=output_dir
         )

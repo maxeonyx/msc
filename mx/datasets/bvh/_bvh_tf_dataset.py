@@ -96,7 +96,8 @@ class BvhDataset(MxDataset):
                 }
             self.adapt_out = adapt_out
         else:
-            raise NotImplementedError(f"{type_name(task)} not supported by {type(self)}")
+            ic(task)
+            raise NotImplementedError(f"{type_name(task)} not supported by {type_name(self)}")
 
         assert self.adapt_in is not None, "Forgot to set self.adapt_in"
         assert self.adapt_out is not None, "Forgot to set self.adapt_out"
@@ -208,7 +209,7 @@ class BVHImageViz(HoloMapVisualization):
         self._adapt_in = adapt_in
         self._adapt_out = adapt_out
 
-    def make_hmaps(self, i_step) -> list[hv.HoloMap]:
+    def _make_hmaps(self, i_step) -> list[hv.HoloMap]:
         data = self._data
         # data comes from dsets.test in "dataset" format
 

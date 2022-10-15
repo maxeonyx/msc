@@ -36,11 +36,15 @@ class DecoderOnlyTransformer(MxModel):
         # The dimensionality doesn't change -- easy.
         n_output_embd = self.embd_cfg.n_embd
 
+        ic(task)
+        ic(task.model_config_type)
+
         if task.model_config_type == Task.ModelSpecificConfig:
             task.recieve_model_config(task.model_config_type(
                 n_output_embd,
             ))
         else:
+            ic(task)
             raise NotImplementedError(f"Model {type_name(self)} does not support task {type(task)}")
 
     def make_model(self) -> Model:

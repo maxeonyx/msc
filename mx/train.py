@@ -1,7 +1,10 @@
+from curses import flushinp
 from dataclasses import dataclass
 import math
 from os import PathLike
 from pathlib import Path
+from threading import Thread
+import time
 from typing import Callable, Literal, NamedTuple, Set, Union
 
 from contextlib import ExitStack
@@ -36,6 +39,7 @@ def default_make_train_step(
 
     return train_step
 
+
 def make_train_step_wrapper(
     model: Model,
     optimizer: tf.keras.optimizers.Optimizer,
@@ -54,30 +58,51 @@ def make_train_step_wrapper(
 
     train_step = make_train_step(model, optimizer, loss_fn)
 
-    def train_step_wrapper(data, do_log: bool):
-        i_step, (inputs_batch, targets_batch) = data
+    def train_step_wrapper(
+        data,
+        step_var: tf.Variable,
+        until_step: int,
+        do_break: tf.Variable,
+        do_log: bool,
+        log_every: int,
+        do_profile: bool,
+    ):
+        for i_step, (inputs_batch, targets_batch) in data:
 
-        with tb_writer.as_default(step=i_step):
-            outputs_batch, loss, grads = train_step(inputs_batch, targets_batch)
+            with ExitStack() as stack:
+                if do_profile:
+                    stack.enter_context(tf.profiler.experimental.Trace("train", step_num=i_step, _r=1))
 
-            metric_inputs: NestedTensor = {
-                "loss": loss,
-                "step": i_step,
-                "targets": targets_batch,
-                "outputs": outputs_batch,
-                "inputs": inputs_batch,
-            }
+                outputs_batch, loss, grads = train_step(inputs_batch, targets_batch)
 
-            for metric in metrics.values():
-                metric.update(metric_inputs)
+                step_var.assign(i_step)
 
-            if do_log:
-                tf.summary.scalar("loss", loss)
-                for grad in grads:
-                    tf.summary.histogram("grad", grad)
-                    tf.summary.scalar("grad_norm", tf.norm(grad))
-                for k, v in outputs_batch.items():
-                    tf.summary.histogram(f"outputs/{k}", v)
+                metric_inputs: NestedTensor = {
+                    "loss": loss,
+                    "step": i_step,
+                    "targets": targets_batch,
+                    "outputs": outputs_batch,
+                    "inputs": inputs_batch,
+                }
+
+                for metric in metrics.values():
+                    metric.update(metric_inputs)
+
+
+                if do_log and i_step % log_every == 0:
+                    with tb_writer.as_default(step=i_step):
+                        tf.summary.scalar("loss", loss)
+                        for grad in grads:
+                            tf.summary.histogram("grad", grad)
+                            tf.summary.scalar("grad_norm", tf.norm(grad))
+                        for k, v in outputs_batch.items():
+                            tf.summary.histogram(f"outputs/{k}", v)
+
+                if do_break:
+                    break
+
+                if i_step >= until_step:
+                    break
 
     return train_step_wrapper
 
@@ -153,27 +178,21 @@ def build_for_training(pipeline: Pipeline) -> tuple[Model, typing.Callable[..., 
     loss_fn = pipeline.get_loss_fn()
     data = pipeline.get_train_data()
     vizr = pipeline.get_visualizer(
-        output_dir=output_dir / "viz",
-        viz_batch_size = 3,
-        viz_cfgs = {
-            "bvh_imgs": {
-                "render_on": ["start", "epoch"],
-                "show_on": ["start", "end", "interrupt"]
-            },
-        },
+        output_dir=output_dir,
+        run_name=run_name,
     )
 
     train_loop = make_train_loop(
         pipeline=pipeline,
         run_name=run_name,
         output_dir=output_dir,
+        vizr=vizr,
     )
 
     return (
         model,
         loss_fn,
         data,
-        vizr,
         train_loop,
     )
 
@@ -182,10 +201,10 @@ def make_train_loop(
     pipeline: Pipeline,
     run_name: str,
     output_dir: PathLike,
-    viz_cfgs: dict[str, VizCfg] = {},
-    viz_batch_size: int = None,
+    vizr: Visualizer = None,
+    viz_cfgs: dict[str, VizCfg] = None,
     optimizer: Literal["adam", "sgd"] | tf.keras.optimizers.Optimizer = "adam",
-    n_steps_per_epoch: int | str = "exponential",
+    n_steps_per_epoch: int | str = "funky",
     checkpoint_interval: Union[int, Literal["epoch"], Literal["never"]] = "epoch",
     log_interval: Union[int, Literal["epoch"], Literal["never"]] = 10,
     log_type: Set[Literal["tensorboard", "wandb"]] = {"tensorboard"},
@@ -193,7 +212,7 @@ def make_train_loop(
         Literal["default"],
         dict[str, dict[str, MxMetric]],
     ] = "default",
-    make_train_step: Callable = default_make_train_step,
+    make_train_step = default_make_train_step,
 ) -> Callable[[Progress], None]:
     """
     Make the training loop.
@@ -206,7 +225,10 @@ def make_train_loop(
     loss_fn = pipeline.get_loss_fn()
 
     # make epoch sizes
-    if n_steps_per_epoch == "exponential":
+    if n_steps_per_epoch == "funky":
+        # exponential, but not less than 10 or more than 1000
+        epoch_sizes = [ e for e in u.funky_punky(10, 1000, pipeline.n_steps)]
+    elif n_steps_per_epoch == "exponential":
         epoch_sizes = [ e for e in u.exponential_up_to(pipeline.n_steps) ]
     else:
         epoch_sizes = [ e for e in u.constant_up_to(pipeline.n_steps, chunk=n_steps_per_epoch) ]
@@ -244,7 +266,6 @@ def make_train_loop(
         profile: bool = False,
         eager: bool = False,
         viz_cfgs: dict[str, VizCfg] = viz_cfgs,
-        viz_batch_size: int = viz_batch_size,
         pm: Progress = None,
         log_type: Set[Literal["tensorboard", "wandb"]] = log_type,
         metrics: dict[str, dict[str, MxMetric]] = metrics,
@@ -254,11 +275,9 @@ def make_train_loop(
         # They are here and not simply anonymously in the outer scope
         # so that they can be accessed by the caller
         if not hasattr(train_loop, "i_step"):
-            train_loop.i_step = 0
+            train_loop.i_step = tf.Variable(0, dtype=tf.int64)
         if not hasattr(train_loop, "i_epoch"):
             train_loop.i_epoch = 0
-        if not hasattr(train_loop, "data_iterator"):
-            train_loop.data_iterator = None
         if not hasattr(train_loop, "checkpoints"):
             train_loop.checkpoints = []
         if not hasattr(train_loop, "optimizer"):
@@ -268,8 +287,11 @@ def make_train_loop(
         if not hasattr(train_loop, "checkpointer"):
             train_loop.checkpointer = None
 
-        # always re-create the vizualizer, so that it can be reloaded
-        vizr = pipeline.get_visualizer(output_dir=output_dir, viz_cfgs=viz_cfgs, viz_batch_size=viz_batch_size)
+        if not hasattr(train_loop, "data_iterator"):
+            train_loop.data_iterator = iter(pipeline.get_train_data())
+
+        if vizr is not None and viz_cfgs is not None:
+            vizr.set_cfgs(viz_cfgs)
 
         # run eagerly if requested
         # todo: currently this is not working
@@ -291,20 +313,10 @@ def make_train_loop(
                 with pm.enter_spinner("Saving model", "Saving initial model..."):
                     train_loop.checkpoints.append(train_loop.checkpointer.save(output_dir / "checkpoints"))
 
-                if not created_data_iterator or not created_train_step:
-                    try:
-                        with pm.enter_spinner(name="Init data", desc="Generating first data..."):
-                            dataset = pipeline.get_train_data()
-                            # compile
-                            initial_data = next(iter(dataset))
-                            train_loop.data_iterator = iter(dataset)
-                        created_data_iterator = True
-                    except StopIteration:
-                        raise ValueError("No data in dataset")
-
                 with tb_writer.as_default():
 
-                    vizr.before_train_start(step=train_loop.i_step, pm=pm)
+                    if vizr is not None:
+                        vizr.before_train_start(step=train_loop.i_step, pm=pm)
 
                     try:
                         if profile:
@@ -312,8 +324,29 @@ def make_train_loop(
 
                         train_loop_metrics = metrics["train_step_metrics"] | metrics["epoch_metrics"]
 
+
+                        do_break = tf.Variable(
+                            initial_value=False,
+                            dtype=tf.bool,
+                            trainable=False,
+                            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
+                            synchronization=tf.VariableSynchronization.ON_WRITE,
+                        )
+
+                        # do_log: whether to enable logging in the train loop
+                        # log_every: which steps to log on in the train loop
+                        if log_interval == "epoch":
+                            do_log = True
+                            log_every = n_steps # only log once
+                        elif log_interval == "never":
+                            do_log = False
+                            log_every = n_steps # ignored
+                        elif isinstance(log_interval, int):
+                            do_log = True
+                            log_every = log_interval
+
                         if not created_train_step:
-                            with pm.enter_spinner(name="Compile train loop", desc="Compiling train loop..."):
+                            with pm.enter_spinner(name="Compile train step", desc="Compiling / Running first training step..."):
                                 train_loop.train_step_fn = make_train_step_wrapper(
                                     model,
                                     optimizer,
@@ -323,46 +356,64 @@ def make_train_loop(
                                     tb_writer,
                                 )
                                 train_loop.train_step_fn = tf.function(train_loop.train_step_fn)
-                                do_log = log_interval != "never"
-                                train_loop.train_step_fn(initial_data, do_log)
-                                train_loop.checkpointer.restore(train_loop.checkpoints[-1])
-
+                                train_loop.train_step_fn(
+                                    data=train_loop.data_iterator,
+                                    step_var=train_loop.i_step,
+                                    until_step=train_loop.i_step + 1,
+                                    do_break=do_break,
+                                    do_log=do_log,
+                                    log_every=log_every,
+                                    do_profile=profile,
+                                )
                             created_train_step = True
 
+                        ######################
+                        ######################
                         def run_for(n_steps, is_last_epoch):
                             nonlocal created_train_step
 
                             last_epoch_loss = None
-                            with pm.enter_progbar(total=n_steps, name=f"Epoch {train_loop.i_epoch}", desc=f"Epoch {train_loop.i_epoch}", delete_on_success=not is_last_epoch) as epoch_prog_bar:
+                            with pm.enter_progbar(total=n_steps, name=f"Epoch {train_loop.i_epoch + 1}", desc=f"Epoch {train_loop.i_epoch + 1}", delete_on_success=not is_last_epoch) as epoch_prog_bar:
 
-                                i_step = 0
-                                while i_step < n_steps:
+                                def run_in_thread():
+                                    train_loop.train_step_fn(
+                                        data=train_loop.data_iterator,
+                                        step_var=train_loop.i_step,
+                                        until_step=train_loop.i_step + n_steps,
+                                        do_break=do_break,
+                                        do_log=do_log,
+                                        log_every=log_every,
+                                        do_profile=profile,
+                                    )
+                                t = Thread(target=run_in_thread)
 
-                                    with tf.profiler.experimental.Trace("train", step_num=train_loop.i_step, _r=1):
-                                        try:
-                                            data = next(train_loop.data_iterator)
-                                        except StopIteration:
-                                            raise TrainLoopError("WARNING: Ran out of data before epoch was finished. This is probably a bug with your data generation code. Exiting training loop.")
+                                start_step = train_loop.i_step.value().numpy()
 
-                                        do_log = (
-                                            (log_interval == "epoch" and i_step == 0) or
-                                            (type(log_interval) == int and i_step % log_interval == 0)
-                                        ) # always false if log_interval == "never"
+                                try:
+                                    t.start()
 
-                                        train_loop.train_step_fn(data, do_log)
+                                    i = 0
+                                    while t.is_alive():
+                                        step = train_loop.i_step.value().numpy()
+                                        epoch_prog_bar.count = step - start_step
+                                        epoch_prog_bar.refresh()
+                                        i += 1
+                                        time.sleep(0.1)
 
-                                    if type(checkpoint_interval) == int and train_loop.i_step % checkpoint_interval == 0:
+                                    t.join()
+                                except KeyboardInterrupt as e:
+                                    do_break.assign(True)
+                                    t.join()
+                                    raise e
+                                finally:
+                                    t.join()
+
+                                if type(checkpoint_interval) == int and train_loop.i_step % checkpoint_interval == 0:
                                         with pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
                                             train_loop.checkpoints.append(train_loop.checkpointer.save(output_dir / "checkpoints"))
 
-                                    i_step += 1
-                                    train_loop.i_step += 1
-                                    # statelessly set i_epoch
-                                    train_loop.i_epoch = get_epoch(train_loop.i_step, epoch_sizes)
-                                    epoch_prog_bar.count = i_step
-                                    epoch_prog_bar.refresh()
-
-                                vizr.on_epoch_end(step=train_loop.i_step, pm=pm)
+                                if vizr is not None:
+                                    vizr.on_epoch_end(step=train_loop.i_step, pm=pm)
 
                             for _, m in metrics["epoch_metrics"].items():
                                     m.update({"epoch": train_loop.i_epoch, "step": train_loop.i_step})
@@ -383,16 +434,20 @@ def make_train_loop(
                             if checkpoint_interval == "epoch":
                                 with pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
                                     train_loop.checkpointer.save(output_dir / "checkpoints")
-                        #############
+                        ######################
+                        ######################
 
 
                         if n_steps is None:
                             with pm.enter_training(len(epoch_sizes), train_loop_metrics) as train_prog_bar:
                                 while train_loop.i_epoch < len(epoch_sizes):
-                                    n_steps = get_remaining_steps_in_epoch(epoch_sizes, train_loop.i_epoch, train_loop.i_step)
+                                    step = train_loop.i_step.value().numpy()
+                                    n_steps = get_remaining_steps_in_epoch(epoch_sizes, train_loop.i_epoch, step)
                                     if n_steps == 0:
                                         raise TrainLoopError("WARNING: No steps left. Exiting training loop.")
                                     run_for(n_steps, train_loop.i_epoch == (len(epoch_sizes) - 1))
+                                    step = train_loop.i_step.value().numpy()
+                                    train_loop.i_epoch = get_epoch(step, epoch_sizes)
                                     train_prog_bar.count = train_loop.i_epoch
                                     train_prog_bar.refresh()
                         else:
@@ -404,11 +459,13 @@ def make_train_loop(
                             with pm.enter_spinner("Save profiler data", "Saving data from performance profiling..."):
                                 tf.profiler.experimental.stop(save=True)
 
-                    vizr.after_train_end(pm=pm, step=train_loop.i_step+1)
+                    if vizr is not None:
+                        vizr.after_train_end(pm=pm, step=train_loop.i_step+1)
             except TrainLoopError as e:
                 print(e.message)
             except KeyboardInterrupt:
-                vizr.on_interrupt(pm=pm, step=train_loop.i_step)
+                if vizr is not None:
+                    vizr.on_interrupt(pm=pm, step=train_loop.i_step)
                 print("User interrupted training.")
 
     return train_loop

@@ -36,4 +36,4 @@ import mx.tf_types as tft
 ## utils.py imports this file, so can't use anything after this line
 import mx.utils as u
 
-from mx.utils import dbg as tp, export, exporter, shape, type_name
+from mx.utils import dbg, tf_print as tp, export, exporter, shape, type_name
