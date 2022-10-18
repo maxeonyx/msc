@@ -25,6 +25,10 @@ def dtype() -> tft.DType:
     return policy.compute_dtype
 
 @export
+def reg():
+    return tf.keras.regularizers.l1_l2(l1=0.0001, l2=0.001)
+
+@export
 @contextmanager
 def optimizations(options):
   old_opts = tf.config.optimizer.get_experimental_options()
@@ -209,14 +213,12 @@ def set_debug(to: bool = True):
 def stats(val, indent=_default_indent, depth=0):
     def stats(v):
         print(tf_str(val, prefix="val: ", indent=indent, depth=depth))
-        # print(indent*(depth+1) + "mean:", tf.math.reduce_mean(v).numpy())
-        # print(indent*(depth+1) + "min:", tf.math.reduce_min(v).numpy())
-        # print(indent*(depth+1) + "max:", tf.math.reduce_max(v).numpy())
+        print(indent*(depth+1) + "mean:", tf.math.reduce_mean(v).numpy())
+        print(indent*(depth+1) + "min:", tf.math.reduce_min(v).numpy())
+        print(indent*(depth+1) + "max:", tf.math.reduce_max(v).numpy())
         if v.dtype in [tf.float16, tf.float32, tf.float64]:
-            # print(indent*(depth+1) + "norm:", tf.linalg.norm(v).numpy())
-            # print(indent*(depth+1) + "std:", tf.math.reduce_std(v).numpy())
-            print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
-            print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
+            print(indent*(depth+1) + "norm:", tf.linalg.norm(v).numpy())
+            print(indent*(depth+1) + "std:", tf.math.reduce_std(v).numpy())
             print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
     tf.nest.map_structure(stats, val)
 

@@ -193,7 +193,7 @@ class VectorSequenceMSE(Task):
             Input([None, self.model_cfg.n_output_embd], name="embd"),
         )
 
-        dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims, name="dense")
+        dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims, name="dense", kernel_regularizer=u.reg())
 
         def call(inputs):
             embd = inputs["embd"]
@@ -431,7 +431,7 @@ class VectorSequenceAngleMSE(Task):
         inputs = u.input_dict(
             Input([None, self.model_cfg.n_output_embd], name="embd"),
         )
-        dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims * 2)
+        dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims * 2, kernel_regularizer=u.reg())
         def call(inputs):
             outputs = dense(inputs["embd"])
             outputs = ein.rearrange(outputs, "... seq (feat sincos) -> ... seq feat sincos", sincos=2)

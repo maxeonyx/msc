@@ -207,15 +207,15 @@ def make_train_loop(
     else:
         epoch_sizes = [ e for e in u.constant_up_to(n_steps, chunk=n_steps_per_epoch) ]
 
-    sched = transformers.WarmUp(
-        initial_learning_rate=1e-6,
-        warmup_steps=1000,
-        decay_schedule_fn=tf.keras.optimizers.schedules.ExponentialDecay(
-            0.01,
-            decay_rate=0.9,
-            decay_steps=1000
-        )
-    )
+    # sched = transformers.WarmUp(
+    #     initial_learning_rate=1e-6,
+    #     warmup_steps=1000,
+    #     decay_schedule_fn=tf.keras.optimizers.schedules.ExponentialDecay(
+    #         0.01,
+    #         decay_rate=0.9,
+    #         decay_steps=1000
+    #     )
+    # )
 
     # make optimizer
     if not isinstance(optimizer, tf.keras.optimizers.Optimizer):

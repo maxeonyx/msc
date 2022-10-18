@@ -2,32 +2,34 @@ from mx.prelude import *
 from ._layer_utils import MxLayer
 from mx.utils import Einshape
 
+
+# the above as a functional layer/model
 @export
-class LearnedMixAdd(layers.Layer):
-    """
-    A custom add operator for a residual block, which learns a mixing coefficient,
-    and scales the residual to have the same variance as the input.
+def learned_mix_add(n_embd, name="mix"):
 
-    """
+    mix = tf.Variable(
+        name="mix",
+        shape=(),
+        initial_value=tf.constant(4., u.dtype()),
+        trainable=True,
+    )
 
-    def __init__(self, name="mix"):
-        super().__init__(name=name)
-    def build(self, input_shape):
-        self.mix = self.add_weight(
-            name="mix",
-            shape=(),
-            initializer=keras.initializers.Constant(4.),
-            trainable=True,
-        )
-        """The amount of residual to mix in."""
+    def call(inputs):
+        nonlocal mix
 
-    def call(self, inputs):
         res, x = inputs
-        mix = tf.math.sigmoid(self.mix)
+        mix = tf.math.sigmoid(mix)
         a = tf.sqrt(mix)
         b = tf.sqrt(1. - mix)
 
         return res * a + x * b
+
+    inputs = [
+        Input(shape=[None, n_embd], name="residual"),
+        Input(shape=[None, n_embd], name="input"),
+    ]
+
+    return Model(inputs=inputs, outputs=call(inputs), name=name)
 
 
 def residual(embd_shape: Einshape, n_layers: int=None, make_layer: Callable[[int], MxLayer]=None, layers: list[MxLayer]=None, normalization='scale', dropout=0.1, name="residual") -> Model:

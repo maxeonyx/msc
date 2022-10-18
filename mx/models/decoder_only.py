@@ -75,17 +75,18 @@ class DecoderOnlyTransformer(MxModel):
                     num_heads=self.n_heads,
                     key_dim=self.embd_cfg.n_embd,
                     dropout=self.dropout,
-                    kernel_regularizer='l1_l2',
+                    kernel_regularizer=None,
                     name=f"{self.name}/l{i}/attn",
                 ),
-                add_attn = mx_layers.LearnedMixAdd(
+                add_attn = mx_layers.learned_mix_add(
+                    self.embd_cfg.n_embd,
                     name=f"{self.name}/l{i}/add_attn",
                 ),
                 ffn = keras.Sequential([
                     Dense(
                         self.n_hidden,
                         activation='gelu',
-                        kernel_regularizer='l1_l2',
+                        kernel_regularizer=u.reg(),
                         name=f"{self.name}/l{i}/ffn/in",
                     ),
                     layers.Dropout(
@@ -94,11 +95,12 @@ class DecoderOnlyTransformer(MxModel):
                     ),
                     Dense(
                         self.embd_cfg.n_embd,
-                        kernel_regularizer='l1_l2',
+                        kernel_regularizer=u.reg(),
                         name=f"{self.name}/l{i}/ffn/out",
                     ),
                 ]),
-                add_ffn = mx_layers.LearnedMixAdd(
+                add_ffn = mx_layers.learned_mix_add(
+                    self.embd_cfg.n_embd,
                     name=f"{self.name}/l{i}/add_ffn",
                 ),
                 layernorm = layers.LayerNormalization(
@@ -107,7 +109,8 @@ class DecoderOnlyTransformer(MxModel):
                 batchnorm = layers.BatchNormalization(
                     name=f"{self.name}/l{i}/batchnorm",
                 ),
-                add_layer = mx_layers.LearnedMixAdd(
+                add_layer = mx_layers.learned_mix_add(
+                    self.embd_cfg.n_embd,
                     name=f"{self.name}/l{i}/add_layer",
                 ),
             )
@@ -120,12 +123,12 @@ class DecoderOnlyTransformer(MxModel):
 
             for i, l in enumerate(ls):
                 x = embd
-                x = l.add_attn([x, l.attn(x, x, x)])
+                x = l.add_attn([x, l.attn(x, x, x, use_causal_mask=True)])
 
                 x = l.add_ffn([x, l.ffn(x)])
 
-                x = l.batchnorm(x)
-                # x = l.layernorm(x)
+                # x = l.batchnorm(x)
+                x = l.layernorm(x)
 
                 embd = l.add_layer([embd, x])
 
@@ -185,12 +188,12 @@ class Resnet(MxModel):
                 dense_in = Dense(
                     self.n_hidden,
                     activation='gelu',
-                    kernel_regularizer='l1_l2',
+                    kernel_regularizer=u.reg(),
                     name=f"{self.name}/l{i}/dense_in",
                 ),
                 dense_out = Dense(
                     self.embd_cfg.n_embd,
-                    kernel_regularizer='l1_l2',
+                    kernel_regularizer=u.reg(),
                     name=f"{self.name}/l{i}/dense_out",
                 ),
                 dropout = layers.Dropout(
@@ -256,8 +259,8 @@ class DebugMLP(MxModel):
 
         assert self.embd_cfg is not None, "Must call task.configure(model) before calling make_model()"
 
-        layer1 = Dense(self.n_hidden, activation='relu', kernel_regularizer='l1_l2')
-        layer2 = Dense(self.embd_cfg.n_embd, activation='relu', kernel_regularizer='l1_l2')
+        layer1 = Dense(self.n_hidden, activation='relu', kernel_regularizer=u.reg())
+        layer2 = Dense(self.embd_cfg.n_embd, activation='relu', kernel_regularizer=u.reg())
 
         inputs = u.input_dict(
             Input([None, self.embd_cfg.n_embd], name="embd"),
