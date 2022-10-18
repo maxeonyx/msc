@@ -96,7 +96,7 @@ class BvhDataset(MxDataset):
                 }
             self.adapt_out = adapt_out
         else:
-            raise NotImplementedError(f"{type_name(task)} not supported by {type_name(self)}")
+            raise NotImplementedError(f"Dataset {type_name(self)} does not support Task {type_name(task)}. If using autoreload in IPython, try restarting the interpreter.")
 
         assert self.adapt_in is not None, "Forgot to set self.adapt_in"
         assert self.adapt_out is not None, "Forgot to set self.adapt_out"
@@ -161,7 +161,7 @@ class BvhDataset(MxDataset):
                 }
             dset = dset.map(do_decimate)
 
-        dsets = self._snapshot_and_split(dset, buffer_size=None)
+        dsets = self._snapshot_and_split(dset)
 
         return dsets
 
@@ -172,6 +172,7 @@ class BvhDataset(MxDataset):
         viz_data = (
             self.load(force_cache_reload=False)
             .test
+            .batch(1)
             .take(viz_batch_size)
         )
         viz_data = [ d for d in viz_data ]
@@ -198,11 +199,25 @@ class BVHImageViz(HoloMapVisualization):
         adapt_out: Callable,
         name = "bvh_imgs",
         desc = "BVH Image Viz",
+        output_dir=None,
     ):
         super().__init__(
             name=name,
             desc=desc,
+            output_dir=output_dir,
         )
+
+        # validate data in "dataset" format
+        u.validate(data, "data", [
+            {
+                "angles": tf.TensorSpec(shape=[None, None, None, None], dtype=u.dtype()),
+                "idxs": tf.TensorSpec(shape=[None, None, None, None, None], dtype=tf.int32),
+                "extra": {
+                    "orig_angles": tf.TensorSpec(shape=[None, None, None, None], dtype=u.dtype()),
+                    "filename": tf.TensorSpec(shape=[], dtype=tf.string),
+                },
+            }
+        ])
         self._data = data
         self._task_predict_fn = task_predict_fn
         self._adapt_in = adapt_in
@@ -210,62 +225,43 @@ class BVHImageViz(HoloMapVisualization):
 
     def _make_hmaps(self, i_step) -> list[hv.HoloMap]:
         data = self._data
-        # data comes from dsets.test in "dataset" format
-
-        assert isinstance(data, list),                                       f"data must be a list of batches. Got: type(data)={type_name(data)}"
         batch_size = len(data)
-        assert isinstance(data[0], dict),                                    f"data must be a list of batches, each one a dict. Got: type(data[0])={type_name(data[0])}"
-        assert "angles" in data[0],                                          f"data[0] must contain 'angles'. Got keys: [{data[0].keys()}]"
-        assert tf.is_tensor(data[0]["angles"]),                              f"data[0]['angles'] must be a tensor. Got: type(data[0]['angles'])={type_name(data[0]['angles'])}"
-        assert data[0]["angles"].dtype == tf.float32,                         "data[0]['angles'] must be a float32 tensor"
-        assert data[0]["angles"].shape.rank == 4,                            f"data[0]['angles'] must be a float32 tensor of shape [b f h j d]. Got {data[0]['angles'].shape}"
-        assert "idxs" in data[0],                                             "data[0] must contain 'idxs'"
-        assert tf.is_tensor(data[0]["idxs"]),                                 "data[0]['idxs'] must be a tensor"
-        assert data[0]["idxs"].dtype == tf.int32,                             "data[0]['idxs'] must be a int32 tensor"
-        assert data[0]["idxs"].shape.rank == 5,                              f"data[0]['idxs'] must be a int32 tensor of shape [b f h j d i]. Got {data[0]['idxs'].shape}"
-        assert isinstance(data[0]["extra"], dict),                            "data[0]['extra'] must be a dict"
-        assert "orig_angles" in data[0]["extra"],                             "data[0]['extra'] must contain 'orig_angles'"
-        assert tf.is_tensor(data[0]["extra"]["orig_angles"]),                f"data[0]['extra']['orig_angles'] must be a tensor. Got: type(data[0]['extra']['orig_angles'])={type_name(data[0]['extra']['orig_angles'])}"
-        assert data[0]["extra"]["orig_angles"].dtype == tf.float32,           "data[0]['extra']['orig_angles'] must be a float32 tensor"
-        assert data[0]["extra"]["orig_angles"].shape.rank == 4,              f"data[0]['extra']['orig_angles'] must be a float32 tensor of shape [b f h j d]. Got {data[0]['extra']['orig_angles'].shape}"
-        assert "filename" in data[0]["extra"],                                "data[0]['extra'] must contain 'filename'"
-        assert tf.is_tensor(data[0]["extra"]["filename"]),                    "data[0]['extra']['filename'] must be a tensor"
-        assert data[0]["extra"]["filename"].dtype == tf.string,               "data[0]['extra']['filename'] must be a string tensor"
 
-        task_specific_input_data = [ self._adapt_in(d) for d in data ]
-        predict_outputs = [
+        predict_from_scratch = [
             self._adapt_out(
-                self._task_predict_fn(d)
+                self._task_predict_fn(
+                    self._adapt_in(data[0])
+                )
             )
-            for d in task_specific_input_data
+        ]
+
+        u.validate(predict_from_scratch, "predict_from_scratch", {
+            "angles": tf.TensorSpec(shape=[1, None, None], dtype=u.dtype()),
+        })
+
+        predict_from_seed = [
+            self._adapt_out(
+                self._task_predict_fn(
+                    self._adapt_in(d),
+                    seed_len = 20,
+                )
+            )
+            for d in data
         ]
 
         # use tf.nest.map_structure to stack all component tensors
-        predict_outputs = tf.nest.map_structure(
+        predict_from_seed = tf.nest.map_structure(
             lambda *xs: tf.concat(xs, axis=0),
-            *predict_outputs,
+            *predict_from_seed,
         )
 
-        assert isinstance(predict_outputs, dict), "predict_outputs must be a dict"
+        u.validate(predict_from_seed, "predict_from_seed", {
+            "angles": tf.TensorSpec(shape=[batch_size, None, None], dtype=u.dtype()),
+        })
 
-        for ident, o in predict_outputs.items():
-            assert isinstance(o, tuple),           f"predict_outputs['{ident}'] must be a tuple"
-            assert len(o) == 2,                    f"predict_outputs['{ident}'] must be a tuple of length 2"
-            name, v = o
+        step_dim = hv.Dimension(("step", "Step"))
+        batch_dim = hv.Dimension(("batch", "Batch"))
 
-            # assert isinstance(name, str),          f"predict_outputs['{ident}'][0] must be a string"
-            assert tf.is_tensor(name),             f"predict_outputs['{ident}'][0] must be a tensor"
-            assert name.dtype == tf.string,        f"predict_outputs['{ident}'][0] must be a string tensor"
-
-            assert tf.is_tensor(v),                f"predict_outputs['{ident}'][1] must be a tensor. Got type={type_name(v)}"
-            assert v.dtype == tf.float32,          f"predict_outputs['{ident}'][1] must be a float32 tensor. Got {v.dtype}"
-            assert v.shape.rank == 5,              f"predict_outputs['{ident}'][1] must be a float32 tensor of shape [b f h j d]. Got {v.shape}"
-
-
-        key_dims = [
-            hv.Dimension(("step", "Step")),
-            hv.Dimension(("batch", "Batch")),
-        ]
         def img(data, title):
             data = ein.rearrange(data, "f h j d -> (h j d) f")
             return hv.Raster(data.numpy()).opts(
@@ -274,17 +270,39 @@ class BVHImageViz(HoloMapVisualization):
                 aspect='equal',
             )
 
-        return [
+        def get_title(name, i_batch=None):
+            if tf.is_tensor(name):
+                name = name.numpy().decode('utf-8')
+            if i_batch is not None:
+                return f"{name} {i_batch}"
+            else:
+                return name
+
+        hmaps = [
             hv.HoloMap(
                 {
-                    (i_step, i_batch): img(data[i_batch], u.tf_str(titles[i_batch]))
-                    for i_batch in range(batch_size)
+                    (i_step): img(data, get_title(title))
                 },
-                kdims=key_dims,
+                kdims=[step_dim],
                 label=ident
             )
-            for ident, (titles, data) in predict_outputs.items()
+            for ident, (title, data) in predict_from_scratch.items()
         ]
+
+        hmaps += [
+            hv.HoloMap(
+                {
+                    (i_step, i_batch): img(data[i_batch], get_title(titles[i_batch], i_batch))
+                    for i_batch in range(batch_size)
+                },
+                kdims=[step_dim, batch_dim],
+                label=ident
+            )
+            for ident, (titles, data) in predict_from_seed.items()
+        ]
+
+        return hmaps
+
 
 
 

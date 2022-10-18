@@ -14,9 +14,101 @@ from mx.prelude import *
 
 __all__, export = exporter()
 
-from mx.run_name import get_run_name, random_run_name
+from mx.run_name import get_run_name, random_run_name, set_run_name
 export("get_run_name")
 export("random_run_name")
+export("set_run_name")
+
+@export
+def dtype() -> tft.DType:
+    policy = keras.mixed_precision.global_policy()
+    return policy.compute_dtype
+
+@export
+@contextmanager
+def optimizations(options):
+  old_opts = tf.config.optimizer.get_experimental_options()
+  tf.config.optimizer.set_experimental_options(options)
+  try:
+    yield
+  finally:
+    tf.config.optimizer.set_experimental_options(old_opts)
+
+
+
+
+
+
+
+
+
+@export
+def validate(x, var_name, spec, part="", allow_non_concrete=False):
+    """
+    Validate that the input is a tensor-like nested structure in the correct format.
+
+    Format should be a nested structure of dicts, lists and tuples with TensorSpecs and
+    NoneTensorSpecs at the nodes.
+
+    Lists used for variable-length homogeneous structures, and the format spec should only have 1 element.
+    For fixed-length / heterogeneous structures, use tuples.
+    """
+    name = f"{var_name}{part}"
+    # Use type_name and tf_str to print pretty error messages.
+
+    got_val = lambda x, name: f"Got: {name} = {tf_str(x)}"
+    got_type = lambda x, name: f"Got: type({name}) = {type_name(x)}"
+
+    if isinstance(spec, (tf.TensorSpec, tf.RaggedTensorSpec)):
+        if not allow_non_concrete and not tf.is_tensor(x):
+            raise TypeError(f"Expected {name} to be a tensor. {got_type(x, name)}")
+
+        if not spec.is_compatible_with(x):
+            raise TypeError(f"\nExpected: {name} ∈ {tf_str(spec)}\nGot:      {name} = {tf_str(x)}")
+
+    elif isinstance(spec, tft.NoneTensorSpec):
+        if not spec.is_compatible_with(x):
+            raise TypeError(f"Expected {name} to be None. {got_val(x, name)}")
+
+    elif isinstance(spec, tft.DatasetSpec):
+        validate(x.element_spec, var_name, spec.element_spec, '.element_spec', allow_non_concrete=True)
+    elif isinstance(spec, dict):
+        if not isinstance(x, dict):
+            raise TypeError(f"Expected {name} to be a dict. {got_type(x, name)}")
+
+        for k, s in spec.items():
+
+            if k not in x:
+                raise KeyError(f"Expected {name} to have key {k}. {got_val(x, name)}")
+
+            validate(x[k], var_name, s, f"[{k!r}]", allow_non_concrete)
+
+    # list specs should only have 1 element
+    elif isinstance(spec, list):
+        if not isinstance(x, list):
+            raise TypeError(f"Expected {name} to be a list. {got_type(x, name)}")
+
+        if len(spec) != 1:
+            raise ValueError(f"`list` specs should only have 1 element. Use tuples instead. Got: spec{part} = {tf_str(spec)}")
+
+        for i, v in enumerate(x):
+            validate(v, var_name, spec[0], f"[{i}]", allow_non_concrete)
+
+    # tuple specs can have multiple elements
+    elif isinstance(spec, tuple):
+        if not isinstance(x, tuple):
+            raise TypeError(f"Expected {name} to be a tuple. {got_type(x, name)}")
+
+        if len(x) != len(spec):
+            raise ValueError(f"Expected {name} to have {len(spec)} elements. Got len({name}) = {len(x)}")
+
+        for i, (v, s) in enumerate(zip(x, spec)):
+            validate(v, var_name, s, f"[{i}]", allow_non_concrete)
+
+    else:
+        raise ValueError(f"Invalid spec. Expected TensorSpec, NoneTensorSpec, dict, list or tuple. Got spec{part} = {repr(spec)}")
+
+
 
 @export
 def funky_punky(n_0, n_max, n_total, base=2):
@@ -107,10 +199,56 @@ def set_default_indent(indent: int | str):
 
 
 debug = False
+@export
 def set_debug(to: bool = True):
     global debug
     debug = to
 
+# Run a keras model up to a specific layer
+@export
+def stats(val, indent=_default_indent, depth=0):
+    def stats(v):
+        print(tf_str(val, prefix="val: ", indent=indent, depth=depth))
+        # print(indent*(depth+1) + "mean:", tf.math.reduce_mean(v).numpy())
+        # print(indent*(depth+1) + "min:", tf.math.reduce_min(v).numpy())
+        # print(indent*(depth+1) + "max:", tf.math.reduce_max(v).numpy())
+        if v.dtype in [tf.float16, tf.float32, tf.float64]:
+            # print(indent*(depth+1) + "norm:", tf.linalg.norm(v).numpy())
+            # print(indent*(depth+1) + "std:", tf.math.reduce_std(v).numpy())
+            print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
+            print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
+            print(indent*(depth+1) + "is NaN?", tf.math.reduce_any(tf.math.is_nan(v)).numpy())
+    tf.nest.map_structure(stats, val)
+
+@export
+def mo_all(x, model, indent=_default_indent, depth=0):
+    print(indent*depth + model.name)
+    stats(model(x), indent=indent, depth=depth+1)
+    print()
+    val = x
+    for i in range(len(model.layers)):
+        l = model.layers[i]
+        try:
+            val = l(val)
+            if hasattr(l, "layers") and len(l.layers) > 0:
+                mo_all(val, l, depth=depth+1, indent=indent)
+            else:
+                print(indent*depth + l.name)
+                stats(val, depth=depth+1, indent=indent)
+                print()
+        except Exception as e:
+            print(indent*depth + l.name)
+            print(indent*(depth+1) + f"Error computing output for layer {i}: {l.name}")
+            print(indent*(depth+1) + str(e)[:100])
+            print()
+    print(indent*depth + model.name)
+    stats(model(x), indent=indent, depth=depth+1)
+    print()
+
+
+@export
+def is_debug():
+    return debug
 
 def primes():
     """
@@ -646,17 +784,25 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
     elif isinstance(x, list):
         return tf_list_repr(x, indent=indent, depth=depth, prefix=prefix)
 
-    elif isinstance(x, Dataset):
-        cardinality = x.cardinality()
-        if cardinality == tf.data.INFINITE_CARDINALITY:
-            cardinality = "∞"
+    elif isinstance(x, Dataset) or isinstance(x, tft.DatasetSpec):
+
+        if isinstance(x, Dataset):
+            mark = "●"
+            cardinality = x.cardinality()
+            if cardinality == tf.data.INFINITE_CARDINALITY:
+                cardinality = "∞"
+            else:
+                cardinality = tf.strings.as_string(cardinality)
         else:
-            cardinality = tf.strings.as_string(cardinality)
+            mark = "○"
+            cardinality = "?"
+
         prefix = tf.strings.join([
             prefix,
+            mark,
             "Dataset[",
             cardinality,
-            "]",
+            "] ",
         ])
         return tf_repr(x.element_spec, indent=indent, depth=depth, prefix=prefix)
     elif isinstance(x, tf.TensorSpec):
@@ -680,7 +826,7 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
         str_x = tf.constant(repr(x), tf.string)
     elif x.shape.rank == 0:
         if x.dtype == tf.string:
-            str_x = tf.strings.join(["\"", x, "\""])
+            str_x = tf.strings.join(["●\"", x, "\""])
         else:
             str_x = tf.strings.as_string(x)
     else:
@@ -774,7 +920,13 @@ def tf_print(s: SomeT, tag: str = None, output_stream=sys.stdout) -> SomeT:
         tag = "--- @ " + tag + "\n"
         tail = "\n---"
         depth = 1
-    tf.print(tf.strings.join([tag, tf_repr(s, depth=depth), tail]), output_stream=output_stream)
+    if tf.is_tensor(s) and is_keras_tensor(s):
+        s = s.type_spec
+    val = tf.strings.join([tag, tf_repr(s, depth=depth), tail])
+    if tf.executing_eagerly():
+        print(val.numpy().decode('utf-8'), flush=True)
+    else:
+        tf.print(val, output_stream=output_stream)
 
 @export
 def dbg(s: SomeT, tag: str = None) -> SomeT:
@@ -788,31 +940,111 @@ def dbg(s: SomeT, tag: str = None) -> SomeT:
 
 
 @export
-def tf_str(x) -> str:
-    return tf_repr(x).numpy().decode("utf-8")
+def tf_str(x, indent=_default_indent, depth=0, prefix="") -> str:
+    return tf_repr(x, indent=indent, depth=depth, prefix=prefix).numpy().decode("utf-8")
 
 def docstring_for_tf_repr_and_friends(fn_name):
     return """
 Implements a human-friendly of """ + fn_name + """ for tensorflow objects,
 which can be used in a tf.function.
 
+>>> tf_print(tf.constant(1))
+1
 >>> tf_str(tf.constant(1))
 '1'
+>>> tf_repr(tf.constant(1))
+<tf.Tensor: shape=(), dtype=string, numpy=b'1'>
+>>> tf_print(tf.zeros([3]))
+●float32[3]
 >>> tf_str(tf.zeros([3]))
 '●float32[3]'
->>> tf_str(tf.zeros([2, 3]))
-'●float32[2 3]'
->>> tf_str(tf.constant("hi"))
-'"hi"'
->>> tf_str(tf.TensorSpec([2, 3], tf.float32))
-'○float32[2 3]'
->>> tf_str({ 'a': tf.constant(1), 'b': tf.constant(2) })
-'{\\n  a: 1,\\n  b: 2,\\n}'
+>>> tf_print(tf.TensorSpec([2, 3], tf.int32))
+○int32[2 3]
+>>> tf_str(tf.TensorSpec([2, 3], tf.int32))
+'○int32[2 3]'
+>>> tf_print(tf.zeros([2, 3]))
+●float32[2 3]
+>>> tf_print({ "a": tf.zeros([2, 3]), "b": tf.zeros([3]) })
+{
+  a: ●float32[2 3],
+  b: ●float32[3],
+}
+>>> tf_print([ tf.zeros([2, 3]), tf.zeros([2, 3]) ])
+[
+  ●float32[2 3],
+  ...
+]
+>>> tf_print(( tf.zeros([2, 3]), tf.zeros([2, 3, 5]) ))
+(
+  ●float32[2 3],
+  ●float32[2 3 5],
+)
+>>> tf_print(tf.data.Dataset.range(10))
+●Dataset[10] ○int64[]
+>>> tf_print(tft.DatasetSpec(tf.TensorSpec([], tf.int64)))
+○Dataset[?] ○int64[]
 """
 
 tf_repr.__doc__ = docstring_for_tf_repr_and_friends("repr()")
 tf_str.__doc__ = docstring_for_tf_repr_and_friends("str()")
 tf_print.__doc__ = docstring_for_tf_repr_and_friends("print()")
+
+
+
+@export
+def multidim_idxs_to_flat_idxs(idxs, shape):
+    """
+    Convert a list of multidimensional indices to a list of flat indices.
+    Supports any number of batch dimensions.
+
+    >>> list(multidim_idxs_to_flat_idxs(
+    ...     idxs=[[0, 0],
+    ...           [0, 1],
+    ...           [1, 0],
+    ...           [1, 1]],
+    ...     shape=[2, 2]
+    ... ).numpy())
+    [0, 1, 2, 3]
+    >>> list(multidim_idxs_to_flat_idxs(
+    ...     idxs=[[0],
+    ...           [1],
+    ...           [2]],
+    ...     shape=[5],
+    ... ).numpy())
+    [0, 1, 2]
+    >>> tf_print(multidim_idxs_to_flat_idxs(
+    ...     idxs=[[[0],
+    ...            [1],
+    ...            [2]]],
+    ...     shape=[5],
+    ... ))
+    ●int32[1 3]
+    >>> tf_print(multidim_idxs_to_flat_idxs(
+    ...     idxs=[[[[0],
+    ...             [1],
+    ...             [2]]]],
+    ...     shape=[5],
+    ... ))
+    ●int32[1 1 3]
+    """
+
+    idxs = tf.convert_to_tensor(idxs)
+    shape = tf.convert_to_tensor(shape)
+
+    assert idxs.shape[-1] == len(shape)
+
+    if len(shape) == 1:
+        return idxs[..., 0]
+
+    # Multiply the indices by the strides, and sum them.
+    # compute strides
+    strides = tf.math.cumprod(shape, exclusive=True, reverse=True)
+    # broadcast strides have the same number of batch dimensions as idxs
+    strides = tf.reshape(strides, [1] * (len(idxs.shape) - 1) + [-1])
+    # broadcast idxs to the same shape as strides
+    idxs = idxs + tf.zeros_like(strides)
+    # multiply and sum
+    return tf.reduce_sum(idxs * strides, axis=-1)
 
 
 @export

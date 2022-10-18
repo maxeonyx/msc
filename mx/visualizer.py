@@ -1,4 +1,5 @@
 import abc
+from contextlib import ExitStack
 from os import PathLike
 import threading
 
@@ -17,23 +18,37 @@ class Visualization(abc.ABC):
     Base class for vizualizations.
     """
 
-    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
+    def __init__(self, name: str, desc: str, output_dir: PathLike | None):
         self.name = name
         self.desc = desc
-        if run_name is not None:
-            self.desc = f"Run '{run_name}': {self.desc}"
+
+        run_name = u.get_run_name()
+        if u.get_run_name() is not None:
+            self.desc = f"{self.desc} #{run_name}"
+
         self.output_dir = output_dir
 
-    def output_location(self, output_dir=None) -> Path:
+    def output_location(self, output_dir: PathLike = None) -> Path:
+        """
+        Output location, which is either a directory or a filename
+        depending on whether the visualization produces a single file
+        or many.
+        """
 
-        output_dir = (
+        run_name = u.get_run_name()
+        if run_name is None:
+            default_output_dir = Path("_outputs")
+        else:
+            default_output_dir = Path("_outputs") / run_name
+
+        output_dir = Path(
             output_dir
             or self.output_dir
-            or Path("_outputs") / "viz"
+            or default_output_dir
         )
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir / self.name
+        output_location = output_dir / "viz" / self.name
+        output_location.mkdir(parents=True, exist_ok=True)
+        return output_location
 
     @abc.abstractmethod
     def render(self, timestep=None, output_dir=None):
@@ -62,7 +77,7 @@ class Visualization(abc.ABC):
         uri = self._get_uri(output_dir)
         uri_message = f"""
 ╭───────────────────────────────────╼
-│ Open to view viz: "{self.desc}"
+│ Open visualization: {self.desc}
 │
 │     {uri}
 │
@@ -88,8 +103,8 @@ class StatefulVisualization(Visualization, abc.ABC):
 
     """
 
-    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
-        super().__init__(name, desc, run_name, output_dir)
+    def __init__(self, name: str, desc: str, output_dir: PathLike | None):
+        super().__init__(name, desc, output_dir)
 
 
     @abc.abstractmethod
@@ -122,8 +137,8 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
     the data returned by the "fn" function.
     """
 
-    def __init__(self, name: str, desc: str, run_name: str | None, output_dir: PathLike | None):
-        super().__init__(name, desc, run_name, output_dir)
+    def __init__(self, name: str, desc: str, output_dir: PathLike | None):
+        super().__init__(name, desc, output_dir)
         self._fig: hv.Layout = None
 
     @abc.abstractmethod
@@ -248,6 +263,22 @@ class Visualizer:
 
         self.cfgs = cfgs
 
+    def _spinner(self, viz, pm):
+        return pm.enter_spinner(
+            name=f"Visualize: {viz.name}",
+            desc=f"Creating visualization: {viz.desc} ...",
+            delete_on_success=True,
+        )
+
+    def __call__(self, timestep=None, pm: Progress=None, output_dir=None):
+        for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
+            with ExitStack() as stack:
+                if pm is not None:
+                    stack.push(self._spinner(viz, pm))
+                viz.render(timestep=timestep, output_dir=output_dir or self.output_dir)
+                viz.show(output_dir=output_dir or self.output_dir)
+
+
     def _do(self, event: str, timestep, pm: Progress):
         if tf.is_tensor(timestep):
             timestep = timestep.numpy()
@@ -258,13 +289,8 @@ class Visualizer:
             else:
                 output_dir = None
             if event in cfg["render_on"]:
-                with pm.enter_spinner(
-                    name=f"Visualize '{viz.name}'",
-                    desc=f"Visualizing '{viz.desc}'...",
-                    delete_on_success=True
-                ):
-                    viz.render(timestep=timestep, output_dir=output_dir)
-
+                with self._spinner(viz, pm):
+                    viz.render(timestep=timestep, output_dir=output_dir or self.output_dir)
             if event in cfg["show_on"]:
                 # show the visualization
                 viz.show(output_dir=output_dir)

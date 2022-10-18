@@ -57,10 +57,10 @@ def metric_format(metrics_dict: dict[str, MxMetric]):
         val = m.result()
 
         width_nopad = width - 2
-        if m.fmt is not None:
-            s = m.fmt.format(val)
-        elif val is None:
+        if val is None:
             s = f"{' ... ':^{width_nopad}}"
+        elif m.fmt is not None:
+            s = m.fmt.format(val)
         elif isnan(val):
             s = f"{' NaN ':^{width_nopad}}"
         elif isinstance(val, int):

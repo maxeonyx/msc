@@ -92,7 +92,8 @@ class RunningMean(MxMetric):
 class Rolling(MxMetric):
 
     @tf_scope
-    def __init__(self, length, fn, unit: str = None, element_shape=[], dtype=tf.float32, reduction_fn=tf.reduce_mean, name="rolling", reset_every_epoch=True, fmt: str = None):
+    def __init__(self, length, fn, unit: str = None, element_shape=[], dtype=None, reduction_fn=tf.reduce_mean, name="rolling", reset_every_epoch=True, fmt: str = None):
+        dtype = dtype or u.dtype()
         if isinstance(fn, MxMetric):
             unit = fn.unit
             self.fn = fn.update
@@ -140,7 +141,8 @@ class Rolling(MxMetric):
         return self._result().numpy()
 
 class InstantaneousMetric(MxMetric):
-    def __init__(self, fn, unit: str = None, dtype=tf.float32, name="instantaneous", reset_every_epoch=True, fmt: str = None):
+    def __init__(self, fn, unit: str = None, dtype=None, name="instantaneous", reset_every_epoch=True, fmt: str = None):
+        dtype = dtype or u.dtype()
         if isinstance(fn, MxMetric):
             unit = fn.unit
             self.fn = fn.update
@@ -166,5 +168,5 @@ class InstantaneousMetric(MxMetric):
 
 def wrap_loss_fn_for_metrics(loss_fn):
     def wrapped_loss_fn(inputs):
-        return loss_fn(inputs["targets"], inputs["outputs"])
+        return loss_fn([inputs["targets"], inputs["outputs"]])
     return wrapped_loss_fn

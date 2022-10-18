@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from typing import Callable, Literal, Type
 
@@ -42,7 +43,7 @@ class MxDataset(abc.ABC):
     def configure(self, task: Task):
         pass
 
-    def adapt(self, dsets: DSets) -> DSets:
+    def adapt(self, dsets: DSets, batch_size, test_batch_size) -> DSets:
         """
         Adapt a dataset from raw format to task-specific task-input format
         """
@@ -50,6 +51,18 @@ class MxDataset(abc.ABC):
         assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.adapt(ds)"
 
         dsets = dsets.map(self.adapt_in)
+
+        dsets.train.map(lambda x: {
+            **x,
+            "extra": None,
+        })
+        dsets.val.map(lambda x: {
+            **x,
+            "extra": None,
+        })
+
+        dsets = dsets.batch(batch_size, test_batch_size)
+
         dsets = dsets.cache()
 
         return dsets
@@ -119,18 +132,23 @@ class MxDataset(abc.ABC):
 
         return dsets
 
+
+
+@dataclass
+class Task_DatasetConfig:
+    n_input_dims: int
+    "Dimensionality of input vectors (recieved by run from dataset)"
+
+    already_batched: bool
+    "Whether the dataset is already batched"
+
+@dataclass
+class Task_ModelConfig:
+    n_output_embd: int
+    "Number of output embedding dimensions (recieved by final layer from model)"
+
 @export
 class Task(abc.ABC):
-
-    @dataclass
-    class DatasetSpecificConfig:
-        n_input_dims: int
-        "Dimensionality of input vectors (recieved by run from dataset)"
-
-    @dataclass
-    class ModelSpecificConfig:
-        n_output_embd: int
-        "Number of output embedding dimensions (recieved by final layer from model)"
 
     def __init__(
         self,
@@ -145,12 +163,12 @@ class Task(abc.ABC):
         "Unique, machine-readable identifier"
 
         self.does_batching = does_batching
-        "Whether the task does its own batching"
+        "Whether the task or the dataset does batching"
 
-        self.ds_config_type: Type[Task.DatasetSpecificConfig] = Task.DatasetSpecificConfig
+        self.ds_config_type: Type[Task_DatasetConfig] = Task_DatasetConfig
         "Required dataset-specific config"
 
-        self.model_config_type: Type[Task.ModelSpecificConfig] = Task.ModelSpecificConfig
+        self.model_config_type: Type[Task_ModelConfig] = Task_ModelConfig
         "Required model-specific config"
 
         ## Configured by self.recieve_dataset_config(cfg) ##
@@ -163,13 +181,14 @@ class Task(abc.ABC):
     def recieve_dataset_config(self, cfg):
         assert isinstance(cfg, self.ds_config_type), f"Expected {self.ds_config_type}, got {type_name(cfg)}"
         self.ds_cfg = cfg
+        self.does_batching = cfg.already_batched
 
     def recieve_model_config(self, cfg):
         assert isinstance(cfg, self.model_config_type), f"Expected {self.model_config_type}, got {type_name(cfg)}"
         self.model_cfg = cfg
 
     @abc.abstractmethod
-    def configure(self, cfg, embedding: Embedding):
+    def configure(self, cfg, embedding: MxEmbedding):
         """
         Configure this task for outputting in the format required by the given embedding,
         and provide any task-specific config required by that embedding.
@@ -203,16 +222,16 @@ class Task(abc.ABC):
     def make_predict_fn(self, model) -> Callable:
         pass
 
+@dataclass
+class Embedding_TaskConfig:
+    n_input_dims: int
+    "Size of the input vector (recieved from the task)."
+
 @export
-class Embedding(abc.ABC):
+class MxEmbedding(abc.ABC):
     """
     Base class for embeddings.
     """
-
-    @dataclass
-    class TaskSpecificConfig:
-        n_input_dims: int
-        "Size of the input vector (recieved from the task)."
 
     def __init__(
         self,
@@ -229,12 +248,12 @@ class Embedding(abc.ABC):
         self.n_embd = n_embd
         "Number of embedding dimensions"
 
-        self.task_config_type: Type[Embedding.TaskSpecificConfig] = Embedding.TaskSpecificConfig
+        self.task_config_type: Type[Embedding_TaskConfig] = Embedding_TaskConfig
 
         ## set by self.recieve_task_config(cfg) ##
-        self.task_cfg: Embedding.TaskSpecificConfig = None
+        self.task_cfg: Embedding_TaskConfig = None
 
-    def receive_task_config(self, cfg: TaskSpecificConfig):
+    def receive_task_config(self, cfg: Embedding_TaskConfig):
         assert isinstance(cfg, self.task_config_type), f"Expected {self.task_config_type}, got {type_name(cfg)}"
         self.task_cfg = cfg
 
@@ -246,29 +265,30 @@ class Embedding(abc.ABC):
     def make_embedder(self) -> Model:
         pass
 
+
+@dataclass
+class Model_EmbeddingConfig:
+    n_embd: int
+    """Number of embedding dimensions."""
+
 @export
 class MxModel(abc.ABC):
-
-    @dataclass
-    class EmbeddingSpecificConfig:
-        n_embd: int
-        "Number of embedding dimensions."
 
     def __init__(
         self,
         name: str,
-        identifier: str,
+        desc: str,
     ):
         self.name = name
-        "Human-readable name"
+        "Machine-friendly name"
 
-        self.identifier = identifier
-        "Unique, machine-readable identifier"
+        self.desc = desc
+        "Human-friendly description"
 
-        self.embd_cfg_type: Type[MxModel.EmbeddingSpecificConfig] = MxModel.EmbeddingSpecificConfig
+        self.embd_cfg_type: Type[Model_EmbeddingConfig] = Model_EmbeddingConfig
 
         ## set by self.recieve_embedding_config(cfg) ##
-        self.embd_cfg: MxModel.EmbeddingSpecificConfig = None
+        self.embd_cfg: Model_EmbeddingConfig = None
 
     def recieve_embd_config(self, cfg):
         assert isinstance(cfg, self.embd_cfg_type), f"Expected {self.embd_cfg_type}, got {type_name(cfg)}"
@@ -286,7 +306,7 @@ class MxModel(abc.ABC):
 @dataclass
 class Pipeline:
 
-    def __init__(self, batch_size: int,  n_steps: int, dataset: MxDataset, task: Task, embedding: Embedding, model: MxModel, name: str, desc: str, test_batch_size: int = None, viz_batch_size: int = 3) -> None:
+    def __init__(self, batch_size: int,  n_steps: int, dataset: MxDataset, task: Task, embedding: MxEmbedding, model: MxModel, name: str, desc: str, n_models: int = 1, use_float16: bool = False, test_batch_size: int = None, viz_batch_size: int = 3) -> None:
 
         self.batch_size = batch_size
         self.test_batch_size = test_batch_size or batch_size
@@ -294,10 +314,12 @@ class Pipeline:
         self.n_steps = n_steps
 
         # check identifier is machine-friendly
-        assert re.match(r"^[a-z][a-z0-9_\-]+$", name), f"'{name}' is not a valid identifier, use only a-z, 0-9, _, -"
+        assert re.match(r"^[a-zA-Z][a-zA-Z0-9_\-]+$", name), f"'{name}' is not a valid identifier, use only a-z, 0-9, _, -"
 
         self.name = name
         self.desc = desc
+
+        self.use_float16 = use_float16
 
         # configure:
         #     raw data --> data generator
@@ -320,45 +342,103 @@ class Pipeline:
         self.task = task
         self.embedding = embedding
         self.mx_model = model
+        self.n_models = n_models
 
-        self._model: Model = None
+        self._output_dir = None
 
+    def model_name(self, i: int = None):
 
-    def new_model(self):
-        "Create a new model instance."
+        assert self.n_models == 1 or (self.n_models > 1 and i is not None), "Must provide i when n_models > 1"
+
+        if i is not None:
+            suffix = f"_{i}"
+        else:
+            suffix = ""
+
+        return type_name(self.embedding) + '_' + type_name(self.mx_model) + suffix
+
+    def new_model(self, i: int = None) -> Model:
+        "Create a new model instance, and save the model definition to disk."
         embedder = self.embedding.make_embedder()
-        model = self.mx_model.make_model()
+        backbone = self.mx_model.make_model()
         final_layer = self.task.make_final_layer()
 
-        self._model = Model(
+        model = Model(
             inputs=embedder.inputs,
-            outputs=final_layer(model(embedder.outputs)),
-            name=type(self.embedding).__name__ + '-' + type(self._model).__name__
+            outputs=final_layer(backbone(embedder(embedder.inputs))),
+            name=self.name,
         )
 
-        return self._model
+        model.save(self.output_dir() / model.name)
 
-    def get_model(self) -> Model:
-        "Create a new model, or return the existing one if it exists."
-        if self._model is not None:
-            return self._model
+        return model
+
+    def output_dir(self):
+
+        if self._output_dir is not None:
+            return self._output_dir
+
+        run_name = u.get_run_name()
+
+        date = datetime.now().date()
+        time = datetime.now().isoformat(timespec='seconds')
+
+        if run_name == "dev":
+            run_dir = f"dev-{time}"
+        elif run_name is None:
+            run_dir = f"interactive-{time}"
+        else:
+            run_dir = f"{date}-{run_name}"
+
+        if run_name is not None:
+            output_dir = Path("_outputs") / run_dir / self.name
+        else:
+            output_dir = Path("_outputs") / self.name
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self._output_dir = output_dir
+        return output_dir
+
+    def make_or_load_model(self, force_new=False) -> Model:
+        "Create a new model, or load the existing one if it exists. Model definitions are saved on creation."
+
+        assert self.n_models == 1, "Can't make_or_load_model() when n_models > 1. Use make_or_load_models() instead."
+
+        if not force_new:
+            try:
+                return keras.models.load_model(self.output_dir() / self.model_name())
+            except OSError:
+                pass
 
         return self.new_model()
 
-    def get_loss_fn(self) -> Callable[..., tf.Tensor]:
+    def make_or_load_models(self, force_new=False):
+        "Yield models. Load, or create new models. Model definitions are saved on creation."
+
+        assert self.n_models > 1, "Can't make_or_load_models() when n_models == 1. Use make_or_load_model() instead."
+
+        if not force_new:
+            try:
+                for i in range(self.n_models):
+                    yield keras.models.load_model(self.output_dir() / self.model_name(i))
+                return
+            except OSError:
+                pass
+        for i in range(self.n_models):
+            yield self.new_model(i)
+
+    def make_loss_fn(self) -> Callable[..., tf.Tensor]:
         return self.task.make_loss_fn()
 
-    def get_train_data(self, force_cache_reload: bool = False) -> tf.data.Dataset:
+    def make_train_data(self, force_cache_reload: bool = False) -> tf.data.Dataset:
 
         dsets = self.dataset.load(force_cache_reload=force_cache_reload)
-        dsets = self.dataset.adapt(dsets)
+        dsets = self.dataset.adapt(dsets, self.batch_size, self.test_batch_size)
         dsets = self.task.process(dsets)
         dsets = self.task.adapt(dsets)
 
         d = dsets.train
-
-        if not self.task.does_batching:
-            d = d.batch(self.batch_size)
 
         d = (
             d
@@ -367,23 +447,6 @@ class Pipeline:
             .map(lambda i, x: (i, (x["inputs"], x["targets"])))
         )
 
-        d = d.prefetch(tf.data.experimental.AUTOTUNE)
+        d = d.prefetch(100)
 
         return d
-
-    def get_visualizer(self, viz_cfgs: dict[str, VizCfg] = {}, viz_batch_size: int = None, run_name=None, output_dir=None) -> Visualizer:
-
-        viz_batch_size = viz_batch_size or self.viz_batch_size
-
-        model = self.get_model()
-        predict_fn = self.task.make_predict_fn(model)
-        vizs = self.dataset.get_visualizations(
-            viz_batch_size=viz_batch_size,
-            task_specific_predict_fn=predict_fn,
-            run_name=run_name,
-        )
-        return Visualizer(
-            visualizations=vizs,
-            configs=viz_cfgs,
-            output_dir=output_dir
-        )

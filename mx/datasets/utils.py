@@ -16,8 +16,8 @@ def weighted_random_n(n_max, D=2., B=10., seed=None):
     The probability of each index decreases by D every power of b
     """
 
-    B, D, n_max = tf.cast(B, tf.float32), tf.cast(
-        D, tf.float32), tf.cast(n_max, tf.float32)
+    B, D, n_max = tf.cast(B, u.dtype()), tf.cast(
+        D, u.dtype()), tf.cast(n_max, u.dtype())
 
     def logb1p(b, x): return tf.math.log1p(x)/tf.math.log(b)
     # probabilities
@@ -40,12 +40,12 @@ def make_decimate(threshold: float, dims: Einshape, other_params: list[tuple[Ein
 
     if len(other_dims) == 0:
         input_signature=[
-            tf.TensorSpec(shape=dims.s_f_shape, dtype=tf.float32),
+            tf.TensorSpec(shape=dims.s_f_shape, dtype=u.dtype()),
         ]
     else:
         other_seqs_tspec = tuple([tf.TensorSpec(shape=d.s_f_shape, dtype=t) for d, t in other_params])
         input_signature = [
-            tf.TensorSpec(shape=dims.s_f_shape, dtype=tf.float32),
+            tf.TensorSpec(shape=dims.s_f_shape, dtype=u.dtype()),
             *other_seqs_tspec,
         ]
 

@@ -111,7 +111,7 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
         if normalization_type == "softmax":
 
             # scale to unit vectors
-            e = tf.cast(embd_shape.f_product, tf.float32)
+            e = tf.cast(embd_shape.f_product, u.dtype())
             attn_logits = attn_logits * 1./tf.sqrt(e)
 
             if causal_mask:
@@ -126,7 +126,7 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
                 attn_logits *= mask
                 scales = mask_scales
             else:
-                d = tf.cast(embd_shape.s_product, tf.float32)
+                d = tf.cast(embd_shape.s_product, u.dtype())
                 scales = 1./tf.sqrt(d)
                 scales = scales[None]
 

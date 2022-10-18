@@ -1,10 +1,19 @@
+from mx.embeddings.vector_embeddings import DebugCodebook, Multidim_TaskConfig, VectorCodebookMultidim
 from mx.prelude import *
 
-from mx.utils import DSets
-from mx.tasks.utils import make_get_chunk
-from mx.embeddings import TransformerAngleVectorEmbedding, TransformerMultidim
-from mx.pipeline import Task, Embedding
+from mx.utils import DSets, dtype, inspect, is_debug
+from mx.tasks.utils import make_get_chunk, make_get_chunk_batched_ragged
+from mx.embeddings import AngleVectorSequence, VectorSinusoidalMultidim
+from mx.pipeline import Task, MxEmbedding, Task_DatasetConfig
 
+
+@export
+@dataclass
+class VectorSequenceMSE_DatasetConfig(Task_DatasetConfig):
+    f"""
+    Dataset-specific configuration for VectorSequenceMSE
+    """
+    seq_dims: list[int]
 
 @export
 @dataclass
@@ -17,12 +26,6 @@ class VectorSequenceMSE(Task):
     Mean-squared-error loss.
     """
 
-    @dataclass
-    class DatasetSpecificConfig(Task.DatasetSpecificConfig):
-        f"""
-        Dataset-specific configuration for VectorSequenceMSE
-        """
-        seq_dims: list[int]
 
     def __init__(self, chunk_size: int, pred_seed_len: int = 0, pred_output_len: int = None, n_test_val_repeats: int = 100):
         super().__init__(
@@ -51,10 +54,10 @@ class VectorSequenceMSE(Task):
         """
 
         ## set by dataset.configure(task) ##
-        self.ds_config_type: Type[VectorSequenceMSE.DatasetSpecificConfig] = VectorSequenceMSE.DatasetSpecificConfig
+        self.ds_config_type: Type[VectorSequenceMSE_DatasetConfig] = VectorSequenceMSE_DatasetConfig
         "Required dataset-specific config"
 
-        self.ds_cfg: VectorSequenceMSE.DatasetSpecificConfig = None
+        self.ds_cfg: VectorSequenceMSE_DatasetConfig = None
 
         # self.model_config_type: Type[Task.ModelSpecificConfig] = Task.ModelSpecificConfig
         # "Required model-specific config"
@@ -62,12 +65,12 @@ class VectorSequenceMSE(Task):
         assert self.pred_seed_len < self.pred_output_len, f"pred_seed_len must be less than pred_output_len. Got pred_seed_len={self.pred_seed_len} and pred_output_len={self.pred_output_len}"
 
 
-    def configure(self, embedding: Embedding):
+    def configure(self, embedding: MxEmbedding):
 
         assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
 
         ### Set embedding down_cfg ###
-        if isinstance(embedding, TransformerMultidim):
+        if isinstance(embedding, VectorCodebookMultidim):
             embedding.receive_task_config(embedding.task_config_type(
                 n_input_dims=self.ds_cfg.n_input_dims,
                 seq_len=self.chunk_size,
@@ -82,34 +85,46 @@ class VectorSequenceMSE(Task):
                     }
                 }
             self.adapt_in = adapt_in
+        elif embedding.task_config_type == Multidim_TaskConfig:
+            embedding.receive_task_config(embedding.task_config_type(
+                n_input_dims=self.ds_cfg.n_input_dims,
+                seq_dims=self.ds_cfg.seq_dims,
+            ))
+            def adapt_in(x):
+                return {
+                    **x,
+                    "inputs": {
+                        "values": x["inputs"]["values"],
+                        "seq_idxs": x["inputs"]["seq_idxs"],
+                    }
+                }
+            self.adapt_in = adapt_in
         else:
-            raise NotImplementedError(f"Embedding type {type_name(embedding)} not implemented")
+            raise NotImplementedError(f"Task {type_name(self)} does not support Embedding {type_name(embedding)}. If using autoreload in IPython, try restarting the interpreter.")
 
     def process(self, dsets: DSets) -> DSets:
 
         assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
         assert self.adapt_in is not None, "Must call task.configure(embedding) first"
 
-        element_spec = dsets.train.element_spec
-
-        assert type(element_spec) is dict, f"{self.identifier} requires a dataset of dicts"
-
-        for k in element_spec.keys():
-            assert k in dsets.test.element_spec, f"Test set was different from train set: {k} was missing"
-            assert k in dsets.val.element_spec, f"Val set was different from train set: {k} was missing"
-
-        assert "values" in element_spec, f"{self.identifier} requires a dataset with a 'values' key"
-        assert len(element_spec["values"].shape) == 2, f"Data for {self.identifier} must have only a single sequence dimension and a single feature dimension. Got shape {element_spec['values'].shape}"
-
-        assert "seq_idxs" in element_spec, f"{self.identifier} requires a dataset with a 'seq_idxs' key"
-        assert len(element_spec["seq_idxs"].shape) == 2, f"seq_idxs for {self.identifier} must have shape [seq, n_idxs]. Got shape {element_spec['seq_idxs'].shape}"
-
-        assert element_spec["values"].shape[0] == element_spec["seq_idxs"].shape[0], f"Data and seq_idxs must have the same sequence length. Got {element_spec['values'].shape[0]} ≠ {element_spec['seq_idxs'].shape[0]}"
-
-        assert dsets.test.element_spec["values"] == element_spec["values"], "Test set was different from train set: data shape was different"
-        assert dsets.test.element_spec["seq_idxs"] == element_spec["seq_idxs"], "Test set was different from train set: seq_idxs shape was different"
-        assert dsets.val.element_spec["values"] == element_spec["values"], "Val set was different from train set: data shape was different"
-        assert dsets.val.element_spec["seq_idxs"] == element_spec["seq_idxs"], "Val set was different from train set: seq_idxs shape was different"
+        u.validate(dsets, "dsets", {
+            "train": tft.DatasetSpec({
+                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                # "extra": tft.NoneTensorSpec(),
+            }),
+            "val": tft.DatasetSpec({
+                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                # "extra": tft.NoneTensorSpec(),
+            }),
+            "test": tft.DatasetSpec({
+                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                # "extra": {} # optional keys here
+            }),
+        })
+        seq_len = dsets.train.element_spec["values"].shape[1]
 
         # repeat data in order to take many random chunks from each sequence
         train, test, val = dsets.destructure()
@@ -125,34 +140,47 @@ class VectorSequenceMSE(Task):
         )
 
         # dset = dset.map(inspect("repeat"))
+        if seq_len != self.chunk_size:
 
-        get_chunk = make_get_chunk(self.chunk_size)
+            get_chunk = make_get_chunk_batched_ragged(self.chunk_size)
 
-        def do_chunk(x):
+            def do_chunk(x):
 
-            data, seq_idxs = get_chunk([
-                x["values"],
-                x["seq_idxs"],
-            ])
+                data, seq_idxs = get_chunk([
+                    x["values"],
+                    x["seq_idxs"],
+                ])
 
-            return {
-                **x,
-                "values": data,
-                "seq_idxs": seq_idxs,
-            }
+                return {
+                    **x,
+                    "values": data,
+                    "seq_idxs": seq_idxs,
+                }
 
-        # chunk
-        dsets = dsets.map(do_chunk)
+            # chunk
+            dsets = dsets.map(do_chunk)
+        else:
+            print("Not chunking seqs")
+
+        dsets = dsets.map(lambda x: {
+            **x,
+            "values": tf.ensure_shape(x["values"], [None, self.chunk_size, self.ds_cfg.n_input_dims]),
+            "seq_idxs": tf.ensure_shape(x["seq_idxs"], [None, self.chunk_size, len(self.ds_cfg.seq_dims)]),
+        })
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["values"][:-1],
-                "seq_idxs": x["seq_idxs"][:-1],
+                "values": x["values"][:, :-1, :],
+                "seq_idxs": x["seq_idxs"][:, :-1, :],
                 "target_idxs": x["seq_idxs"],
             },
             "targets": x["values"],
             "extra": x["extra"],
         })
+
+        # dsets.map(lambda x: dbg(x, "pre-embed"))
+
+        # dbg(dsets)
 
         return dsets
 
@@ -167,17 +195,26 @@ class VectorSequenceMSE(Task):
 
         dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims, name="dense")
 
+        def call(inputs):
+            embd = inputs["embd"]
+            outputs = dense(embd)
+            if u.is_debug():
+                tf.cond(
+                    tf.reduce_any(tf.math.is_nan(outputs)),
+                    lambda: tf.print(f"WARNING: NaNs in outputs of {self.identifier}."),
+                    lambda: tf.print(f"WARNING: No NaNs in outputs of {self.identifier}."),
+                )
+            return outputs
+
         return Model(
             inputs=inputs,
-            outputs={
-                "values": dense(inputs["embd"]),
-                **inputs,
-            },
+            outputs=call(inputs),
             name="outputs",
         )
 
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Mean-squared error loss function"
+
 
         def loss_fn(targets, inputs):
 
@@ -185,7 +222,13 @@ class VectorSequenceMSE(Task):
 
             return tf.reduce_mean(tf.square(targets - outputs))
 
-        return loss_fn
+        inputs = (
+            Input([None, self.ds_cfg.n_input_dims], name="targets"),
+            u.input_dict(
+                Input([None, self.ds_cfg.n_input_dims], name="values"),
+            ),
+        )
+        return Model(inputs=inputs, outputs=loss_fn(*inputs), name="loss_fn")
 
     def make_predict_fn(self, model):
         """
@@ -195,69 +238,53 @@ class VectorSequenceMSE(Task):
         assert self.adapt_in is not None, "Must call task.configure(embedding) first"
 
         @tf.function
-        def predict_fn(seed_inputs, idxs, out_var: tf.Variable):
+        def predict_fn(seed_inputs, seq_idxs, out_var: tf.Variable):
             batch_size = tf.shape(seed_inputs)[0]
             seed_len = tf.shape(seed_inputs)[1]
 
-            tf.assert_equal(tf.shape(idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
+            tf.assert_equal(tf.shape(seq_idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
 
             out_var[:, :seed_len, :].assign(seed_inputs)
 
             n = out_var.shape[1]
             for i in tf.range(seed_len, n): # converted to tf.while_loop
                 inputs = {
-                    "values": out_var[:, :i, :],
-                    "seq_idxs": idxs[:, :i],
+                    "values": out_var[:, :i],
+                    "seq_idxs": seq_idxs[:, :i],
                 }
                 outputs = model(inputs, training=False)
-                out = outputs["values"]
-                out_var[:, i, :].assign(out[:, -1, :])
+                out_var[:, i, :].assign(outputs[:, -1, :])
             return out_var
 
         warned = False
         def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
             nonlocal warned
 
-            assert isinstance(inputs, dict),           f"inputs must be a dict. Got {type_name(inputs)}"
-
-            assert "values" in inputs,                 f"inputs must contain key 'values'. Got {inputs.keys()}"
+            u.validate(inputs, "inputs", {
+                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+            })
             data = inputs["values"]
-            assert tf.is_tensor(data),                 f"inputs['values'] must be a tensor. Got {type_name(inputs['values'])}"
-            assert len(data.shape) in [2, 3],          f"inputs['values'] must be a 2D or 3D tensor. Got {inputs['values'].shape}"
-
-            if len(data.shape) == 2:
-                data = tf.expand_dims(data, 0)
-
-            assert data.dtype == tf.float32,           f"inputs['values'] must be a float32 tensor. Got {inputs['values'].dtype}"
-
-            assert "seq_idxs" in inputs,               f"inputs must contain key 'seq_idxs'. Got {inputs.keys()}"
             seq_idxs = inputs["seq_idxs"]
-            assert tf.is_tensor(seq_idxs),             f"inputs['seq_idxs'] must be a tensor. Got {type_name(inputs['seq_idxs'])}"
-            assert len(seq_idxs.shape) in [2, 3],      f"inputs['seq_idxs'] must be a 2D or 3D tensor. Got {inputs['seq_idxs'].shape}"
+            batch_size = shape(data)[0]
+            seq_len = shape(data)[1]
+            n_features = shape(data)[2]
 
-            if len(seq_idxs.shape) == 2:
-                seq_idxs = tf.expand_dims(seq_idxs, 0)
+            assert seed_len <= seq_len,   f"seed_len must be less than or equal to the sequence length. Got {seed_len} and {seq_len}"
+            assert output_len > 0,        f"output_len must be greater than 0. Got {output_len}"
+            assert seed_len < output_len, f"seed_len must be less than output_len. Got {seed_len} and {output_len}"
 
-            assert seq_idxs.dtype == tf.int32,         f"inputs['seq_idxs'] must be a int32 tensor. Got {inputs['seq_idxs'].dtype}"
 
-            assert data.shape[0] == seq_idxs.shape[0], f"inputs['values'] and inputs['seq_idxs'] must have the same batch size. Got {inputs['values'].shape[0]} and {inputs['seq_idxs'].shape[0]}"
-            batch_size = data.shape[0]
-            assert data.shape[1] == seq_idxs.shape[1], f"inputs['values'] and inputs['seq_idxs'] must have the same sequence length. Got {inputs['values'].shape[1]} and {inputs['seq_idxs'].shape[1]}"
-            seq_len = data.shape[1]
-            assert seed_len <= seq_len,                f"seed_len must be less than or equal to the sequence length. Got {seed_len} and {seq_len}"
-            assert output_len > 0,                     f"output_len must be greater than 0. Got {output_len}"
-            assert seed_len < output_len,              f"seed_len must be less than output_len. Got {seed_len} and {output_len}"
-
-            if output_len > self.chunk_size:
+            if output_len > self.chunk_size and not warned:
                 print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.chunk_size}", file=sys.stderr)
                 warned = True
 
             seed_input = data[:, :seed_len, :]
 
-            n_features = data.shape[2]
-
-            out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features]))
+            out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features], u.dtype()))
             predict_fn(seed_input, seq_idxs, out_var)
+            if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)):
+                tf.print(f"WARNING: NaNs in outputs of {self.identifier}.")
             return {
                 "values": out_var,
             }
@@ -306,7 +333,7 @@ class VectorSequenceAngleMSE(Task):
         assert self.pred_seed_len < self.pred_output_len, f"pred_seed_len must be less than pred_output_len. Got pred_seed_len={self.pred_seed_len} and pred_output_len={self.pred_output_len}"
 
 
-    def configure(self, embedding: Embedding):
+    def configure(self, embedding: MxEmbedding):
 
         assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
 
@@ -314,7 +341,7 @@ class VectorSequenceAngleMSE(Task):
         sequence_length = self.chunk_size
 
         ### Set embedding down_cfg ###
-        if isinstance(embedding, TransformerAngleVectorEmbedding):
+        if isinstance(embedding, AngleVectorSequence):
             embedding.receive_task_config(embedding.task_config_type(
                 n_input_dims,
                 sequence_length,
@@ -329,33 +356,27 @@ class VectorSequenceAngleMSE(Task):
                 }
             self.adapt_in = adapt_in
         else:
-            raise NotImplementedError(f"Embedding type {type_name(embedding)} not implemented")
+            raise NotImplementedError(f"Task {type_name(self)} does not support Embedding {type_name(embedding)}. If using autoreload in IPython, try restarting the interpreter.")
 
     def process(self, dsets: DSets) -> DSets:
 
         assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
         assert self.adapt_in is not None, "self.adaptor was not set by task.configure(embedding)"
 
-        element_spec = dsets.train.element_spec
-
-        assert type(element_spec) is dict, "Next-vector-prediction requires a dataset of dicts"
-
-        for k in element_spec.keys():
-            assert k in dsets.test.element_spec, f"Test set was different from train set: {k} was missing"
-            assert k in dsets.val.element_spec, f"Val set was different from train set: {k} was missing"
-
-        assert "data" in element_spec, "Next-vector-prediction requires a dataset with a 'data' key"
-        assert len(element_spec["data"].shape) == 2, f"Data for next-vector-prediction must have only a single sequence dimension, and a single feature dimension. Got shape {element_spec['data'].shape}"
-
-        assert "seq_idxs" in element_spec, "Next-vector-prediction requires a dataset with a 'seq_idxs' key"
-        assert len(element_spec["seq_idxs"].shape) == 1, f"seq_idxs for next-vector-prediction must have shape [seq]. Got shape {element_spec['seq_idxs'].shape}"
-
-        assert element_spec["data"].shape[0] == element_spec["seq_idxs"].shape[0], f"Data and seq_idxs must have the same sequence length. Got {element_spec['data'].shape[0]} ≠ {element_spec['seq_idxs'].shape[0]}"
-
-        assert dsets.test.element_spec["data"] == element_spec["data"], "Test set was different from train set: data shape was different"
-        assert dsets.test.element_spec["seq_idxs"] == element_spec["seq_idxs"], "Test set was different from train set: seq_idxs shape was different"
-        assert dsets.val.element_spec["data"] == element_spec["data"], "Val set was different from train set: data shape was different"
-        assert dsets.val.element_spec["seq_idxs"] == element_spec["seq_idxs"], "Val set was different from train set: seq_idxs shape was different"
+        u.validate(dsets, "dsets", {
+            "train": {
+                "data": tf.TensorSpec([None, None], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None], tf.int32),
+            },
+            "val": {
+                "data": tf.TensorSpec([None, None], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None], tf.int32),
+            },
+            "test": {
+                "data": tf.TensorSpec([None, None], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None], tf.int32),
+            },
+        })
 
         # repeat data in order to take many random chunks from each sequence
         train, test, val = dsets.destructure()
@@ -412,9 +433,15 @@ class VectorSequenceAngleMSE(Task):
         )
         dense = tf.keras.layers.Dense(self.ds_cfg.n_input_dims * 2)
         def call(inputs):
-            outs = dense(inputs["embd"])
-            outs = ein.rearrange(outs, "... seq (feat sincos) -> ... seq feat sincos", sincos=2)
-            return { "unit_vectors": outs, **inputs }
+            outputs = dense(inputs["embd"])
+            outputs = ein.rearrange(outputs, "... seq (feat sincos) -> ... seq feat sincos", sincos=2)
+            if u.is_debug():
+                tf.cond(
+                    tf.reduce_any(tf.math.is_nan(outputs)),
+                    lambda: tf.print(f"WARNING: NaNs in outputs of {self.identifier}."),
+                    lambda: tf.print(f"WARNING: No NaNs in outputs of {self.identifier}."),
+                )
+            return outputs
 
         return Model(
             inputs=inputs,
@@ -438,7 +465,13 @@ class VectorSequenceAngleMSE(Task):
             cos = unit_vectors[..., 1]
             return tf.reduce_mean(tf.square(target_sin - sin) + tf.square(target_cos - cos))
 
-        return angular_mse_loss
+        inputs = (
+            Input([None, self.ds_cfg.n_input_dims], name="targets"),
+            u.input_dict(
+                Input([None, self.ds_cfg.n_input_dims, 2], name="unit_vectors"),
+            ),
+        )
+        return Model(inputs=inputs, outputs=angular_mse_loss(**inputs), name="loss_fn")
 
     def make_predict_fn(self, model):
         """
@@ -466,46 +499,30 @@ class VectorSequenceAngleMSE(Task):
                     "seq_idxs": idxs[:, :i],
                 }
                 outputs = model(inputs, training=False)
-                out = outputs["unit_vectors"]
-                out = unit_vector_to_angle(out[:, -1, :, :])
-                out_var[:, i, :].assign(out)
+                outputs = unit_vector_to_angle(outputs[:, -1, :, :])
+                out_var[:, i, :].assign(outputs)
             return out_var
 
         warned = False
         def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
             nonlocal warned
 
-            assert isinstance(inputs, dict),           f"inputs must be a dict. Got {type_name(inputs)}"
+            # new style validation using u.validate
 
-            assert "data" in inputs,                   f"inputs must contain key 'data'. Got {inputs.keys()}"
+            u.validate(inputs, "inputs", {
+                "data": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None], tf.int32),
+            })
             data = inputs["data"]
-            assert tf.is_tensor(data),                 f"inputs['data'] must be a tensor. Got {type_name(inputs['data'])}"
-            assert len(data.shape) in [2, 3],          f"inputs['data'] must be a 2D or 3D tensor. Got {inputs['data'].shape}"
-
-            if len(data.shape) == 2:
-                data = tf.expand_dims(data, 0)
-
-            assert data.dtype == tf.float32,           f"inputs['data'] must be a float32 tensor. Got {inputs['data'].dtype}"
-
-            assert "seq_idxs" in inputs,               f"inputs must contain key 'seq_idxs'. Got {inputs.keys()}"
             seq_idxs = inputs["seq_idxs"]
-            assert tf.is_tensor(seq_idxs),             f"inputs['seq_idxs'] must be a tensor. Got {type_name(inputs['seq_idxs'])}"
-            assert len(seq_idxs.shape) in [1, 2],      f"inputs['seq_idxs'] must be a 2D tensor. Got {inputs['seq_idxs'].shape}"
+            batch_size = shape(data)[0]
+            seq_len = shape(data)[1]
 
-            if len(seq_idxs.shape) == 1:
-                seq_idxs = tf.expand_dims(seq_idxs, 0)
+            assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
+            assert output_len > 0, f"output_len ({output_len}) must be > 0"
 
-            assert seq_idxs.dtype == tf.int32,         f"inputs['seq_idxs'] must be a int32 tensor. Got {inputs['seq_idxs'].dtype}"
 
-            assert data.shape[0] == seq_idxs.shape[0], f"inputs['data'] and inputs['seq_idxs'] must have the same batch size. Got {inputs['data'].shape[0]} and {inputs['seq_idxs'].shape[0]}"
-            batch_size = data.shape[0]
-            assert data.shape[1] == seq_idxs.shape[1], f"inputs['data'] and inputs['seq_idxs'] must have the same sequence length. Got {inputs['data'].shape[1]} and {inputs['seq_idxs'].shape[1]}"
-            seq_len = data.shape[1]
-            assert seed_len <= seq_len,                f"seed_len must be less than or equal to the sequence length. Got {seed_len} and {seq_len}"
-            assert output_len > 0,                     f"output_len must be greater than 0. Got {output_len}"
-            assert seed_len < output_len,              f"seed_len must be less than output_len. Got {seed_len} and {output_len}"
-
-            if output_len > self.chunk_size:
+            if output_len > self.chunk_size and not warned:
                 print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.chunk_size}", file=sys.stderr)
                 warned = True
 
@@ -515,6 +532,9 @@ class VectorSequenceAngleMSE(Task):
 
             out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features]))
             predict_fn(seed_input, seq_idxs, out_var)
+            if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)).numpy():
+                raise ValueError(f"NaNs in output of predict_fn of {self.identifier}")
+
             return {
                 "angles": out_var,
             }
@@ -527,14 +547,14 @@ if __name__ == '__main__':
     task = VectorSequenceMSE(
         chunk_size=13,
     )
-    embedding = TransformerMultidim(
+    embedding = VectorSinusoidalMultidim(
         n_embd=128,
     )
 
     task.recieve_dataset_config(task.ds_config_type(
-
-        n_seq_dims=2,
+        seq_dims=[100, 100],
         n_input_dims=3,
+        already_batched=False,
     ))
 
     task.configure(embedding)
@@ -556,6 +576,7 @@ if __name__ == '__main__':
         val=data.skip(4000).take(500),
         test=data.skip(4500),
     )
+    data = data.batch(5, 5)
 
     dbg(data, "task input")
     data = dbg(task.process(data), "task output")

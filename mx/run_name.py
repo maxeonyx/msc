@@ -19,3 +19,7 @@ def get_run_name() -> str | None:
         return os.environ["RUN_NAME"]
     except KeyError:
         return None
+
+@export
+def set_run_name(run_name) -> str | None:
+    os.environ["RUN_NAME"] = run_name

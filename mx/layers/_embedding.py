@@ -2,7 +2,7 @@ from enum import Enum
 
 from mx.prelude import *
 from ._blocks import featurewise_dense
-from mx.utils import Einshape
+from mx.utils import Einshape, tf_scope
 
 @export
 def codebook(n_tokens: int, embd_shape: Einshape, add_begin_token: bool = True, name="codebook") -> Model:
@@ -31,49 +31,66 @@ def prepend_token(token: tokens, n_embd: int, name="prepend_token") -> Model:
 
     assert token in tokens, f"Unknown token {tokens!r}, must be one of {list(tokens.__members__)!r}"
 
-    token_embedding = layers.Embedding(len(tokens), n_embd, name=f"{name}/begin_embd")
+    initializer = tf.keras.initializers.TruncatedNormal(stddev=1/sqrt(n_embd))
+
+    token_embedding = layers.Embedding(len(tokens), n_embd, embeddings_initializer=initializer, name=f"{name}/begin_embd")
 
     tf_token = tf.constant(token.value, tf.int32)
 
-    def call(embd):
+    def call(input):
+        embd = inputs["embd"]
         batch_size = shape(embd)[0]
-        tokens = tf.tile([tf_token], [batch_size])
+
+        tokens = tf.repeat(tf_token[None], batch_size[None])
+        tokens = tokens[:, None]
         token_embd = token_embedding(tokens)
-        token_embd = ein.rearrange(token_embd, 'b embd -> b () embd')
         embd = tf.concat([token_embd, embd], axis=1) # concat along first sequence dim
         return embd
 
     inputs = u.input_dict(
-        Input(shape=[None, n_embd], dtype=tf.float32, name="embd"),
+        Input(shape=[None, n_embd], dtype=u.dtype(), name="embd"),
     )
 
-    return Model(inputs=inputs, outputs=call(**inputs), name=name)
+    return Model(inputs=inputs, outputs=call(inputs), name=name)
 
 @export
-def positional_embedding(seq_len, embd_dim) -> Model:
-    assert embd_dim % 2 == 0, f"embd_dim must be divisible by 2 to use positional encoding, got embd_dim={embd_dim}"
+def positional_embedding(n_embd, max_wavelength=10000, name="embd") -> Model:
+    assert n_embd % 2 == 0, f"embd_dim must be divisible by 2 to use positional encoding, got embd_dim={n_embd}"
 
-    i = tf.range(embd_dim//2)
-    i = tf.cast(i, dtype=tf.float32)
-    i = tf.expand_dims(i, -2)
+    # based from the keras source code
+    # https://github.com/keras-team/keras-nlp/blob/v0.3.0/keras_nlp/layers/sine_position_encoding.py#L21
 
-    scale = tf.pow(scale, 2.*i/embd_dim)
+    @tf_scope
+    def positional_encoding(inputs):
+        idxs = inputs["idxs"]
+        position = tf.cast(idxs, u.dtype())
+        min_freq = 1. / max_wavelength
+        timescales = tf.pow(
+            min_freq,
+            tf.range(n_embd, dtype=tf.float32) / n_embd
+        )
+        timescales = tf.cast(timescales, u.dtype())
+        position = ein.rearrange(position, '... seq -> ... seq ()')
+        timescales = ein.rearrange(timescales, '... embd -> ... () embd')
+        angles = position * timescales
+        # even indices are sine, odd are cosine
+        cos_mask = tf.cast(tf.range(n_embd) % 2, u.dtype())
+        sin_mask = 1 - cos_mask
+        # embedding shape is [seq_length, hidden_size]
+        positional_encodings = (
+            tf.sin(angles) * sin_mask + tf.cos(angles) * cos_mask
+        )
 
-    def call(vals):
-        vals = tf.expand_dims(vals, -1)
-        vals = tf.cast(vals, tf.float32)
-        # the bit inside the sin / cos
-        rate = pi*vals / scale
-        sin = tf.sin(rate)
-        cos = tf.cos(rate)
-        encoding = tf.concat([sin, cos], axis=-1)
-        return encoding
+        # scale norm. because we use sin/cos we scale by 1/sqrt(D/2) instead of 1/sqrt(D)
+        positional_encodings *= tf.cast(tf.math.sqrt(tf.cast(n_embd // 2, u.dtype())), u.dtype())
+
+        return positional_encodings
 
     inputs = u.input_dict(
-        Input(shape=[], dtype=tf.int32, name="index"),
+        Input(shape=[None], dtype=tf.int32, name="idxs"),
     )
 
-    return Model(inputs=inputs, outputs=call(inputs), name="embd")
+    return Model(inputs=inputs, outputs=positional_encoding(inputs), name=name)
 
 @export
 def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshape, name="angle_embd") -> Model:
@@ -90,7 +107,7 @@ def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshap
 
     def angle_call(angles):
         scale = (tau / 4.) * (1. / num_repeats) # only need to produce rotations up to tau/4, because the model can easily invert angles
-        offsets = tf.range(num_repeats, dtype=tf.float32) * scale
+        offsets = tf.range(num_repeats, dtype=u.dtype()) * scale
         # add "repeats" dim
         angles = angles[..., None]
         angles = angles + tf.broadcast_to(offsets, tf.broadcast_dynamic_shape(tf.shape(offsets), tf.shape(angles)))
@@ -102,7 +119,7 @@ def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshap
         return embd
 
     inputs = u.input_dict(
-        Input(shape=input_shape.s_f_shape, dtype=tf.float32, name="angles"),
+        Input(shape=input_shape.s_f_shape, dtype=u.dtype(), name="angles"),
     )
 
     return Model(inputs=inputs, outputs=angle_call(**inputs), name=name)
