@@ -3,6 +3,7 @@ enlighten
 wandb
 tensorflow
 tensorflow_probability
+tensorflow_datasets
 keras-nlp
 python-box
 randomname
