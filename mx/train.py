@@ -1,4 +1,3 @@
-from curses import flushinp
 from dataclasses import dataclass
 import json
 import math

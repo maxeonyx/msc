@@ -1,8 +1,6 @@
 import re
 import pickle
 
-from dotmap import DotMap as dm
-
 from mx.prelude import *
 
 from ._bvh_templates import TEMPLATE_BVH, TEMPLATE_RIGHT_HAND_BVH, TEMPLATE_LEFT_HAND_BVH
@@ -41,7 +39,7 @@ def extract_bvh_file(file_content):
     for i in range(n_frames):
         nums.append(list(map(float, next(lines).strip().split(' '))))
 
-    return dm({
+    return Box({
         "n_frames": n_frames,
         "frame_time_s": frame_time_s,
         "data": np.array(nums, dtype=np.float32),

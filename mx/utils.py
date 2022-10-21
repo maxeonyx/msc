@@ -4,8 +4,6 @@ import functools
 import itertools
 from typing import Dict
 
-from box import Box
-
 # these two imports are actually from tensorflow.python, not just for type checking
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.module.module import camel_to_snake

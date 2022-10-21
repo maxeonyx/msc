@@ -160,7 +160,13 @@ class Resnet(MxModel):
     Resnet for sequence prediction. Limited to predicting based on only the previous tokens.
     """
 
-    def __init__(self, n_layers: int, n_hidden: int, dropout: float = 0, name="resnet") -> None:
+    def __init__(
+        self,
+        n_layers: int,
+        n_hidden: int,
+        dropout: float = 0,
+        name="resnet",
+    ) -> None:
         super().__init__(
             name=name,
             desc=f"Resnet with {n_layers} layers, {n_hidden} hidden units, and dropout {dropout}",
@@ -238,7 +244,12 @@ class DebugMLP(MxModel):
     Debugging model that just does 2 dense layers.
     """
 
-    def __init__(self, n_hidden: int, dropout: float = 0, name="debug_mlp") -> None:
+    def __init__(
+        self,
+        n_hidden: int,
+        dropout: float = 0,
+        name="debug_mlp",
+    ) -> None:
         super().__init__(
             name=name,
             desc="Debugging model that just does 2 dense layers.",
