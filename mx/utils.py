@@ -38,14 +38,6 @@ def optimizations(options):
   finally:
     tf.config.optimizer.set_experimental_options(old_opts)
 
-
-
-
-
-
-
-
-
 @export
 def validate(x, var_name, spec, part="", allow_non_concrete=False):
     """
@@ -111,8 +103,6 @@ def validate(x, var_name, spec, part="", allow_non_concrete=False):
 
     else:
         raise ValueError(f"Invalid spec. Expected TensorSpec, NoneTensorSpec, dict, list or tuple. Got spec{part} = {repr(spec)}")
-
-
 
 @export
 def funky_punky(n_0, n_max, n_total, base=2):
@@ -202,7 +192,7 @@ def set_default_indent(indent: int | str):
         _default_indent = indent
 
 
-debug = False
+debug = True
 @export
 def set_debug(to: bool = True):
     global debug

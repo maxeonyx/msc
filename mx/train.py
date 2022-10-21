@@ -372,6 +372,13 @@ def make_train_loop(
                         last_epoch_loss = None
                         with sub_pm.enter_progbar(total=n_steps, name=f"Epoch {train_loop.i_epoch + 1}", desc=f"Epoch {train_loop.i_epoch + 1}", delete_on_success=not is_last_epoch) as (sub_sub_pm, epoch_prog_bar):
 
+                            print(
+                                train_loop.data_iterator,
+                                train_loop.i_step,
+                                train_loop.i_step + n_steps,
+                                break_var,
+                            )
+
                             exc = None
                             def run_in_thread():
                                 nonlocal exc

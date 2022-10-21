@@ -27,11 +27,17 @@ class AngleVectorSequence(MxEmbedding):
     Embeds positions with a codebook.
     """
 
-    def __init__(self, n_embd: int, n_repeats: int) -> None:
+    def __init__(
+        self,
+        n_embd: int,
+        n_repeats: int,
+        name="angleembd",
+        desc="Angle vector embedding. Embeds angles as unit vectors, and positions with a codebook.",
+    ) -> None:
         super().__init__(
-            desc="TransformerAngleVectorEmbedding",
-            name="transformer_angle_vector",
-            n_embd=n_embd
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
         )
         self.n_repeats = n_repeats
         "Number of additional rotations of each angle to be added to the embedding."
@@ -108,11 +114,17 @@ class AngleSinusoidalSequence(MxEmbedding):
     Embeds positions with a sinusoidal positional encoding.
     """
 
-    def __init__(self, n_embd: int, n_repeats: int) -> None:
+    def __init__(
+        self,
+        n_embd: int,
+        n_repeats: int,
+        name="transformer_angle_vector",
+        desc="TransformerAngleVectorEmbedding",
+    ) -> None:
         super().__init__(
-            desc="TransformerAngleVectorEmbedding",
-            name="transformer_angle_vector",
-            n_embd=n_embd
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
         )
         self.n_repeats = n_repeats
         "Number of additional rotations of each angle to be added to the embedding."
@@ -204,11 +216,16 @@ class VectorCodebookMultidim(MxEmbedding):
     with a codebook, and the scalars are embedded with a dense layer.
     """
 
-    def __init__(self, n_embd: int) -> None:
+    def __init__(
+        self,
+        n_embd: int,
+        name="codebook",
+        desc="Code-book based transformer embedding for multi-dimensional sequences.",
+    ) -> None:
         super().__init__(
-            desc="Code-book based transformer embedding for multi-dimensional sequences.",
-            name="codebook",
-            n_embd=n_embd
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
         )
 
         self.task_config_type: Type[VectorCodebookMultidim_TaskConfig] = VectorCodebookMultidim_TaskConfig
@@ -308,11 +325,16 @@ class VectorSinusoidalMultidim(MxEmbedding):
     with a codebook, and the scalars are embedded with a dense layer.
     """
 
-    def __init__(self, n_embd: int) -> None:
+    def __init__(
+        self,
+        n_embd: int,
+        name="codebook_sinusoidal",
+        desc="Code-book based transformer embedding for multi-dimensional sequences.",
+    ) -> None:
         super().__init__(
-            desc="Code-book based transformer embedding for multi-dimensional sequences.",
-            name="codebook_sinusoidal",
-            n_embd=n_embd
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
         )
 
         self.task_config_type: Type[Multidim_TaskConfig] = Multidim_TaskConfig
@@ -379,12 +401,94 @@ class VectorSinusoidalMultidim(MxEmbedding):
 
 
 @export
-class DebugCodebook(MxEmbedding):
-    def __init__(self, n_embd: int) -> None:
+class DebugCodebookTriples(MxEmbedding):
+    def __init__(
+        self,
+        n_embd: int,
+        name="debugtriples",
+        desc="Debug codebook (triples)",
+    ) -> None:
         super().__init__(
-            desc="Debug codebook.",
-            name="debugembd",
-            n_embd=n_embd
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
+        )
+
+        self.task_config_type: Type[Multidim_TaskConfig] = Multidim_TaskConfig
+        self.task_cfg: Multidim_TaskConfig = None
+
+    def configure(self, model: MxModel):
+        if model.embd_cfg_type == Model_EmbeddingConfig:
+            model.recieve_embd_config(model.embd_cfg_type(
+                n_embd=self.n_embd,
+            ))
+        else:
+            raise NotImplementedError(f"Embedding {type_name(self)} does not support Model {type_name(model)}. If using autoreload in IPython, try restarting the interpreter.")
+
+    def make_embedder(self) -> Model:
+        "Creats the keras model for the embedding."
+
+        assert self.task_cfg is not None, "Must call task.configure(embedding) before embedding.make_embedder()."
+
+        assert self.n_embd % (len(self.task_cfg.seq_dims) * 2) == 0, "n_embd must be divisible by 2D where D is the number of sequence dimensions."
+
+        inp_pos_embedder = layers.Embedding(prod(self.task_cfg.seq_dims), self.n_embd, name=f"{self.name}/inp_pos_embd")
+        tar_pos_embedder = layers.Embedding(prod(self.task_cfg.seq_dims), self.n_embd, name=f"{self.name}/tar_pos_embd")
+        dense_in = layers.Dense(self.n_embd, use_bias=True, name=f"{self.name}/val_embd")
+
+        prepend_begin_token = mxl.prepend_token(
+            token=mxl.tokens.BEGIN,
+            n_embd=self.n_embd,
+        )
+
+        def embed(inputs):
+
+            ## make angle embeddings
+            vals = inputs["values"]
+
+            vals = tf.cast(vals, u.dtype())
+
+            val_embd = dense_in(vals)
+
+            ## make position embeddings
+            inp_idxs = inputs["inp_idxs"]
+            inp_idxs = u.multidim_idxs_to_flat_idxs(inp_idxs, self.task_cfg.seq_dims)
+            inp_pos_embd = inp_pos_embedder(inp_idxs)
+
+            inp_embd = prepend_begin_token(val_embd + inp_pos_embd)
+
+            tar_idxs = inputs["tar_idxs"]
+            tar_idxs =  u.multidim_idxs_to_flat_idxs(tar_idxs, self.task_cfg.seq_dims)
+            tar_pos_embd = tar_pos_embedder(tar_idxs)
+
+            embd = tar_pos_embd + inp_embd
+
+            return embd
+
+        inputs = u.input_dict(
+            Input([None, self.task_cfg.n_input_dims],  dtype=u.dtype(), name="values"),
+            Input([None, len(self.task_cfg.seq_dims)], dtype=tf.int32,  name="inp_idxs"),
+            Input([None, len(self.task_cfg.seq_dims)], dtype=tf.int32,  name="tar_idxs"),
+        )
+        return Model(
+            inputs=inputs,
+            outputs=embed(inputs),
+            name=self.name,
+        )
+
+
+@export
+class DebugCodebook(MxEmbedding):
+    def __init__(
+        self,
+        n_embd: int,
+        name="debugembd",
+        desc="Debug codebook.",
+    ) -> None:
+        super().__init__(
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
         )
 
         self.task_config_type: Type[Multidim_TaskConfig] = Multidim_TaskConfig

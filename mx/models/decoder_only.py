@@ -19,10 +19,18 @@ class DecoderOnlyTransformer(MxModel):
         - layer norm
     """
 
-    def __init__(self, n_layers: int, n_heads: int, n_hidden: int, dropout: float = 0, name="decoder_only_transformer") -> None:
+    def __init__(
+        self,
+        n_layers: int,
+        n_heads: int,
+        n_hidden: int,
+        dropout: float = 0,
+        name="deconly",
+        desc=None,
+    ) -> None:
         super().__init__(
             name=name,
-            desc=f"Decoder-only transformer with {n_layers} layers, {n_heads} heads, {n_hidden} hidden units, and dropout {dropout}",
+            desc=desc or f"Decoder-only transformer with {n_layers} layers, {n_heads} heads, {n_hidden} hidden units, and dropout {dropout}",
         )
 
         self.n_layers = n_layers

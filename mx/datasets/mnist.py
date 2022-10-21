@@ -6,6 +6,7 @@ from mx.prelude import *
 
 from mx.pipeline import MxDataset, Task
 from mx.tasks import VectorSequenceMSE
+from mx.tasks.vector_sequence_mse import RandomSequenceMSE
 from mx.utils import DSets
 from mx.visualizer import HoloMapVisualization, Visualization
 
@@ -68,8 +69,8 @@ class MxMNIST(MxDataset):
 
     def configure(self, task: Task):
 
-        if isinstance(task, VectorSequenceMSE):
-            task.recieve_dataset_config(task.ds_config_type(
+        if isinstance(task, VectorSequenceMSE) or isinstance(task, RandomSequenceMSE):
+            task.recieve_dataset_config(task.ds_config_cls(
                 seq_dims=[28, 28],
                 n_input_dims=1, # grayscale
                 already_batched=True,
@@ -188,87 +189,71 @@ class MNISTImageViz(HoloMapVisualization):
                 aspect='equal',
             )
 
+        def key(batch, timestep):
+
+            if tf.is_tensor(timestep) and timestep.dtype == tf.string:
+                timestep = u.tf_str(timestep)
+            elif tf.is_tensor(timestep) and timestep.dtype == tf.int32:
+                timestep = timestep.numpy()
+
+            if timestep is None:
+                return (batch,)
+            elif batch is None:
+                return (timestep,)
+            else:
+                return (batch, timestep)
+
+        def title(batch, timestep):
+
+            if tf.is_tensor(timestep) and timestep.dtype == tf.string:
+                timestep = u.tf_str(timestep)
+            elif tf.is_tensor(timestep):
+                timestep = timestep.numpy()
+
+            if batch is None:
+                batch = ""
+            else:
+                batch = f" {batch}"
+
+            if timestep is None:
+                return f"Image{batch}"
+            elif isinstance(timestep, str):
+                return f"Image{batch} @ {timestep}"
+            else:
+                return f"Image{batch} @ step={timestep}"
+
         hmaps = []
+
+        key_dims = [
+            hv.Dimension(("batch", "Batch")),
+        ]
+        hmaps.append(hv.GridSpace(
+            {
+                (i_batch): img(data["image"][i_batch], f"Example {i_batch}")
+                for i_batch in range(len(data["image"]))
+            },
+            kdims=key_dims,
+            label="Examples"
+        ))
 
         if self._task_predict_fn is not None:
             task_predict_fn = self._task_predict_fn
             adapt_in = self._adapt_in
             adapt_out = self._adapt_out
 
+            # predict blind. Make a batch of 784 predictions, one for each pixel
+            # in the image, each with a specific target idx.
             empty_seq = {
                 "values": tf.zeros([784, 0, 1], dtype=u.dtype()),
-                "seq_idxs": tf.zeros([784, 0, 2], dtype=tf.int32),
+                "seq_idxs": ein.rearrange(u.multidim_indices([28, 28]), 'hw i -> hw 1 i'),
             }
-
             pred_blind = task_predict_fn(empty_seq, output_len=1)
             pred_blind = adapt_out({
                 "values": ein.rearrange(pred_blind["values"], '(h w) 1 c -> 1 (h w) c', h=28, w=28)
             })
-            u.stats(pred_blind["image"])
-
-            pred = adapt_out(
-                task_predict_fn(
-                    inputs=adapt_in(data),
-                    seed_len=784//2,
-                    output_len=784,
-                )
-            )
-            u.stats(pred["image"])
-
-            key_dims = [
-                hv.Dimension(("batch", "Batch")),
-            ]
-            if timestep is not None:
-                key_dims.append(hv.Dimension(("timestep", "Timestep")))
-
-            def key(batch, timestep):
-
-                if tf.is_tensor(timestep) and timestep.dtype == tf.string:
-                    timestep = u.tf_str(timestep)
-                elif tf.is_tensor(timestep) and timestep.dtype == tf.int32:
-                    timestep = timestep.numpy()
-
-                if timestep is None:
-                    return (batch,)
-                elif batch is None:
-                    return (timestep,)
-                else:
-                    return (batch, timestep)
-
-            def title(batch, timestep):
-
-                if tf.is_tensor(timestep) and timestep.dtype == tf.string:
-                    timestep = u.tf_str(timestep)
-                elif tf.is_tensor(timestep):
-                    timestep = timestep.numpy()
-
-                if batch is None:
-                    batch = ""
-                else:
-                    batch = f" {batch}"
-
-                if timestep is None:
-                    return f"Image{batch}"
-                elif isinstance(timestep, str):
-                    return f"Image{batch} @ {timestep}"
-                else:
-                    return f"Image{batch} @ step={timestep}"
-
-            hmaps.extend([
-                hv.GridSpace(
-                    {
-                        key(i_batch, timestep): img(pred_data[i_batch], title(i_batch, timestep))
-                        for i_batch in range(len(pred_data))
-                    },
-                    kdims=key_dims,
-                    label=f"Predicted Images ({name})",
-                )
-                for name, pred_data in pred.items()
-            ])
-
 
             if timestep is not None:
-                key_dims = [hv.Dimension(("timestep", "Timestep"))]
+                key_dims = [hv.Dimension(("timestep", "Timestep"), default=timestep)]
                 hmaps.append(
                     hv.HoloMap(
                         {
@@ -283,18 +268,33 @@ class MNISTImageViz(HoloMapVisualization):
                     img(pred_blind["image"][0], title(None, None))
                 )
 
+            pred = adapt_out(
+                task_predict_fn(
+                    inputs=adapt_in(data),
+                    seed_len=784//2,
+                    output_len=784,
+                )
+            )
+            u.stats(pred["image"])
 
-        key_dims = [
-            hv.Dimension(("batch", "Batch")),
-        ]
-        hmaps.append(hv.GridSpace(
-            {
-                (i_batch): img(data["image"][i_batch], f"Example {i_batch}")
-                for i_batch in range(len(data["image"]))
-            },
-            kdims=key_dims,
-            label="Examples"
-        ))
+            key_dims = [
+                hv.Dimension(("batch", "Batch")),
+            ]
+            if timestep is not None:
+                key_dims.append(hv.Dimension(("timestep", "Timestep"), default=timestep))
+
+            hmaps.extend([
+                hv.GridSpace(
+                    {
+                        key(i_batch, timestep): img(pred_data[i_batch], title(i_batch, timestep))
+                        for i_batch in range(len(pred_data))
+                    },
+                    kdims=key_dims,
+                    label=f"Predicted Images ({name})",
+                )
+                for name, pred_data in pred.items()
+            ])
+
 
         return hmaps
 

@@ -28,14 +28,14 @@ class BvhDataset(MxDataset):
         n_hands: Literal[1, 2] = 2,
         n_joints_per_hand: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] = 17,
         n_dof_per_joint: Literal[1, 2, 3] = 3,
-        name="BVH dataset",
-        identifier="bvh",
+        desc="BVH dataset",
+        name="bvh",
         split=(0.8, 0.1, 0.1),
         split_seed=1234,
     ):
         super().__init__(
-            desc=name,
-            name=identifier,
+            desc=desc,
+            name=name,
         )
         self.recluster = recluster
         """Whether to recluster the angles to have a circular mean of 0."""
@@ -67,7 +67,7 @@ class BvhDataset(MxDataset):
         n_input_dims = self.n_hands * self.n_joints_per_hand * self.n_dof_per_joint
 
         if isinstance(task, VectorSequenceAngleMSE):
-            task.recieve_dataset_config(task.ds_config_type(
+            task.recieve_dataset_config(task.ds_config_cls(
                 n_input_dims=n_input_dims,
             ))
             def adapt_in(x):

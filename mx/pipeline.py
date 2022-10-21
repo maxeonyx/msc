@@ -150,22 +150,23 @@ class Task_ModelConfig:
 @export
 class Task(abc.ABC):
 
+
     def __init__(
         self,
         name: str,
-        identifier: str,
+        desc: str,
         does_batching: bool = False,
     ):
         self.name = name
-        "Human-readable name"
-
-        self.identifier = identifier
         "Unique, machine-readable identifier"
+
+        self.desc = desc
+        "Human-readable name"
 
         self.does_batching = does_batching
         "Whether the task or the dataset does batching"
 
-        self.ds_config_type: Type[Task_DatasetConfig] = Task_DatasetConfig
+        self.ds_config_cls: Type[Task_DatasetConfig] = Task_DatasetConfig
         "Required dataset-specific config"
 
         self.model_config_type: Type[Task_ModelConfig] = Task_ModelConfig
@@ -179,7 +180,7 @@ class Task(abc.ABC):
         self.adapt_in: Callable[[DSets], DSets] | None = None
 
     def recieve_dataset_config(self, cfg):
-        assert isinstance(cfg, self.ds_config_type), f"Expected {self.ds_config_type}, got {type_name(cfg)}"
+        assert isinstance(cfg, self.ds_config_cls), f"Expected {self.ds_config_cls}, got {type_name(cfg)}"
         self.ds_cfg = cfg
         self.does_batching = cfg.already_batched
 
