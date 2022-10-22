@@ -17,6 +17,26 @@ export("get_run_name")
 export("random_run_name")
 export("set_run_name")
 
+
+SomeFnT = TypeVar("SomeFnT", bound=Callable)
+@export
+def tf_function(f: SomeFnT, *args, **kwargs) -> SomeFnT:
+    return tf.function(f, *args, **kwargs)
+
+rgb_warned = False
+@export
+def v_to_rgb_grayscale(x):
+    global rgb_warned
+    if x.shape[-1] == 1:
+        return tf.concat([x, x, x], axis=-1)
+    elif x.shape[-1] == 3:
+        if not rgb_warned:
+            print("WARNING: feature dim has length 3, might already be RGB")
+            rgb_warned = True
+        return tf.stack([x, x, x], axis=-1)
+    else:
+        return tf.stack([x, x, x], axis=-1)
+
 @export
 def dtype() -> tft.DType:
     policy = keras.mixed_precision.global_policy()

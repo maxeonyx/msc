@@ -5,12 +5,8 @@ from mx.export import export
 
 @export
 def random_run_name() -> str:
-    try:
-        run_name = os.environ["RUN_NAME"]
-    except KeyError:
-        import randomname
-        run_name = randomname.get_name()
-    return run_name
+    import randomname
+    return randomname.get_name()
 
 @export
 def get_run_name() -> str | None:

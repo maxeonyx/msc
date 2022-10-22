@@ -73,7 +73,7 @@ class MxMNIST(MxDataset):
             task.recieve_dataset_config(task.ds_config_cls(
                 seq_dims=[28, 28],
                 n_input_dims=1, # grayscale
-                already_batched=True,
+                
             ))
             def adapt_in(x):
 

@@ -276,7 +276,7 @@ class DebugMLP(MxModel):
 
     def make_model(self) -> Model:
 
-        assert self.embd_cfg is not None, "Must call task.configure(model) before calling make_model()"
+        assert self.embd_cfg is not None, "Must call embedding.configure(model) before calling make_model()"
 
         layer1 = Dense(self.n_hidden, activation='relu', kernel_regularizer=u.reg())
         layer2 = Dense(self.embd_cfg.n_embd, activation='relu', kernel_regularizer=u.reg())

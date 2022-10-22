@@ -5,7 +5,7 @@ from mx.prelude import *
 
 from mx.utils import DSets, dtype, inspect, is_debug
 from mx.tasks.utils import make_get_chunk, make_get_chunk_batched_ragged, make_get_random_slices_batched_ragged
-from mx.embeddings import AngleVectorSequence, VectorSinusoidalMultidim
+from mx.embeddings import AngleCodebook, VectorSinusoidalMultidim
 from mx.pipeline import Task, MxEmbedding, Task_DatasetConfig
 
 
@@ -627,7 +627,7 @@ class VectorSequenceAngleMSE(Task):
         sequence_length = self.chunk_size
 
         ### Set embedding down_cfg ###
-        if isinstance(embedding, AngleVectorSequence):
+        if isinstance(embedding, AngleCodebook):
             embedding.receive_task_config(embedding.task_config_type(
                 n_input_dims,
                 sequence_length,
@@ -734,7 +734,6 @@ class VectorSequenceAngleMSE(Task):
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Angular mean-squared-error loss."
 
-        @tf.function
         @u.tf_scope
         def angular_mse_loss(targets, outputs):
             "Angular mean-squared-error loss."
@@ -753,7 +752,7 @@ class VectorSequenceAngleMSE(Task):
                 Input([None, self.ds_cfg.n_input_dims, 2], name="unit_vectors"),
             ),
         )
-        return Model(inputs=inputs, outputs=angular_mse_loss(**inputs), name="loss_fn")
+        return Model(inputs=inputs, outputs=angular_mse_loss(*inputs), name="loss_fn")
 
     def make_predict_fn(self, model):
         """
@@ -787,6 +786,73 @@ class VectorSequenceAngleMSE(Task):
 
         warned = False
         def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
+            """
+            Produce a bunch of stuff that can be visualized.
+
+            N = the number of sequences to sample, if sampling.
+
+
+            If the model output is a distribution, we get multiple samples rather than just one prediction,
+            and we also get to look at the entropy.
+
+            If the model supports querying over the entire sequence at once, we get previews of the mean,
+            entropy etc. as it samples.
+
+            A "Video" shows:
+                a. The "seed" inputs at each step
+                b. The predicted outputs at each step
+                c. An image of the sampling order
+
+                (If the model supports querying)
+                c. The mean of the remaining outputs at each step
+
+                (If the model output is a distribution)
+                d. The entropy of the remaining outputs at each step
+
+            #### What this function returns ####
+
+
+            1.  "Examples". Just the inputs repeated back.
+
+            (The remainder only if a model has been provided)
+
+            2.  A video of each of the examples being taken bit-by-bit. For models that support
+                querying, looking at frame 0 of this video gives us the model's "blind" prediction,
+                and the mean should show the mean/modal value of each position in the dataset.
+
+            (If the model supports querying)
+            3.  A video of each of the examples being taken bit-by-bit, in random order.
+
+            (If seed inputs are provided)
+            4.  "Seeded" predictions: Predict each output position given the previous output positions
+                starting with a batch of seed inputs.
+
+                a. One video of the mean/modal sequence
+
+                (If the model output is a distribution)
+                b. N videos of sampled sequences
+
+            5.  "Unseeded" predictions: Predict each output position given the previous output positions,
+                starting with only the begin token.
+
+                a. One video of the mean/modal sequence
+
+                (If the model output is a distribution)
+                b. N videos of sampled sequences
+
+            (If the model output is a distribution & supports querying)
+            5. "Dynamic order" predictions: Predict each output position given the previous output positions,
+                starting with only the begin token, but with the order of the output positions chosen based
+                on some statistic of the distribution.
+
+                a. Highest-entropy-first
+                    a. One video of the mean/modal sequence
+                    b. N videos of sampled sequences
+                b. Lowest-entropy-first
+                    a. One video of the mean/modal sequence
+                    b. N videos of sampled sequences
+
+            """
             nonlocal warned
 
             # new style validation using u.validate
@@ -852,7 +918,6 @@ if __name__ == '__main__':
         #     ),
         #     task_ds_cfg=VectorSequenceAngleMSE.self.ds_config_cls(
         #         n_input_dims=3,
-        #         already_batched=True,
         #     ),
         #     embd=AngleVectorSequence(
         #         n_embd=10,
@@ -866,7 +931,6 @@ if __name__ == '__main__':
             ),
             task_ds_cfg=MultidimTask_DatasetConfig(
                 n_input_dims=3,
-                already_batched=True,
                 seq_dims=[100, 100],
             ),
             embd=DebugCodebook(
@@ -880,7 +944,6 @@ if __name__ == '__main__':
             ),
             task_ds_cfg=MultidimTask_DatasetConfig(
                 n_input_dims=3,
-                already_batched=True,
                 seq_dims=[100, 100],
             ),
             embd=DebugCodebookTriples(

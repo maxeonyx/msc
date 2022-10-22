@@ -50,6 +50,8 @@ class MxDataset(abc.ABC):
 
         assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.adapt(ds)"
 
+        dsets = dsets.batch(batch_size, test_batch_size)
+
         dsets = dsets.map(self.adapt_in)
 
         dsets.train.map(lambda x: {
@@ -60,8 +62,6 @@ class MxDataset(abc.ABC):
             **x,
             "extra": None,
         })
-
-        dsets = dsets.batch(batch_size, test_batch_size)
 
         dsets = dsets.cache()
 
@@ -139,9 +139,6 @@ class Task_DatasetConfig:
     n_input_dims: int
     "Dimensionality of input vectors (recieved by run from dataset)"
 
-    already_batched: bool
-    "Whether the dataset is already batched"
-
 @dataclass
 class Task_ModelConfig:
     n_output_embd: int
@@ -155,16 +152,12 @@ class Task(abc.ABC):
         self,
         name: str,
         desc: str,
-        does_batching: bool = False,
     ):
         self.name = name
         "Unique, machine-readable identifier"
 
         self.desc = desc
         "Human-readable name"
-
-        self.does_batching = does_batching
-        "Whether the task or the dataset does batching"
 
         self.ds_config_cls: Type[Task_DatasetConfig] = Task_DatasetConfig
         "Required dataset-specific config"
@@ -182,7 +175,6 @@ class Task(abc.ABC):
     def recieve_dataset_config(self, cfg):
         assert isinstance(cfg, self.ds_config_cls), f"Expected {self.ds_config_cls}, got {type_name(cfg)}"
         self.ds_cfg = cfg
-        self.does_batching = cfg.already_batched
 
     def recieve_model_config(self, cfg):
         assert isinstance(cfg, self.model_config_type), f"Expected {self.model_config_type}, got {type_name(cfg)}"

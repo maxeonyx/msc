@@ -9,7 +9,7 @@ from mx.utils import DSets, dtype
 
 @export
 @dataclass
-class AngleVectorSequence_TaskConfig(Embedding_TaskConfig):
+class SeqEmbd_TaskConfig(Embedding_TaskConfig):
     sequence_length: int
     """
     Max length of the sequence to be embedded.
@@ -17,7 +17,7 @@ class AngleVectorSequence_TaskConfig(Embedding_TaskConfig):
     """
 
 @export
-class AngleVectorSequence(MxEmbedding):
+class AngleCodebook(MxEmbedding):
     """
     Simple embedding for transformer regression over angles.
 
@@ -32,7 +32,7 @@ class AngleVectorSequence(MxEmbedding):
         n_embd: int,
         n_repeats: int,
         name="angleembd",
-        desc="Angle vector embedding. Embeds angles as unit vectors, and positions with a codebook.",
+        desc="Angles: `n_repeats` rotations -> linear layer. Positions: Abs position codebook.",
     ) -> None:
         super().__init__(
             n_embd=n_embd,
@@ -42,8 +42,8 @@ class AngleVectorSequence(MxEmbedding):
         self.n_repeats = n_repeats
         "Number of additional rotations of each angle to be added to the embedding."
 
-        self.task_config_type: Type[AngleVectorSequence_TaskConfig] = AngleVectorSequence_TaskConfig
-        self.task_cfg: AngleVectorSequence_TaskConfig | None = None
+        self.task_config_type: Type[SeqEmbd_TaskConfig] = SeqEmbd_TaskConfig
+        self.task_cfg: SeqEmbd_TaskConfig | None = None
 
     def configure(self, model: MxModel):
         if isinstance(model, DecoderOnlyTransformer):
@@ -104,7 +104,7 @@ class AngleVectorSequence(MxEmbedding):
 
 
 @export
-class AngleSinusoidalSequence(MxEmbedding):
+class AngleSinusoidal(MxEmbedding):
     """
     Simple embedding for transformer regression over angles.
 
@@ -118,8 +118,8 @@ class AngleSinusoidalSequence(MxEmbedding):
         self,
         n_embd: int,
         n_repeats: int,
-        name="transformer_angle_vector",
-        desc="TransformerAngleVectorEmbedding",
+        name="angleembdsin",
+        desc="Angles: `n_repeats` rotations -> linear layer. Positions: sinusoidal positional encoding.",
     ) -> None:
         super().__init__(
             n_embd=n_embd,
@@ -561,7 +561,7 @@ if __name__ == "__main__":
     )
     data = data.batch(7, 13)
 
-    embedding = AngleVectorSequence(
+    embedding = AngleCodebook(
         n_embd=32,
         n_repeats=4,
     )

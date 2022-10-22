@@ -210,11 +210,11 @@ class BVHImageViz(HoloMapVisualization):
         # validate data in "dataset" format
         u.validate(data, "data", [
             {
-                "angles": tf.TensorSpec(shape=[None, None, None, None], dtype=u.dtype()),
-                "idxs": tf.TensorSpec(shape=[None, None, None, None, None], dtype=tf.int32),
+                "angles": tf.TensorSpec(shape=[None, None, 2, 17, 3], dtype=u.dtype()),
+                "idxs": tf.TensorSpec(shape=[None, None, 2, 17, 3, 4], dtype=tf.int32),
                 "extra": {
-                    "orig_angles": tf.TensorSpec(shape=[None, None, None, None], dtype=u.dtype()),
-                    "filename": tf.TensorSpec(shape=[], dtype=tf.string),
+                    "orig_angles": tf.TensorSpec(shape=[None, None, 2, 17, 3], dtype=u.dtype()),
+                    "filename": tf.TensorSpec(shape=[None], dtype=tf.string),
                 },
             }
         ])
