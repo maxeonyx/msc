@@ -357,6 +357,7 @@ def create_progress_manager(
 
         except Exception as e:
             traceback.print_exc()
+            raise e
         finally:
             sys.stderr.flush()
             sys.stdout.flush()

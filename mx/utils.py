@@ -23,19 +23,118 @@ SomeFnT = TypeVar("SomeFnT", bound=Callable)
 def tf_function(f: SomeFnT, *args, **kwargs) -> SomeFnT:
     return tf.function(f, *args, **kwargs)
 
-rgb_warned = False
-@export
-def v_to_rgb_grayscale(x):
-    global rgb_warned
-    if x.shape[-1] == 1:
-        return tf.concat([x, x, x], axis=-1)
-    elif x.shape[-1] == 3:
-        if not rgb_warned:
-            print("WARNING: feature dim has length 3, might already be RGB")
-            rgb_warned = True
-        return tf.stack([x, x, x], axis=-1)
-    else:
-        return tf.stack([x, x, x], axis=-1)
+
+
+# rgb_warned = False
+# @export
+# def v_to_rgb_grayscale(x, c='gray'):
+#     """
+#     Convert an N-D tensor from greyscale (single-channel) to RGB (3-channel).
+
+#     Args:
+#         x: The tensor to convert.
+#         c: A color to scale the outputs by. Can be a string or a 3-tuple of floats in [0, 1].
+
+#     >>> v_to_rgb_grayscale(tf.constant([1.])).numpy()
+#     array([1., 1., 1.], dtype=float32)
+#     >>> v_to_rgb_grayscale(tf.constant([0.5])).numpy()
+#     array([0.5, 0.5, 0.5], dtype=float32)
+#     >>> v_to_rgb_grayscale(tf.constant([0.])).numpy()
+#     array([0., 0., 0.], dtype=float32)
+#     >>> v_to_rgb_grayscale(tf.constant([1.]), c=tf.constant([0.9, 0.2, 0. ])).numpy()
+#     array([0.9, 0.2, 0. ], dtype=float32)
+#     >>> v_to_rgb_grayscale(tf.zeros([3, 9, 13, 1])).shape
+#     TensorShape([3, 9, 13, 3])
+#     """
+
+#     if tf.is_tensor(c):
+#         assert len(c.shape) == 1 and c.shape[0] == 3
+#         scales = (tf.constant([0., 0., 0.]), c)
+#     elif isinstance(c, tuple) and len(c) == 2 and all(tf.is_tensor(x) for x in c):
+#         scales = c
+#     elif isinstance(c, str):
+#         if c == 'gray':
+#             scales = (
+#                 tf.constant([0., 0., 0.]),
+#                 tf.constant([1., 1., 1.]),
+#             )
+#         elif c == 'red':
+#             scales = (
+#                 tf.constant([0.2, 0., 0.]),
+#                 tf.constant([1.0, 0.5, 0.5]),
+#             )
+#         elif c == 'green':
+#             scales = (
+#                 tf.constant([0.05, 0.2, 0.]),
+#                 tf.constant([0.7, 1.0, 0.5]),
+#             )
+#         elif c == 'blue':
+#             scales = (
+#                 tf.constant([0., 0.05, 0.2]),
+#                 tf.constant([0.5, 0.7, 1.0]),
+#             )
+#         elif c == 'orange-blue':
+#             scales = (
+#                 tf.constant([0.8, 0.5, 0.]),
+#                 tf.constant([0.5, 0.7, 1.0]),
+#             )
+#     else:
+#         raise ValueError(f"Invalid color, got type(c)={type_name(c)}, c={c!r}")
+
+#     if x.shape[-1] == 1:
+#         cmap_range = scales[1] - scales[0]
+#         return tf.concat([x, x, x], axis=-1) * cmap_range + scales[0]
+#     else:
+#         raise ValueError(f"To convert a tensor into RGB, it must have an innermost dimension of size 1, but got shape={x.shape}")
+
+
+
+
+import matplotlib
+import matplotlib.cm
+def colorize(value, vmin=0., vmax=1., cmap=None):
+    """
+    A utility function for TensorFlow that maps a grayscale image in [0, 1] to a matplotlib
+    colormap for use with TensorBoard image summaries.
+    Arguments:
+        - value: 2D Tensor of shape [height, width] or 3D Tensor of shape
+        [height, width, 1].
+        - cmap: a valid cmap named for use with matplotlib's `get_cmap`.
+        (Default: 'gray')
+
+    Returns a 3D tensor of shape [height, width, 3].
+
+    Example usage:
+    >>> colorize(tf.constant([1.])).numpy()
+    array([255, 255, 255], dtype=uint8)
+    >>> colorize(tf.constant([0.])).numpy()
+    array([0, 0, 0], dtype=uint8)
+    >>> colorize(tf.zeros([3, 9, 13, 1])).shape
+    TensorShape([3, 9, 13, 3])
+    """
+
+    if vmin is None:
+        vmin = tf.reduce_min(value)
+    if vmax is None:
+        vmax = tf.reduce_max(value)
+
+    if vmin != 1. or vmax != 0.:
+        # normalize
+        value = (value - vmin) / (vmax - vmin)  # vmin..vmax
+
+    if value.shape[-1] == 1:
+        value = tf.squeeze(value, axis=-1)
+
+    # quantize
+    indices = tf.cast(tf.round(value * 255), tf.int32)
+
+    # gather
+    cm = matplotlib.cm.get_cmap(cmap if cmap is not None else 'gray')
+    colors = tf.constant(cm(np.arange(256))[:, :3] * 255, dtype=tf.uint8)
+    value = tf.gather(colors, indices)
+
+    return value
+
 
 @export
 def dtype() -> tft.DType:
@@ -785,6 +884,9 @@ def unrecluster(angles, circular_means, n_batch_dims=0):
     return angles
 
 def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
+
+    if tf.is_tensor(x) and is_keras_tensor(x):
+        x = x.type_spec
 
     # container types
     if isinstance(x, dict):
