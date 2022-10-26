@@ -389,7 +389,6 @@ def make_train_loop(
                                         break_var=break_var,
                                     )
                                 except Exception as e:
-                                    traceback.print_exc(e)
                                     exc = e
                                     return
                             t = Thread(target=run_in_thread)

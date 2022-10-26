@@ -64,202 +64,129 @@ A "Video" contains:
 
 from __future__ import annotations
 
-import abc
-from ast import Mod
-from cProfile import label
 from contextlib import ExitStack
-from email.policy import default
-from multiprocessing import context
-from typing import Generic, overload
+from os import PathLike
+
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+import numpy as np
+from matplotlib.figure import Figure
+
 from mx.progress import Progress, create_progress_manager
 from mx.prelude import *
-from mx.utils import dtype
 
-class PredictInputs(Box, abc.ABC):
+
+@export
+class PredictInputs:
+    """
+    If the model supports querying, predicting gets the mean of the remaining outputs at each step.
+    """
     def __init__(
         self,
         out_seq_shape: list[int] | tf.Tensor | tf.TensorShape,
         out_feat_shape: list[int] | tf.Tensor | tf.TensorShape,
-        sampling_order: Literal["fixed", "highest_entropy", "lowest_entropy"] = "fixed"
+        model: Model,
+        model_supports_querying: bool | Literal["yes_and_use"] = False,
+        model_outputs_distribution: bool | int = False,
+        sampling_order: Literal["fixed", "highest_entropy", "lowest_entropy"] = "fixed",
+        input_data: tf.Tensor | None = None,
+        idxs: tf.Tensor | None = None,
     ):
         self.out_seq_shape = out_seq_shape
         self.out_feat_shape = out_feat_shape
-        self.sampling_order = sampling_order
-
-class PredictOutputs(Box, abc.ABC):
-    def __init__(
-        self,
-        inputs_img: tf.Tensor,
-        sampling_order_img: tf.Tensor
-    ):
-        self.inputs_img = inputs_img
-        self.sampling_order_img = sampling_order_img
-
-class InputOnly_Inputs(PredictInputs):
-    "No model, only data and a sampling order"
-    def __init__(
-        self,
-        out_seq_shape: list[int] | tf.Tensor | tf.TensorShape,
-        out_feat_shape: list[int] | tf.Tensor | tf.TensorShape,
-        input_data: tf.Tensor,
-        idxs: tf.Tensor
-    ):
-        super().__init__(out_seq_shape, out_feat_shape)
-        self.input_data = input_data
-        self.idxs = idxs
-
-class InputOnly_Outputs(PredictOutputs):
-    def __init__(
-        self,
-        inputs_img: tf.Tensor,
-        sampling_order_img: tf.Tensor,
-        inputs_anim: tf.Tensor
-    ):
-        super().__init__(inputs_img, sampling_order_img)
-        self.inputs_anim = inputs_anim
-
-class PredictWithModel_Inputs(PredictInputs, abc.ABC):
-    """
-    If the model supports querying, predicting gets the mean of the remaining outputs at each step.
-    """
-    def __init__(
-        self,
-        out_seq_shape: list[int] | tf.Tensor | tf.TensorShape,
-        out_feat_shape: list[int] | tf.Tensor | tf.TensorShape,
-        model: Model,
-        model_supports_querying: bool | Literal["yes_and_use"],
-        model_outputs_distribution: bool | int,
-        sampling_order: Literal["fixed", "highest_entropy", "lowest_entropy"] = "fixed"
-    ):
-        super().__init__(out_seq_shape, out_feat_shape, sampling_order)
         self.model = model
         self.model_supports_querying = model_supports_querying
         self.model_outputs_distribution = model_outputs_distribution
+        self.sampling_order = sampling_order
 
-class PredictWithModel_Outputs(PredictOutputs):
-    def __init__(
-        self,
-        inputs_img: tf.Tensor,
-        sampling_order_img: tf.Tensor,
-        mean_anim: tf.Tensor,
-        samples_anim: tf.Tensor | None,
-        entropy_anim: tf.Tensor | None,
-    ):
-        super().__init__(inputs_img, sampling_order_img)
-        self.mean_anim = mean_anim
-        self.samples_anim = samples_anim
-        self.entropy_anim = entropy_anim
+        if sampling_order == "fixed":
+            assert idxs is not None, "If sampling_order is 'fixed', idxs must be provided"
 
-class FromScratch_Inputs(PredictWithModel_Inputs):
-    """
-    Predict each output position given the previous output positions, starting with only the begin token.
-    If the model supports querying, predicting gets the mean of the remaining outputs at each step.
-    If the model output is a distribution, we get multiple samples rather than just one prediction, and we also get to look at the entropy.
-    """
-    def __init__(
-        self,
-        out_seq_shape: list[int] | tf.Tensor | tf.TensorShape,
-        out_feat_shape: list[int] | tf.Tensor | tf.TensorShape,
-        model: Model,
-        model_supports_querying: bool | Literal["yes_and_use"],
-        model_outputs_distribution: bool | int,
-        idxs: tf.Tensor
-    ):
-        super().__init__(
-            out_seq_shape,
-            out_feat_shape,
-            model,
-            model_supports_querying,
-            model_outputs_distribution
-        )
+        if input_data is not None:
+            assert idxs is not None, "If input_data is provided, idxs must be provided"
+
+        self.input_data = input_data
         self.idxs = idxs
 
-
-class FromScratch_Outputs(PredictWithModel_Outputs):
+@export
+class PredictOutputs(Box):
     def __init__(
         self,
-        inputs_img: tf.Tensor,
-        sampling_order_img: tf.Tensor,
-        mean_anim: tf.Tensor,
-        samples_anim: tf.Tensor | None,
-        entropy_anim: tf.Tensor | None,
+        inputs_imgs: tf.Tensor,
+        sampling_order_imgs: tf.Tensor,
+        mean_anims: tf.Tensor,
+        mean_entropy_anims: tf.Tensor | None,
+        samples_anims: tf.Tensor | None,
+        samples_entropy_anims: tf.Tensor | None,
     ):
-        super().__init__(inputs_img, sampling_order_img, mean_anim, samples_anim, entropy_anim)
+        self.inputs_imgs = inputs_imgs
+        self.sampling_order_imgs = sampling_order_imgs
+        self.mean_anims = mean_anims
+        self.mean_entropy_anims = mean_entropy_anims
+        self.samples_anims = samples_anims
+        self.samples_entropy_anims = samples_entropy_anims
 
+    def numpy(self) -> PredictOutputs:
+        return PredictOutputs(
+            inputs_imgs=self.inputs_imgs.numpy(),
+            sampling_order_imgs=self.sampling_order_imgs.numpy(),
+            mean_anims=self.mean_anims.numpy(),
+            mean_entropy_anims=self.mean_entropy_anims.numpy() if self.mean_entropy_anims is not None else None,
+            samples_anims=self.samples_anims.numpy() if self.samples_anims is not None else None,
+            samples_entropy_anims=self.samples_entropy_anims.numpy() if self.samples_entropy_anims is not None else None,
+        )
 
-# class FromSeed_Inputs(PredictWithModel_Inputs):
-#     "Predict with seed inputs"
-#     seed_data: tf.Tensor
-#     idxs: tf.Tensor
-
-# class DynamicOrderFromScratch(PredictWithModel_Inputs):
-#     order_type: Literal["highest_entropy", "lowest_entropy"]
-
-# class DynamicOrderFromSeed(PredictWithModel_Inputs):
-#     order_type: Literal["highest_entropy", "lowest_entropy"]
-#     seed_data: tf.Tensor
-#     seed_idxs: tf.Tensor
-
-
-@dataclass
-class Video:
-    seed_inputs: tf.Tensor
-    sampling_order: tf.Tensor
-    mean_prediction: tf.Tensor | None
-    mean_entropies: tf.Tensor | None
-    sampled_predictions: tf.Tensor | None
-    sampled_entropies: tf.Tensor | None
-
-# @u.tf_function
+@u.tf_function
 def predict_core(
     model,
     i_step,
     start_at,
     break_var,
-    query_all,
     sample_fns,
     out_fns,
-    inp_vals: tf.Variable,
-    inp_idxs: tf.Variable,
-    sampling_order: Literal["fixed", "highest_entropy", "lowest_entropy"],
+    vals_var: tf.Variable,
+    idxs_var: tf.Variable,
     out_var: tf.Variable,
+    query_all: bool,
+    sampling_order: Literal["fixed", "highest_entropy", "lowest_entropy"],
 ):
     """
     Run a batch of auto-regressive predictions, and write the results to `out_var`.
     """
 
-    ic(inp_vals)
-    ic(inp_idxs)
+    n_seed_inps = vals_var.shape[0]
+    n_sample_fns = vals_var.shape[1]
+    seq_len = vals_var.shape[2]
+    n_feature_dims = vals_var.shape[3]
 
-    n_seed_inps = inp_vals.shape[0]
-    n_sample_fns = inp_vals.shape[1]
-    seq_len = inp_vals.shape[2]
-    n_feature_dims = inp_vals.shape[3]
-
-    assert inp_idxs.shape[0] == n_seed_inps, f"inp_idxs.shape[0]={inp_idxs.shape[0]}  ≠  n_seed_inps={n_seed_inps}"
+    assert idxs_var.shape[0] == n_seed_inps, f"idxs_var.shape[0]={idxs_var.shape[0]}  ≠  n_seed_inps={n_seed_inps}"
     if sampling_order == "fixed":
-        assert inp_idxs.shape[1] == seq_len, f"inp_idxs.shape[1]={inp_idxs.shape[1]}  ≠  seq_len={seq_len}"
+        assert idxs_var.shape[1] == 1
     else:
-        assert inp_idxs.shape[1] == n_sample_fns, f"inp_idxs.shape[1]={inp_idxs.shape[1]}  ≠  n_sample_fns={n_sample_fns}"
-        assert inp_idxs.shape[2] == seq_len, f"inp_idxs.shape[2]={inp_idxs.shape[2]}  ≠  seq_len={seq_len}"
-    n_indices = inp_idxs.shape[-1]
+        assert idxs_var.shape[1] == n_sample_fns, f"idxs_var.shape[1]={idxs_var.shape[1]}  ≠  n_sample_fns={n_sample_fns}"
+    assert idxs_var.shape[2] == seq_len, f"idxs_var.shape[2]={idxs_var.shape[2]}  ≠  seq_len={seq_len}"
+    n_indices = idxs_var.shape[-1]
 
     n_steps = out_var.shape[0]
     assert out_var.shape[1] == n_seed_inps, f"out_var.shape[1]={out_var.shape[1]}  ≠  n_seed_inps={n_seed_inps}"
     assert out_var.shape[2] == n_sample_fns, f"out_var.shape[2]={out_var.shape[2]}  ≠  n_sample_fns={n_sample_fns}"
     n_output_fns = out_var.shape[3]
-    # n_indices dims
+    # <n_indices> dims here
     n_output_channels = out_var.shape[-1]
 
-    assert shape(inp_vals)[2] == seq_len, f"input variable must be long enough to receive the output, got shape(inp_vals)=={shape(inp_vals)}, seq_len={seq_len}"
+    assert shape(vals_var)[2] == seq_len, f"input variable must be long enough to receive the output, got shape(inp_vals)=={shape(vals_var)}, seq_len={seq_len}"
     assert len(out_fns) == n_output_fns, f"out_fns must be the same length as out_var.shape[3], but got len(out_fns)={len(out_fns)} and n_output_fns={n_output_fns}"
+
     assert len(sample_fns) == n_sample_fns, f"sample_fns must be the same length as inp_vals.shape[1], but got len(sample_fns)={len(sample_fns)} and n_sample_fns={n_sample_fns}"
 
-    if query_all is not None:
+    if query_all:
         raise NotImplementedError("query_all not implemented")
 
     if sampling_order != "fixed":
         raise NotImplementedError("dynamic sampling order not implemented yet")
+
+    if model is None:
+        n_steps = n_steps - 1
 
     i_step.assign(0)
     while i_step < n_steps and not break_var:
@@ -268,59 +195,53 @@ def predict_core(
 
         if model is None:
 
-            step_idxs = tf.tile(
-                i_step[None, None, None, None, None, None],
-                [1, n_seed_inps, n_sample_fns, n_output_fns, i, 1],
+            n_future_steps = (n_steps+1)-(i_step+1)
+            # scatter this input into the output at all future steps
+            scatter_idxs = u.multidim_indices_range(
+                tf.range(i_step+1, n_steps+1),
+                (0, n_seed_inps),
+                (0, n_sample_fns),
+                (0, n_output_fns),
             )
-            seed_input_idxs = tf.tile(
-                tf.range(n_seed_inps)[None, :, None, None, None, None],
-                [1, 1, n_sample_fns, n_output_fns, i, 1],
-            )
-            sample_fn_idxs = tf.tile(
-                tf.range(n_sample_fns)[None, None, :, None, None, None],
-                [1, n_seed_inps, 1, n_output_fns, i, 1],
-            )
-            data_idxs = tf.tile(
-                inp_idxs[None, :, None, None, :i, :],
-                [1, n_seed_inps, n_sample_fns, n_output_fns, 1, 1],
-            )
-            out_fn_idxs = tf.tile(
-                tf.range(n_output_fns)[None, None, None, :, None, None],
-                [1, n_seed_inps, n_sample_fns, 1, i, 1],
-            )
+            scatter_idxs = tf.concat([
+                tf.tile(
+                    scatter_idxs[:, :, :, :, :],
+                    [            1, 1, 1, 1, 1],
+                ),
+                tf.tile(
+                    idxs_var[None,   :, :, None,         i, :],
+                    [n_future_steps, 1, 1, n_output_fns,    1],
+                )
+            ], axis=-1)
             scatter_idxs = ein.rearrange(
-                tf.concat([step_idxs, seed_input_idxs, sample_fn_idxs, out_fn_idxs, data_idxs], axis=-1),
-                'step seed sample out data idx -> (step seed sample out data) idx',
+                scatter_idxs,
+                'step seed sample out idx -> (step seed sample out) idx',
             )
 
             [out_fn] = out_fns
             out_var.scatter_nd_update(
                 scatter_idxs,
                 out_fn(ein.rearrange(
-                    inp_vals[:, :, :i, :],
-                    'seed sample seq ... -> (seed sample seq) ...',
+                    tf.tile(
+                        vals_var[None,   :, :, None,         i, :],
+                        [n_future_steps, 1, 1, n_output_fns,    1],
+                    ),
+                    'step seed sample out idx -> (step seed sample out) idx',
                 ), None),
                 name="scatter_inps_to_outs",
             )
 
         else: # model is not None
 
-
             # flatten into batch_size before model, then unflatten after
             ctx_vals = ein.rearrange(
-                inp_vals[:, :, :i, :],
+                vals_var[:, :, :i, :],
                 'seed sample seq ... -> (seed sample) seq ...',
             )
-            if sampling_order == "fixed":
-                ctx_idxs = ein.rearrange(
-                    inp_idxs[:, :i, :],
-                    'seed seq idx -> seed seq idx',
-                )
-            else:
-                ctx_idxs = ein.rearrange(
-                    inp_idxs[:, :, :i, :],
-                    'seed sample seq idx -> (seed sample) seq idx',
-                )
+            ctx_idxs = ein.rearrange(
+                idxs_var[:, :, :i, :],
+                'seed sample seq idx -> (seed sample) seq idx',
+            )
 
             inputs = {
                 "context/values": ctx_vals[:, :i],
@@ -329,82 +250,89 @@ def predict_core(
                 # "query/values": inp_var[:, i],
                 # "query/inp_idxs": inp_var[:, i],
             }
-            ic(inputs)
+            # ic(inputs)
             outputs = model(inputs, training=False)
 
-            # unflatten into seed, sample, out_fn, step, idx
-            outputs = ein.rearrange(
-                outputs,
-                '(seed sample) seq ... -> sample seed seq ...',
-                seed=n_seed_inps,
-                sample=n_sample_fns,
-            )
+            # tp(outputs, "outputs")
+            # tf.print(outputs)
 
             # todo implement a transformer that runs incrementally
-            output = outputs[:, -1, ...]
-            ic(outputs)
+            output = outputs[:, -1]
+
+            if isinstance(output, tfd.Distribution):
+                output = tfd.BatchReshape(output, batch_shape=[n_seed_inps, n_sample_fns])
+            else:
+                output = ein.rearrange(
+                    output,
+                    '(seed sample) ... -> seed sample ...',
+                    seed=n_seed_inps,
+                    sample=n_sample_fns,
+                )
+
             # zip outputs with out_fns along the batch dimension
-            for i_samp, (out, s_fn) in enumerate(zip(output, sample_fns)):
-                ic(out)
+            for i_samp, s_fn in enumerate(sample_fns):
+                out = output[:, i_samp]
                 samp_out = s_fn(out)
-                inp_vals[:, i_samp, i].assign(samp_out)
 
-                outs = tf.stack([
-                    out_fn(samp_out, out)
-                    for out_fn in out_fns
-                ], axis=0)
+                vals_var[:, i_samp, i].assign(samp_out)
 
+                for i_out, o_fn in enumerate(out_fns):
+                    outp = o_fn(samp_out, out)
 
-                step_idxs = tf.tile(
-                    i_step[None, None, None, None, None, None],
-                    [1, n_seed_inps, n_sample_fns, n_output_fns, 1, 1],
-                )
-                seed_input_idxs = tf.tile(
-                    tf.range(n_seed_inps)[None, :, None, None, None, None],
-                    [1, 1, n_sample_fns, n_output_fns, 1, 1],
-                )
-                sample_fn_idxs = tf.tile(
-                    tf.range(n_sample_fns)[None, None, :, None, None, None],
-                    [1, n_seed_inps, 1, n_output_fns, 1, 1],
-                )
-                data_idxs = tf.tile(
-                    inp_idxs[None, :, None, None, i:i+1, :],
-                    [1, n_seed_inps, n_sample_fns, n_output_fns, 1, 1],
-                )
-                out_fn_idxs = tf.tile(
-                    tf.range(n_output_fns)[None, None, None, :, None, None],
-                    [1, n_seed_inps, n_sample_fns, 1, 1, 1],
-                )
-                ic([step_idxs, seed_input_idxs, sample_fn_idxs, out_fn_idxs, data_idxs])
-                scatter_idxs = ein.rearrange(
-                    tf.concat([step_idxs, seed_input_idxs, sample_fn_idxs, out_fn_idxs, data_idxs], axis=-1),
-                    'step seed sample out data idx -> (step seed sample out data) idx',
-                )
-                ic(scatter_idxs)
-                out_var.scatter_nd_update(
-                    scatter_idxs,
-                    ein.rearrange(
-                        outs,
-                        'seed outfns ... -> (seed outfns) ...',
-                    ),
-                    name="scatter_outs_to_outs",
-                )
+                    # write new output to out_var
+                    n_future_steps = n_steps-i_step
+                    scatter_idxs = u.multidim_indices_range(
+                        tf.range(i_step, n_steps),
+                        (0, n_seed_inps),
+                        i_samp,
+                        i_out,
+                    )
+                    scatter_idxs = tf.concat([
+                        scatter_idxs,
+                        tf.tile(
+                            idxs_var[None,   :, i_samp:i_samp+1, None, i, :],
+                            [n_future_steps, 1, 1,               1,       1],
+                        ),
+                    ], axis=-1)
+                    scatter_idxs = ein.rearrange(
+                        scatter_idxs,
+                        'step seed samp out idx -> (step seed samp out) idx',
+                    )
+
+                    outp = tf.tile(
+                        outp[None, :],
+                        [n_future_steps, 1] + [1]*(outp.shape.rank-1),
+                    )
+
+                    # tp(out_var, "out_var")
+                    # tp(scatter_idxs, "scatter_idxs")
+                    # tp(outp, "outp")
+
+                    out_var.scatter_nd_update(
+                        scatter_idxs,
+                        ein.rearrange(
+                            outp,
+                            'step seed ... -> (step seed) ...',
+                        ),
+                        name="scatter_new_outs_to_outs",
+                    )
 
         i_step.assign_add(1)
 
-    # tp(out_var, "out_var")
-    # tf.print(out_var)
-
 DEFAULT_BG_COLOR = tf.constant([255, 100, 150], tf.uint8)
+DEFAULT_ALT_BG_COLOR = tf.constant([200, 255, 180], tf.uint8)
+
 
 def predict(
     name: str,
     desc: str,
-    cfg: Union[InputOnly_Inputs, FromScratch_Inputs],
+    cfg: PredictInputs,
     pm: Progress | None | Literal[True],
     default_out_var_val: tf.Tensor = DEFAULT_BG_COLOR,
+    default_order_out_var_val: tf.Tensor = DEFAULT_ALT_BG_COLOR,
     data_out_fn = None,
-) -> Union[InputOnly_Outputs, FromScratch_Outputs]:
+    outp_to_inp_fn = None,
+) -> PredictOutputs:
     """
     Run `predict_core` on another thread to support quick keyboard interrupt & live progress.
     Create variables for the outputs.
@@ -415,159 +343,191 @@ def predict(
     data_out_fn = data_out_fn or default_data_out_fn
 
     def entropy_out_fn(samp, dist):
-        return u.colorize(dist.entropy(), cmap='viridis')
+        return u.colorize(dist.entropy(), vmin=0, vmax=None, cmap='viridis')
 
-    output_shape = cfg.out_seq_shape
-    output_len = prod(output_shape)
+    out_seq_shape = cfg.out_seq_shape
+    output_len = prod(out_seq_shape)
+    n_indices = len(out_seq_shape)
+
+    out_seq_dim_names = [f"out_seq_{i}" for i in range(len(cfg.out_seq_shape))]
+    out_seq_dims = { name: size for name, size in zip(out_seq_dim_names, cfg.out_seq_shape) }
+    out_seq_ein_spec = " ".join(out_seq_dim_names)
+    out_feat_dim_names = [f"out_feat_{i}" for i in range(len(cfg.out_feat_shape))]
+    out_feat_dims = { name: size for name, size in zip(out_feat_dim_names, cfg.out_feat_shape) }
+    out_feat_ein_spec = " ".join(out_feat_dim_names)
+    out_ein_spec = f"{out_seq_ein_spec} {out_feat_ein_spec}"
+    out_dims = { **out_seq_dims, **out_feat_dims }
 
     def order_to_rgb(idxs):
-        idxs = u.multidim_idxs_to_flat_idxs(idxs, shape=output_shape)
+        idxs = u.multidim_idxs_to_flat_idxs(idxs, shape=out_seq_shape)
         return u.colorize(idxs, vmin=0, vmax=output_len, cmap='plasma')
 
+    if cfg.model_outputs_distribution:
+        is_distribution = True
+        n_samples = cfg.model_outputs_distribution
+    else:
+        is_distribution = False
+
+    assert cfg.idxs.shape.rank in [2, 3], f"idxs must be a flat sequence of multi-dimensional indices, or a batch of sequences of multi-dimensional indices. Got shape(cfg.idxs)={cfg.idxs.shape}"
+    if cfg.input_data is not None or cfg.idxs.shape.rank == 3:
+        is_seeded = True
+
+        has_seed_data = cfg.input_data is not None
+
+    else:
+        is_seeded = False
+
+    if cfg.sampling_order != "fixed":
+        is_dynamic = True
+    else:
+        is_dynamic = False
 
     # todo: refactoring this to be a bunch of exclusive cases
-    if cfg.sampling_order == "fixed" and hasattr(cfg, "input_data") and hasattr(cfg, "idxs"):
+    if is_seeded:
+        # seed provided
         inp_data_idxs = cfg.idxs
-        n_seed_inps = shape(inp_data_idxs)[0]
         inp_data = cfg.input_data
-        seed_len = shape(inp_data)[1]
-        assert shape(inp_data)[0] == shape(inp_data_idxs)[0], f"n_seed_inps of inp_data and inp_data_idxs must match, got shape(inp_data)={shape(inp_data)} and shape(inp_data_idxs)={shape(inp_data_idxs)}"
-        n_samples = shape(inp_data)[1]
-    elif hasattr(cfg, 'idxs'):
+
+        n_seed_inps = shape(inp_data_idxs)[0]
+
+        if has_seed_data:
+            assert shape(inp_data)[0] == n_seed_inps, f"n_seed_inps (dim 0) of inp_data must match n_seed_inps, got shape(inp_data)={shape(inp_data)} and n_seed_inps={n_seed_inps}"
+            seed_data_len = shape(inp_data)[1]
+
+        # if dynamic, idxs same length as seed
+        # otherwise idxs is full seq length
+        if has_seed_data and is_dynamic:
+            assert shape(inp_data_idxs)[1] == seed_data_len, f"seq_len (dim 1) of inp_data_idxs must match seed_data_len, got shape(inp_data_idxs)={shape(inp_data_idxs)} and seed_data_len={seed_data_len}"
+        else:
+            assert shape(inp_data_idxs)[1] == output_len, f"seq_len (dim 1) of inp_data_idxs must match output_len, got shape(inp_data_idxs)={shape(inp_data_idxs)} and output_len={output_len}"
+
+        assert shape(inp_data_idxs)[-1] == n_indices, f"n_indices (dim -1) of inp_data_idxs must match n_indices, got shape(inp_data_idxs)={shape(inp_data_idxs)} and n_indices={n_indices}"
+    elif not is_seeded and not is_dynamic:
+        # fixed sampling order, no seed
+        # full seq of idxs required
         inp_data_idxs = cfg.idxs
-        n_samples = shape(inp_data_idxs)[1]
+        assert shape(inp_data_idxs)[0] == output_len, f"seq_len (dim 0) of inp_data_idxs must match output_len, got shape(inp_data_idxs)={shape(inp_data_idxs)} and output_len={output_len}"
+        assert shape(inp_data_idxs)[-1] == n_indices, f"n_indices (dim -1) of inp_data_idxs must match n_indices, got shape(inp_data_idxs)={shape(inp_data_idxs)} and n_indices={n_indices}"
+    elif not is_seeded and is_dynamic:
+        # dynamic sampling order, no seed
+        # not even idxs required
+        pass
     else:
-        assert seed_len == 0
-        inp_data_idxs = tf.zeros([n_seed_inps, seed_len, len(output_shape)], tf.int32)
+        raise ValueError(f"Invalid cfg: {cfg}")
 
-    if hasattr(cfg, "input_data"):
+    # ic(
+    #     n_seed_inps if is_seeded else None,
+    #     n_samples if is_distribution else None,
+    #     seed_len if is_seeded else None,
+    #     output_len,
+    #     n_indices
+    # )
 
-        if cfg.sampling_order != "fixed":
-            assert shape(inp_data)[0] == shape(inp_data_idxs)[0], f"n_seed_inps of inp_data and inp_data_idxs must match, got shape(inp_data)={shape(inp_data)} and shape(inp_data_idxs)={shape(inp_data_idxs)}"
-            assert shape(inp_data)[1] == shape(inp_data_idxs)[1], f" if `dynamic_order` is True, then the second dimension of inp_data and inp_data_idxs must match, got shape(inp_data)={shape(inp_data)} and shape(inp_data_idxs)={shape(inp_data_idxs)}"
 
 
-    n_indices = shape(inp_data_idxs)[-1]
+    if cfg.model is None:
 
-    out_dim_names = [f"out_{i}" for i in range(len(output_shape))]
-    out_dims = { name: size for name, size in zip(out_dim_names, output_shape) }
-    out_ein_spec = " ".join(out_dim_names)
-
-    if isinstance(cfg, InputOnly_Inputs):
-
-        model = None
-
-        n_steps = output_len + 1
-        sample_fns = [lambda x: x] * n_seed_inps
-        n_sample_fns = len(sample_fns)
-        out_fns = [data_out_fn]
-        n_out_fns = len(out_fns)
-
-        n_feature_dims = inp_data.shape[-1]
-        start_at = 0
-
-    elif isinstance(cfg, PredictWithModel_Inputs):
+        assert is_seeded and has_seed_data, "If no model is provided, seed data must be provided"
 
         model = cfg.model
-        n_feature_dims = model.input_shape["context/values"][-1]
-        start_at = seed_len
+        n_steps = seed_data_len + 1
+        out_fns = [data_out_fn]
+        n_out_fns = len(out_fns)
+        n_feature_dims = inp_data.shape[-1]
 
-        if cfg.model_outputs_distribution is False:
-            sample_fns = [lambda x: x]
-            n_sample_fns = len(sample_fns)
-            out_fns = [data_out_fn]
-            n_out_fns = len(out_fns)
+        # always start at 0 even if seeded
+        start_at = 0
+
+    else:
+
+        model = cfg.model
+        # dbg(model.input_shape, "model.input_shape")
+        # dbg(model.name, "model name")
+        n_feature_dims = model.input_shape["context/values"][-1]
+
+        if is_seeded and has_seed_data:
+            start_at = seed_data_len
+            n_steps = output_len - seed_data_len
         else:
-            sample_fns = [lambda dist: dist.mean()] + [lambda dist: dist.sample()] * cfg.model_outputs_distribution
+            start_at = 0
+            n_steps = output_len
+
+        if is_distribution:
+            sample_fns = [lambda dist: dist.mean()]
+            sample_fns += [lambda dist: dist.sample()] * n_samples
+            del n_samples
             n_sample_fns = len(sample_fns)
             out_fns = [data_out_fn, entropy_out_fn]
             n_out_fns = len(out_fns)
-
-
-        if isinstance(cfg, FromScratch_Inputs):
-            inp_data = tf.zeros([n_seed_inps, 0, n_feature_dims], u.dtype())
-            n_steps = output_len
         else:
-            n_steps = output_len - seed_len
+            out_fns = [data_out_fn]
+            n_out_fns = len(out_fns)
 
-    else:
-        raise NotImplementedError(f"config type {type_name(cfg)} not implemented yet")
+    ############# create input variables #############
 
     out_var = tf.Variable(
         initial_value=ein.repeat(
             default_out_var_val,
-            f'chan -> steps seed sample out {out_ein_spec} chan',
+            f'{out_feat_ein_spec} -> steps seed sample outfns {out_ein_spec}',
             steps=n_steps,
-            seed=n_seed_inps,
-            sample=n_sample_fns,
-            out=n_out_fns,
+            seed=n_seed_inps if is_seeded else 1, # if not seeded, still need to have a seed dim
+            sample=n_sample_fns if is_distribution else 1, # if not distribution, still need to have a sample dim
+            outfns=n_out_fns,
             **out_dims,
         ),
         trainable=False,
         name="out_vals",
     )
-    inp_vals = tf.Variable(
-        initial_value=tf.zeros([n_seed_inps, n_sample_fns, output_len, n_feature_dims], u.dtype()),
+    vals_var = tf.Variable(
+        initial_value=tf.zeros([
+            n_seed_inps if is_seeded else 1, # if not seeded, still need to have a seed dim
+            n_sample_fns if is_distribution else 1, # if not distribution, still need to have a sample dim
+            output_len,
+            n_feature_dims
+        ], u.dtype()),
         trainable=False,
         name="inp_vals",
     )
-    inp_vals[:, :, :seed_len].assign(
-        ein.repeat(
+    idxs_var = tf.Variable(
+        initial_value=tf.zeros([
+            n_seed_inps if is_seeded else 1, # if not seeded, still need to have a seed dim
+            n_sample_fns if is_distribution else 1, # if not distribution, still need to have a sample dim
+            output_len,
+            n_indices,
+        ], tf.int32),
+        trainable=False,
+        name="idxs_var",
+    )
+
+    if is_seeded and has_seed_data:
+        vals_var[:, :, :seed_data_len].assign(ein.repeat(
             inp_data,
             'seed seq feat -> seed sample seq feat',
-            sample=n_sample_fns,
-        )
-    )
-    if cfg.sampling_order == "fixed":
-        inp_idxs = tf.Variable(
-            initial_value=tf.zeros([n_seed_inps, output_len, n_indices], tf.int32),
-            trainable=False,
-            name="inp_idxs",
-        )
-        inp_idxs[:, :].assign(inp_data_idxs)
+            sample=n_sample_fns if is_distribution else 1,
+        ))
+
+    if is_dynamic and is_seeded:
+        idxs_var[:, :, :seed_data_len].assign(ein.repeat(
+            inp_data_idxs,
+            'seed seq idx -> seed sample seq idx',
+            sample=n_sample_fns if is_distribution else 1,
+        ))
+    elif is_seeded:
+        idxs_var.assign(ein.repeat(
+            inp_data_idxs,
+            'seed seq idx -> seed sample seq idx',
+            sample=n_sample_fns if is_distribution else 1,
+        ))
     else:
-        inp_idxs = tf.Variable(
-            initial_value=tf.zeros([n_seed_inps, n_sample_fns, output_len, n_indices], tf.int32),
-            trainable=False,
-            name="inp_idxs",
-        )
-        inp_idxs[:, :, :seed_len].assign(
-            ein.repeat(
-                inp_data_idxs,
-                'seed seq idx -> seed sample seq idx',
-                sample=n_sample_fns,
-            )
-        )
+        idxs_var.assign(ein.repeat(
+            inp_data_idxs,
+            'seq idx -> seed sample seq idx',
+            seed=n_seed_inps if is_seeded else 1,
+            sample=n_sample_fns if is_distribution else 1,
+        ))
 
-    bg_img = ein.repeat(
-        default_out_var_val,
-        f'chan -> seed {out_ein_spec} chan',
-        seed=n_seed_inps,
-        **out_dims,
-    )
 
-    scatter_data_idxs = tf.concat([
-        # seed_inp idxs
-        ein.repeat(
-            tf.range(n_seed_inps),
-            'seed -> (seed seq) ()',
-            seq=seed_len,
-        ),
-        # seq and out idxs
-        ein.rearrange(
-            inp_data_idxs[:, :seed_len],
-            'seed seq idx -> (seed seq) idx',
-        ),
-    ], axis=-1)
-    inputs_img = tf.tensor_scatter_nd_update(
-        bg_img,
-        scatter_data_idxs,
-        data_out_fn(ein.rearrange(
-            inp_data,
-            'seed seq chan -> (seed seq) chan',
-        ), None),
-        name="scatter_inputs_img",
-    )
+    ########## call predict_core ##########
 
     with ExitStack() as stack:
         if pm is True:
@@ -585,192 +545,261 @@ def predict(
             i_step=step_var,
             break_var=break_var,
             out_var=out_var,
-            inp_vals=inp_vals,
-            inp_idxs=inp_idxs,
-            sampling_order=cfg.sampling_order,
-            sample_fns=sample_fns,
+            vals_var=vals_var,
+            idxs_var=idxs_var,
+            sample_fns=sample_fns if is_distribution else ([outp_to_inp_fn] if outp_to_inp_fn is not None else [lambda x: x]),
             out_fns=out_fns,
-            query_all=None,
+            sampling_order=cfg.sampling_order if is_dynamic else "fixed",
+            query_all=False,
         )
 
-    # all the viz types with non-dynamic output
-    if cfg.sampling_order == "fixed":
+    ######### make image of input data #########
+    bg_img = ein.repeat(
+        default_out_var_val,
+        f'{out_feat_ein_spec} -> seed {out_ein_spec}',
+        seed=n_seed_inps if is_seeded else 1, # if not seeded, still need to have a seed dim
+        **out_dims,
+    )
 
-        scatter_order_idxs = tf.concat([
+    if is_seeded and has_seed_data:
+        scatter_data_idxs = tf.concat([
+            # seed idxs
             ein.repeat(
-                tf.range(n_seed_inps),
-                'seed -> (seed seq) ()',
-                seq=output_len,
+                u.multidim_indices_range(
+                    tf.range(n_seed_inps if is_seeded else 1),
+                ),
+                'seed idx -> (seed seq) idx',
+                seq=seed_data_len,
             ),
+            # seq idxs
             ein.rearrange(
-                inp_idxs,
+                inp_data_idxs[:, :seed_data_len],
                 'seed seq idx -> (seed seq) idx',
             ),
         ], axis=-1)
-        sampling_order_img = tf.tensor_scatter_nd_update(
+        inputs_imgs = tf.tensor_scatter_nd_update(
             bg_img,
-            scatter_order_idxs,
-            order_to_rgb(ein.rearrange(
-                inp_idxs,
-                'seed seq idx -> (seed seq) idx',
-            )),
+            scatter_data_idxs,
+            data_out_fn(ein.rearrange(
+                inp_data,
+                'seed seq chan -> (seed seq) chan',
+            ), None),
+            name="scatter_inputs_img",
         )
     else:
-        # idxs has extra dim `samp`
-        raise NotImplementedError("dynamic order not implemented yet")
+        inputs_imgs = bg_img
 
-    if isinstance(cfg, InputOnly_Inputs):
-        return InputOnly_Outputs(
-            inputs_img=inputs_img,
-            sampling_order_img=sampling_order_img,
-            inputs_anim=out_var,
+    ######### make image of sampling order #########
+
+    bg_img = ein.repeat(
+        default_order_out_var_val,
+        f'chan -> seed sample {out_seq_ein_spec} chan',
+        seed=n_seed_inps if is_seeded else 1,
+        sample=n_sample_fns if is_distribution else 1,
+        **out_seq_dims,
+    )
+    scatter_order_idxs = tf.concat([
+        ein.repeat(
+            u.multidim_indices_range(
+                tf.range(n_seed_inps if is_seeded else 1),
+                tf.range(n_sample_fns if is_distribution else 1),
+            ),
+            'seed sample idx -> (seed sample seq) idx',
+            seq=output_len,
+        ),
+        ein.rearrange(
+            idxs_var,
+            'seed sample seq idx -> (seed sample seq) idx',
+        ),
+    ], axis=-1)
+    sampling_order_imgs = tf.tensor_scatter_nd_update(
+        bg_img,
+        scatter_order_idxs,
+        order_to_rgb(ein.repeat(
+            u.multidim_indices(out_seq_shape),
+            'seq idx -> (seed sample seq) idx',
+            seed=n_seed_inps if is_seeded else 1,
+            sample=n_sample_fns if is_distribution else 1,
+        )),
+    )
+
+    mean_anims = ein.rearrange(
+        out_var[:, :, 0, 0],
+        'step seed ... -> seed step ...',
+    )
+    if is_distribution:
+        mean_entropy_anims = ein.rearrange(
+            out_var[:, :, 0, 1],
+            'step seed ... -> seed step ...',
         )
-    elif isinstance(cfg, FromScratch_Inputs):
-        return FromScratch_Outputs(
-            inputs_img=inputs_img,
-            sampling_order_img=sampling_order_img,
-            mean_anim=out_var,
-            samples_anim=None,
-            entropy_anim=None,
+        samples_anims = ein.rearrange(
+            out_var[:, :, 1:, 0],
+            'step seed sample ... -> seed sample step ...',
+        )
+        samples_entropy_anims = ein.rearrange(
+            out_var[:, :, 1:, 1],
+            'step seed sample ... -> seed sample step ...',
         )
     else:
-        raise NotImplementedError(f"config type {type_name(cfg)} not implemented yet")
+        mean_entropy_anims = None
+        samples_anims = None
+        samples_entropy_anims = None
 
+    # all the viz types with non-dynamic output
+    return PredictOutputs(
+        inputs_imgs=inputs_imgs,
+        sampling_order_imgs=sampling_order_imgs,
+        mean_anims=mean_anims,
+        mean_entropy_anims=mean_entropy_anims,
+        samples_anims=samples_anims,
+        samples_entropy_anims=samples_entropy_anims,
+    )
+
+def imgs(out: PredictOutputs, fig: Figure):
+    cfg = Box()
+
+    cfg.out = out
+
+    cfg.n_seeds = out.inputs_imgs.shape[0]
+    cfg.n_samples = out.samples_anims.shape[1] if out.samples_anims is not None else 1
+    s = cfg.n_samples - 1
+    cfg.n_steps = out.mean_anims.shape[1]
+    t = cfg.n_steps - 1
+
+
+    cfg.fig = fig
+    cfg.ax = cfg.fig.subplots(3, cfg.n_seeds)
+
+    if len(cfg.ax.shape) == 1:
+        cfg.ax = cfg.ax[:, None]
+
+    cfg.input_imgs = []
+    for i in range(cfg.n_seeds):
+        cfg.input_imgs.append(cfg.ax[0, i].imshow(out.inputs_imgs[i]))
+
+    cfg.sampling_order_imgs = []
+    for i in range(cfg.n_seeds):
+        cfg.sampling_order_imgs.append(cfg.ax[1, i].imshow(out.sampling_order_imgs[i, s]))
+
+    cfg.mean_anim_imgs = []
+    for i in range(cfg.n_seeds):
+        cfg.mean_anim_imgs.append(cfg.ax[2, i].imshow(out.mean_anims[i, t]))
+
+    return cfg
+
+def plot(outs: list[PredictOutputs], block=False):
+    """
+    Plot the outputs of a prediction, then show to the screen for interactive
+    viewing.
+    """
+
+    plt.ion()
+
+    fig = plt.figure()
+
+    figs = fig.subfigures(len(outs) + 1, height_ratios=[0.1] + [1] * len(outs))
+
+    print("mean_anims_shape", outs[0].mean_anims.shape)
+
+    max_n_steps = max(out.mean_anims.shape[1] for out in outs)
+    max_n_samples = max(
+        (
+            out.samples_anims.shape[2] if outs[0].samples_anims is not None else 1
+        )
+        for out in outs
+    )
+
+    cfgs = [
+        imgs(out, figs[i + 1]) for i, out in enumerate(outs)
+    ]
+
+    def update(_):
+        t = int(time_slider.val)
+        s = int(samples_slider.val)
+        for cfg in cfgs:
+            this_t = min(t, cfg.n_steps - 1)
+            this_s = min(s, cfg.n_samples - 1)
+            for i in range(cfg.n_seeds):
+                cfg.mean_anim_imgs[i].set_data(cfg.out.mean_anims[i, this_t])
+        for fig in figs:
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+
+    time_slider_ax = figs[0].add_axes([0.2, 0., 0.6, 0.3])
+    time_slider = plt.Slider(time_slider_ax, label="Time", valmin=0, valmax=max_n_steps - 1, valinit=max_n_steps -1)
+    time_slider.on_changed(update)
+
+    samples_slider_ax = figs[0].add_axes([0.2, 0.5, 0.6, 0.3])
+    samples_slider = plt.Slider(samples_slider_ax, label="Sample #", valmin=0, valmax=max_n_samples - 1, valinit=0)
+    samples_slider.on_changed(update)
+
+    plt.show(block=block)
+
+def plot_noninteractive(file: PathLike, outs: list[PredictOutputs], select_steps: list[int] = None):
+    """
+    Plot the outputs of a prediction, then save to disk.
+    """
+
+    fig = plt.figure()
+
+    figs = fig.subfigures(len(outs) + 1, height_ratios=[0.1] + [1] * len(outs))
+
+    cfgs = [
+        imgs(out, figs[i + 1]) for i, out in enumerate(outs)
+    ]
+
+    plt.savefig(file)
+    plt.close()
 
 if __name__ == "__main__":
 
-    import holoviews as hv
-    hv.extension('bokeh')
-
-    # no model - just output a video of the inputs being taken bit-by-bit
-
-    outs = predict(
+    n_seeds = 5
+    examples = predict(
         name="Examples",
         desc="Making examples animation...",
-        cfg=InputOnly_Inputs(
+        cfg=PredictInputs(
+            model=None,
             out_seq_shape=[10, 10],
             out_feat_shape=[3],
-            input_data=tf.random.uniform([1, 10*10, 1]),
-            idxs=u.multidim_indices([10, 10], elide_rank_1=False)[None, ...],
+            input_data=tf.random.uniform([n_seeds, 10*10, 1]),
+            idxs=tf.tile(
+                u.multidim_indices([10, 10], elide_rank_1=False)[None],
+                [n_seeds, 1, 1]
+            ),
         ),
         pm=True,
     )
 
-    outs.inputs_anim = ein.rearrange(
-        outs.inputs_anim,
-        'step seed samp outfn h w c -> (seed samp outfn) step h w c',
-    ).numpy()
-    outs.inputs_img = ein.rearrange(
-        outs.inputs_img,
-        'b h w c -> b h w c',
-    ).numpy()
-    outs.sampling_order_img = ein.rearrange(
-        outs.sampling_order_img,
-        'b h w c -> b h w c',
-    ).numpy()
-
-    n_seeds = shape(outs.inputs_anim)[0]
-    seeds_dim = hv.Dimension(('seed', 'Seed'), range=(0, n_seeds))
-    n_time = shape(outs.inputs_anim)[1]
-    time_dim = hv.Dimension(('t', 'Time'), range=(0, n_time))
-
-    input_data_grid = hv.GridSpace(
-        {
-            i_seed: hv.RGB(outs.inputs_img[i_seed])
-            for i_seed in range(n_seeds)
-        },
-        kdims=[seeds_dim],
-        label="Input Data"
-    ).opts(
-        sizing_mode="scale_both",
-    )
-    sampling_order_grid = hv.GridSpace(
-        {
-            i_seed: hv.RGB(outs.sampling_order_img[i_seed], cmap='plasma')
-            for i_seed in range(n_seeds)
-        },
-        kdims=[seeds_dim],
-        label="Sampling Order"
-    ).opts(
-        sizing_mode="scale_both",
-    )
-
-    select_steps = [0, 1, 2, 3, 24, 45, 76, 97, 98, 99, 100]
-    inputs_anim_img = hv.GridSpace(
-        {
-            i_seed: hv.HoloMap(
-                {
-                    i_step: hv.RGB(outs.inputs_anim[i_seed, i_step])
-                    for i_step in select_steps
-                },
-                kdims=[time_dim],
-            )
-            for i_seed in range(n_seeds)
-        },
-        kdims=[seeds_dim],
-        label="Inputs Anim",
-    )
-
-    layout = hv.Layout([
-        input_data_grid,
-        sampling_order_grid,
-        inputs_anim_img,
-    ]).cols(1).opts(
-        sizing_mode="stretch_both",
-    )
-
-    hv.save(layout, "test_predict.examples.ignore.html")
-
-    # open in web browser
-    import webbrowser
-    webbrowser.open("file://" + os.path.abspath("test_predict.examples.ignore.html"))
-
-
     model_inputs = u.input_dict(
         Input([None, 1], dtype=u.dtype(), name="context/values"),
-        Input([None, 1], dtype=tf.int32,  name="context/inp_idxs"),
-        # Input([None, 1], dtype=tf.int32,  name="context/tar_idxs"),
-
-        # Input([None, 1], dtype=u.dtype(), name="query/values"),
-        # Input([None, 1], dtype=tf.int32,  name="query/inp_idxs"),
-        # Input([None, 1], dtype=tf.int32,  name="query/tar_idxs"),
+        Input([None, 2], dtype=tf.int32,  name="context/inp_idxs"),
     )
 
     def demo_model(inputs):
         v = inputs["context/values"]
+        batch_size = tf.shape(v)[0]
+        seq_len = tf.shape(v)[1]
+        n_idxs = tf.shape(v)[2]
         v = tf.concat([
-            tf.constant(1., dtype=u.dtype(), shape=[1, 1, 1]),
+            tf.ones([batch_size, 1, n_idxs], dtype=tf.float32),
             v,
         ], axis=1)
-        return tf.reduce_mean(v, axis=1)[:, None, :]
-        # batch_size = shape(inputs["context/values"])[0]
-        # feature_dim = shape(inputs["context/values"])[2]
-        # return tf.reduce_mean(
-        #     tf.concat([
-        #         inputs["context/values"],
-        #         # inputs["query/values"],
-        #         tf.random.uniform([batch_size, 1, feature_dim]),
-        #     ], axis=1),
-        #     axis=-1,
-        # )
+        return tf.reduce_mean(v, axis=1)[:, None, :] * 0.9
+
 
     model = Model(
         inputs=model_inputs,
         outputs=demo_model(model_inputs),
         name="test_model",
     )
-    idxs = ein.repeat(
-        u.multidim_indices([10, 10], elide_rank_1=False),
-        'seq idxs -> seed seq idxs',
-        seed=5,
-    )
-    outs = predict(
+
+    predictions = predict(
         name="Predict",
         desc="Making predictions animation...",
-        cfg=FromScratch_Inputs(
+        cfg=PredictInputs(
             out_seq_shape=[10, 10],
             out_feat_shape=[3],
-            idxs=idxs,
+            idxs=u.multidim_indices([10, 10]),
             model=model,
             model_supports_querying=False,
             model_outputs_distribution=False,
@@ -778,71 +807,48 @@ if __name__ == "__main__":
         pm=True,
     )
 
-    outs.mean_anim = ein.rearrange(
-        outs.mean_anim,
-        'step seed samp outfn h w c -> (samp outfn seed) step h w c',
-    ).numpy()
-    input_data_grid = ein.rearrange(
-        outs.inputs_img,
-        'seed h w c -> seed h w c',
-    ).numpy()
-    sampling_order_grid = ein.rearrange(
-        outs.sampling_order_img,
-        'seed h w c -> seed h w c',
-    ).numpy()
+    rand_idxs = tf.stack([
+        tf.random.shuffle(u.multidim_indices([10, 10]))for _ in range(n_seeds)
+    ], axis=0)
 
-    n_seeds = shape(outs.mean_anim)[0]
-    seeds_dim = hv.Dimension(('seed', 'Seed'), range=(0, n_seeds))
-    n_time = shape(outs.mean_anim)[1]
-    time_dim = hv.Dimension(('t', 'Time'), range=(0, shape(outs.mean_anim)[0]))
-
-    input_data_grid = hv.GridSpace(
-        {
-            i_seed: hv.RGB(input_data_grid[i_seed])
-            for i_seed in range(shape(outs.inputs_img)[0])
-        },
-        kdims=[seeds_dim],
-        label="Input Data"
-    ).opts(
-        sizing_mode="scale_both",
-    )
-    sampling_order_grid = hv.GridSpace(
-        {
-            b: hv.RGB(sampling_order_grid[b], cmap='plasma')
-            for b in range(shape(outs.sampling_order_img)[0])
-        },
-        kdims=[seeds_dim],
-        label="Sampling Order"
-    ).opts(
-        sizing_mode="scale_both",
+    rand_predictions = predict(
+        name="RandPredict",
+        desc="Making random predictions animation...",
+        cfg=PredictInputs(
+            out_seq_shape=[10, 10],
+            out_feat_shape=[3],
+            idxs=rand_idxs,
+            model=model,
+            model_supports_querying=False,
+            model_outputs_distribution=False,
+        ),
+        pm=True,
     )
 
-    select_steps = [0, 1, 2, 3, 24, 45, 76, 97, 98, 99]
-    mean_anim_img = hv.GridSpace(
-        {
-            i_seed: hv.HoloMap(
-                {
-                    i_step: hv.RGB(outs.mean_anim[i_seed, i_step])
-                    for i_step in select_steps
-                },
-                kdims=[time_dim],
-            )
-            for i_seed in range(n_seeds)
-        },
-        kdims=[seeds_dim],
-        label="Predictions Anim",
-    )
+    # d = Dense(1)
+    # dist_layer = tfp.layers.DistributionLambda(lambda mean: tfp.distributions.Normal(mean, 1.0))
+    # def demo_distribution_model(inputs):
+    #     v = inputs["context/values"]
+    #     return dist_layer(d(v))
 
-    layout = hv.Layout([
-        input_data_grid,
-        sampling_order_grid,
-        mean_anim_img,
-    ]).cols(1).opts(
-        sizing_mode="stretch_both",
-    )
+    # distribution_model = Model(
+    #     inputs=model_inputs,
+    #     outputs=demo_distribution_model(model_inputs),
+    #     name="test_distribution_model",
+    # )
 
-    hv.save(layout, "test_predict.from_scratch.ignore.html")
+    # distribution_predictions = predict(
+    #     name="Distribution Predict",
+    #     desc="Making distribution predictions animation...",
+    #     cfg=PredictInputs(
+    #         out_seq_shape=[10, 10],
+    #         idxs=u.multidim_indices([10, 10]),
+    #         model=distribution_model,
+    #         model_supports_querying=False,
+    #         model_outputs_distribution=4, # 4 samples
+    #     ),
+    #     pm=True,
+    # )
 
-    # open in web browser
-    import webbrowser
-    webbrowser.open("file://" + os.path.abspath("test_predict.from_scratch.ignore.html"))
+
+    plot([examples, predictions, rand_predictions], block=True)

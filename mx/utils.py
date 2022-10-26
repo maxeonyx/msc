@@ -2,6 +2,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import functools
 import itertools
+from re import L
 from typing import Dict
 
 # these two imports are actually from tensorflow.python, not just for type checking
@@ -128,6 +129,13 @@ def colorize(value, vmin=0., vmax=1., cmap=None):
     # quantize
     indices = tf.cast(tf.round(value * 255), tf.int32)
 
+    # warn if any indices are outside (0, 255)
+    if tf.reduce_any(indices < 0) or tf.reduce_any(indices > 255):
+        tf.print("WARNING: colorize() index is out of range: ", indices)
+
+    # clip to (0, 255)
+    indices = tf.clip_by_value(indices, 0, 255)
+
     # gather
     cm = matplotlib.cm.get_cmap(cmap if cmap is not None else 'gray')
     colors = tf.constant(cm(np.arange(256))[:, :3] * 255, dtype=tf.uint8)
@@ -155,8 +163,67 @@ def optimizations(options):
   finally:
     tf.config.optimizer.set_experimental_options(old_opts)
 
+class ValidateError(Exception):
+    pass
+
+def validate_helper(x, var_name, spec, part="", allow_non_concrete=False):
+    name = f"{var_name}{part}"
+    # Use type_name and tf_str to print pretty error messages.
+
+    got_val = lambda x, name: f"Got: {name} = {tf_str(x)}"
+    got_type = lambda x, name: f"Got: type({name}) = {type_name(x)}"
+
+    if isinstance(spec, (tf.TensorSpec, tf.RaggedTensorSpec)):
+        if not allow_non_concrete and not tf.is_tensor(x):
+            raise ValidateError(f"Expected {name} to be a tensor. {got_type(x, name)}")
+
+        if not spec.is_compatible_with(x):
+            raise ValidateError(f"\nExpected: {name} ∈ {tf_str(spec)}\nGot:      {name} = {tf_str(x)}")
+
+    elif isinstance(spec, tft.NoneTensorSpec):
+        if not spec.is_compatible_with(x):
+            raise ValidateError(f"Expected {name} to be None. {got_val(x, name)}")
+
+    elif isinstance(spec, tft.DatasetSpec):
+        validate_helper(x.element_spec, var_name, spec.element_spec, '.element_spec', allow_non_concrete=True)
+    elif isinstance(spec, dict):
+        if not isinstance(x, dict):
+            raise ValidateError(f"Expected {name} to be a dict. {got_type(x, name)}")
+
+        for k, s in spec.items():
+
+            if k not in x:
+                raise ValidateError(f"Expected {name} to have key {k}. {got_val(x, name)}")
+
+            validate_helper(x[k], var_name, s, f"[{k!r}]", allow_non_concrete)
+
+    # list specs should only have 1 element
+    elif isinstance(spec, list):
+        if not isinstance(x, list):
+            raise ValidateError(f"Expected {name} to be a list. {got_type(x, name)}")
+
+        if len(spec) != 1:
+            raise ValidateError(f"`list` specs should only have 1 element. Use tuples instead. Got: spec{part} = {tf_str(spec)}")
+
+        for i, v in enumerate(x):
+            validate_helper(v, var_name, spec[0], f"[{i}]", allow_non_concrete)
+
+    # tuple specs can have multiple elements
+    elif isinstance(spec, tuple):
+        if not isinstance(x, tuple):
+            raise ValidateError(f"Expected {name} to be a tuple. {got_type(x, name)}")
+
+        if len(x) != len(spec):
+            raise ValidateError(f"Expected {name} to have {len(spec)} elements. Got len({name}) = {len(x)}")
+
+        for i, (v, s) in enumerate(zip(x, spec)):
+            validate_helper(v, var_name, s, f"[{i}]", allow_non_concrete)
+
+    else:
+        raise ValidateError(f"Invalid spec. Expected TensorSpec, NoneTensorSpec, dict, list or tuple. Got spec{part} = {repr(spec)}")
+
 @export
-def validate(x, var_name, spec, part="", allow_non_concrete=False):
+def validate(x, var_name, spec):
     """
     Validate that the input is a tensor-like nested structure in the correct format.
 
@@ -166,60 +233,11 @@ def validate(x, var_name, spec, part="", allow_non_concrete=False):
     Lists used for variable-length homogeneous structures, and the format spec should only have 1 element.
     For fixed-length / heterogeneous structures, use tuples.
     """
-    name = f"{var_name}{part}"
-    # Use type_name and tf_str to print pretty error messages.
-
-    got_val = lambda x, name: f"Got: {name} = {tf_str(x)}"
-    got_type = lambda x, name: f"Got: type({name}) = {type_name(x)}"
-
-    if isinstance(spec, (tf.TensorSpec, tf.RaggedTensorSpec)):
-        if not allow_non_concrete and not tf.is_tensor(x):
-            raise TypeError(f"Expected {name} to be a tensor. {got_type(x, name)}")
-
-        if not spec.is_compatible_with(x):
-            raise TypeError(f"\nExpected: {name} ∈ {tf_str(spec)}\nGot:      {name} = {tf_str(x)}")
-
-    elif isinstance(spec, tft.NoneTensorSpec):
-        if not spec.is_compatible_with(x):
-            raise TypeError(f"Expected {name} to be None. {got_val(x, name)}")
-
-    elif isinstance(spec, tft.DatasetSpec):
-        validate(x.element_spec, var_name, spec.element_spec, '.element_spec', allow_non_concrete=True)
-    elif isinstance(spec, dict):
-        if not isinstance(x, dict):
-            raise TypeError(f"Expected {name} to be a dict. {got_type(x, name)}")
-
-        for k, s in spec.items():
-
-            if k not in x:
-                raise KeyError(f"Expected {name} to have key {k}. {got_val(x, name)}")
-
-            validate(x[k], var_name, s, f"[{k!r}]", allow_non_concrete)
-
-    # list specs should only have 1 element
-    elif isinstance(spec, list):
-        if not isinstance(x, list):
-            raise TypeError(f"Expected {name} to be a list. {got_type(x, name)}")
-
-        if len(spec) != 1:
-            raise ValueError(f"`list` specs should only have 1 element. Use tuples instead. Got: spec{part} = {tf_str(spec)}")
-
-        for i, v in enumerate(x):
-            validate(v, var_name, spec[0], f"[{i}]", allow_non_concrete)
-
-    # tuple specs can have multiple elements
-    elif isinstance(spec, tuple):
-        if not isinstance(x, tuple):
-            raise TypeError(f"Expected {name} to be a tuple. {got_type(x, name)}")
-
-        if len(x) != len(spec):
-            raise ValueError(f"Expected {name} to have {len(spec)} elements. Got len({name}) = {len(x)}")
-
-        for i, (v, s) in enumerate(zip(x, spec)):
-            validate(v, var_name, s, f"[{i}]", allow_non_concrete)
-
-    else:
-        raise ValueError(f"Invalid spec. Expected TensorSpec, NoneTensorSpec, dict, list or tuple. Got spec{part} = {repr(spec)}")
+    try:
+        validate_helper(x, var_name, spec)
+    except ValidateError as e:
+        # hide the stack trace for ValidateError
+        raise ValidateError(str(e)) from None
 
 @export
 def funky_punky(n_0, n_max, n_total, base=2):
@@ -309,11 +327,11 @@ def set_default_indent(indent: int | str):
         _default_indent = indent
 
 
-debug = True
+debug = tf.Variable(True, trainable=False, dtype=tf.bool, name="debug")
 @export
 def set_debug(to: bool = True):
     global debug
-    debug = to
+    debug.assign(to)
 
 # Run a keras model up to a specific layer
 @export
@@ -357,7 +375,7 @@ def mo_all(x, model, indent=_default_indent, depth=0):
 
 @export
 def is_debug():
-    return debug
+    return debug.value()
 
 def primes():
     """
@@ -406,7 +424,7 @@ def next_prime_after(n):
             return p
 
 
-def list_to_dict(l):
+def list_to_box(l):
     """
     Turns a list of objs with `name` attributes into a dict of name -> obj.
 
@@ -415,10 +433,10 @@ def list_to_dict(l):
     ...         self.name = name
     ...     def __repr__(self):
     ...         return f"Foo({self.name})"
-    >>> list_to_dict([Foo("a"), Foo("b")])
-    {'a': Foo(a), 'b': Foo(b)}
+    >>> list_to_box([Foo("a"), Foo("b")])
+    Box({'a': Foo(a), 'b': Foo(b)})
     """
-    return { x.name: x for x in l }
+    return Box({ x.name: x for x in l })
 
 def shape(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int | tf.Tensor]:
     """
@@ -437,13 +455,21 @@ def shape(tensor: typing.Union[tf.Tensor, np.ndarray]) -> list[int | tf.Tensor]:
     if tensor.shape == tf.TensorShape(None):
         return dynamic
 
-    static = tensor.shape.as_list()
+    if isinstance(tensor, tf.RaggedTensor):
+        # drs = DynamicRaggedShape
+        drs = tf.shape(tensor)
+        return [
+            drs[i] if drs.is_uniform(i) else None
+            for i in range(drs.rank)
+        ]
+    else:
+        static = tensor.shape.as_list()
 
     return [dynamic[i] if s is None else s for i, s in enumerate(static)]
 
 @export
 def input_dict(*arr):
-    return list_to_dict(arr)
+    return list_to_box(arr)
 
 @export
 def type_name(x):
@@ -486,6 +512,13 @@ class DSets(Box):
         )
 
         return dset
+
+    def apply(self, fn) -> DSets:
+        return DSets(
+            train = self.train.apply(fn),
+            test = self.test.apply(fn),
+            val = self.val.apply(fn),
+        )
 
     def cache(self) -> DSets:
         return DSets(
@@ -795,7 +828,7 @@ class Einshape:
 
 @export
 @tf_scope
-def multidim_indices(shpe, flatten=True, elide_rank_1=True):
+def multidim_indices(shpe, flatten=True, elide_rank_1=False):
     """
     Uses tf.meshgrid to get multidimensional indices in the given shape.
 
@@ -803,7 +836,7 @@ def multidim_indices(shpe, flatten=True, elide_rank_1=True):
     have shape [ product(shape), rank]. Otherwise, the
     returned indices will have shape [ *shape, rank ].
 
-    If elide_rank_1=True (the default), when there is only a
+    If elide_rank_1=True, when there is only a
     single dimension, the returned indices will not have
     an extra dimension. Otherwise, the returned indices will have
     an extra dimension with size equal to the rank of the tensor.
@@ -822,7 +855,7 @@ def multidim_indices(shpe, flatten=True, elide_rank_1=True):
 
 @export
 @tf_scope
-def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
+def multidim_indices_of(tensor, flatten=True, elide_rank_1=False):
     """
     Uses tf.meshgrid to get multidimensional indices in the shape of the given tensor.
 
@@ -830,7 +863,7 @@ def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
     have shape [ product(shape), rank]. Otherwise, the
     returned indices will have shape [ *shape, rank ].
 
-    If elide_rank_1=True (the default), when there is only a
+    If elide_rank_1=True, when there is only a
     single dimension, the returned indices will not have
     an extra dimension. Otherwise, the returned indices will have
     an extra dimension with size equal to the rank of the tensor.
@@ -838,6 +871,85 @@ def multidim_indices_of(tensor, flatten=True, elide_rank_1=True):
 
     s = shape(tensor)
     return multidim_indices(s, flatten=flatten, elide_rank_1=elide_rank_1)
+
+
+@export
+def multidim_indices_range(
+    *ranges: int | tuple[int, int],
+    flatten=False,
+    elide_rank_1=False,
+):
+    """
+    Uses tf.meshgrid to get multidimensional indices in the given shape.
+
+    If flatten=True (the default), the returned indices will
+    have shape [ product(shape), rank]. Otherwise, the
+    returned indices will have shape [ *shape, rank ].
+
+    If elide_rank_1=True, when there is only a
+    single dimension, the returned indices will not have
+    an extra dimension. Otherwise, the returned indices will have
+    an extra dimension with size equal to the rank of the tensor.
+
+    >>> print(multidim_indices_range(2, 3, 5).numpy())
+    [[[[2 3 5]]]]
+    >>> print(multidim_indices_range(2, 3, 5, flatten=True).numpy())
+    [[2 3 5]]
+    >>> print(multidim_indices_range((0, 2), (0, 2), (0, 2), flatten=True).numpy())
+    [[0 0 0]
+     [0 0 1]
+     [0 1 0]
+     [0 1 1]
+     [1 0 0]
+     [1 0 1]
+     [1 1 0]
+     [1 1 1]]
+    >>> multidim_indices_range((0, 33), (0, 99)).shape
+    TensorShape([33, 99, 2])
+    >>> multidim_indices_range((0, 33), (0, 99), flatten=True).shape
+    TensorShape([3267, 2])
+    >>> multidim_indices_range((0, 3)).shape
+    TensorShape([3, 1])
+    >>> multidim_indices_range((0, 3), elide_rank_1=True).shape
+    TensorShape([3])
+    """
+
+    if len(ranges) == 0:
+        raise ValueError(f"Shape must have at least one dimension. Got *args={ranges}")
+    if len(ranges) == 1 and elide_rank_1:
+        r = ranges[0]
+        if isinstance(r, int):
+            return tf.constant([r], dtype=tf.int32)
+        elif tf.is_tensor(r) and r.shape.rank == 0:
+            return r[None]
+        elif tf.is_tensor(r) and r.shape.rank == 1:
+            return r
+        elif isinstance(r, tuple) and len(r) == 2:
+            return tf.range(*r, dtype=tf.int32)
+        else:
+            i = 0
+            raise ValueError(f"Invalid range: arg {i} of multidim_indices_range is not an int or a tuple of length 2. Got arg {i} = {r!r}, *args={ranges!r}")
+
+    new_ranges = []
+    for i, r in enumerate(ranges):
+        if isinstance(r, int):
+            new_ranges.append(tf.constant(r)[None])
+        elif tf.is_tensor(r) and r.dtype != tf.int32:
+            raise ValueError(f"Range {i} is a tensor, but its dtype is {r.dtype}. Must be int32.")
+        elif tf.is_tensor(r) and r.shape.rank == 0:
+            new_ranges.append(r[None])
+        elif tf.is_tensor(r) and r.shape.rank == 1:
+            new_ranges.append(r)
+        elif isinstance(r, tuple) and len(r) == 2:
+            new_ranges.append(tf.range(*r))
+        else:
+            raise ValueError(f"Invalid range: arg {i} of multidim_indices_range is not an int or a tuple of length 2. Got arg {i} = {r!r}, *args={ranges!r}")
+
+    indices = tf.meshgrid(*new_ranges, indexing="ij")
+    indices = tf.stack(indices, axis=-1)
+    if flatten:
+        indices = tf.reshape(indices, [-1, len(new_ranges)])
+    return indices
 
 @export
 def angle_wrap(angles):
@@ -917,6 +1029,17 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
             "] ",
         ])
         return tf_repr(x.element_spec, indent=indent, depth=depth, prefix=prefix)
+    elif isinstance(x, tf.RaggedTensorSpec):
+        x.shape
+        c = "○" # ○ means it's not concrete
+        if x.shape.rank == 0:
+            str_x = tf.constant(f"{c}{x.dtype.name}[]")
+        else:
+            str_x = tf.strings.join([
+                c,
+                x.dtype.name,
+                tf_shape_repr(x.shape, ragged_rank=x.ragged_rank),
+            ])
     elif isinstance(x, tf.TensorSpec):
         x.shape
         c = "○" # ○ means it's not concrete
@@ -942,10 +1065,15 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
         else:
             str_x = tf.strings.as_string(x)
     else:
+        if isinstance(x, tf.RaggedTensor):
+            ragged_rank = x.ragged_rank
+        else:
+            ragged_rank = None
+
         str_x = tf.strings.join([
             "●", # ● means concrete
             x.dtype.name,
-            tf_shape_repr(shape(x)),
+            tf_shape_repr(shape(x), ragged_rank=ragged_rank),
         ])
     str_x
 
@@ -955,14 +1083,20 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
         str_x,
     ])
 
-def tf_shape_repr(x):
+def tf_shape_repr(x, ragged_rank=None):
     """
-    The [1 2 3] part of e.g. !int32[1 2 3]
+    The [5 2 3] part of e.g. ○int32[5 2 3]
     """
     assert len(x) > 0, "shape must have at least one dimension"
     vals = tf.strings.join([
-        tf.strings.as_string(x_i) if x_i is not None else tf.constant("?")
-        for x_i in x
+        (
+            tf.constant("~")
+            if ragged_rank is not None and i == ragged_rank else
+            tf.constant("?")
+            if x_i is None else
+            tf.strings.as_string(x_i)
+        )
+        for i, x_i in enumerate(x)
     ], separator=" ")
     return tf.strings.join([
         "[",
@@ -1040,14 +1174,27 @@ def tf_print(s: SomeT, tag: str = None, output_stream=sys.stdout) -> SomeT:
     else:
         tf.print(val, output_stream=output_stream)
 
+_dbg_statements = {}
 @export
-def dbg(s: SomeT, tag: str = None) -> SomeT:
+def dbg(s: SomeT, tag: str, once_only=True) -> SomeT:
     """
     If debug mode, then pretty-print tensorflow tensors, including within graph mode.
     Returns the input so it can be used in an expression.
     """
-    if debug:
-        tf_print(s, tag=tag, output_stream=sys.stderr)
+
+    def log():
+        if not once_only or (once_only and tag not in _dbg_statements):
+            tf_print(s, tag=tag, output_stream=sys.stderr)
+
+        if once_only and tag not in _dbg_statements:
+            _dbg_statements[tag] = True
+
+    tf.cond(
+        debug,
+        log,
+        None,
+    )
+
     return s
 
 
@@ -1158,33 +1305,6 @@ def multidim_idxs_to_flat_idxs(idxs, shape):
     # multiply and sum
     return tf.reduce_sum(idxs * strides, axis=-1)
 
-
-@export
-def inspect(fn, tag: str|None = None):
-    @tf.function
-    def inspect_fn(*args, **kwargs):
-        if len(args) == 1:
-            val_fmt = "{}"
-            val = tf_repr(args[0])
-        else:
-            val_fmt = "args: {}"
-            val = tf_tuple_repr(args)
-
-        if len(kwargs) == 0:
-            kwarg_fmt = ""
-            vals = [val]
-        else:
-            kward_fmt = ", kwargs: {}"
-            vals = [val, tf_dict_repr(kwargs)]
-
-        format = f"inspect: function '{fn.__name__}' called with" + val_fmt + kwarg_fmt
-        if tag is not None:
-            format = f"#{tag} " + format
-
-        tf.print(tf.strings.format(format, vals))
-
-        return fn(*args, **kwargs)
-    return inspect_fn
 
 @export
 def count_calls(fn) -> tuple[Callable, tf.Variable]:

@@ -51,7 +51,7 @@ class Visualization(abc.ABC):
         return output_location
 
     @abc.abstractmethod
-    def render(self, timestep=None, output_dir=None):
+    def render(self, timestep=None, output_dir=None, pm: Progress = None):
         """
         Make a visualization, save it, but don't show it.
         """
@@ -64,12 +64,12 @@ class Visualization(abc.ABC):
         """
         pass
 
-    def __call__(self, timestep=None, output_dir=None):
+    def __call__(self, timestep=None, output_dir=None, pm: Progress = None):
         """
         Make a visualization, save it, and show it.
         """
 
-        self.render(timestep, output_dir)
+        self.render(timestep, output_dir, pm=pm)
         self.show(output_dir)
 
     def show(self, output_dir=None):
@@ -108,23 +108,23 @@ class StatefulVisualization(Visualization, abc.ABC):
 
 
     @abc.abstractmethod
-    def _make_and_save_visualization(self, do_update, timestep=None, output_dir=None):
+    def _make_and_save_visualization(self, do_update, timestep=None, output_dir=None, pm:Progress=None):
         pass
 
-    def render(self, timestep=None, output_dir=None):
+    def render(self, timestep=None, output_dir=None, pm: Progress | None = None):
         """
         Create and save a visualization. Update the held visualization. Don't show it.
         """
 
         self._make_and_save_visualization(do_update=True, timestep=timestep, output_dir=output_dir)
 
-    def __call__(self, timestep=None, output_dir=None):
+    def __call__(self, timestep=None, output_dir=None, pm:Progress=None):
         """
         Create and save a visualization. Don't update the held visualization. Show it.
         For interactive usage.
         """
 
-        self._make_and_save_visualization(do_update=False, timestep=timestep, output_dir=output_dir)
+        self._make_and_save_visualization(do_update=False, timestep=timestep, output_dir=output_dir, pm=pm)
         self.show(output_dir=output_dir)
 
 
@@ -142,7 +142,7 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
         self._fig: hv.Layout = None
 
     @abc.abstractmethod
-    def _make_hmaps(self, timestep) -> list[hv.HoloMap]:
+    def _make_hmaps(self, timestep, pm:Progress=None) -> list[hv.HoloMap]:
         """
         Implements the figure.
         """
@@ -152,11 +152,11 @@ class HoloMapVisualization(StatefulVisualization, abc.ABC):
         output_location = super().output_location(output_dir)
         return u.ensure_suffix(output_location, ".html")
 
-    def _make_and_save_visualization(self, do_update: bool, timestep=None, output_dir=None):
+    def _make_and_save_visualization(self, do_update: bool, timestep=None, output_dir=None, pm:Progress=None):
         """
         Display figure to screen. (Note: Also saves to file.)
         """
-        hmaps = self._make_hmaps(timestep)
+        hmaps = self._make_hmaps(timestep, pm=pm)
         fig = hv.Layout(hmaps).cols(1).opts(
             shared_axes=False,
             title=self.desc,
@@ -271,29 +271,24 @@ class Visualizer:
         )
 
     def __call__(self, timestep=None, pm: Progress=None, output_dir=None):
+        output_dir = output_dir or self.output_dir
         for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
             with ExitStack() as stack:
                 if pm is not None:
                     stack.push(self._spinner(viz, pm))
-                viz.render(timestep=timestep, output_dir=output_dir or self.output_dir)
-                viz.show(output_dir=output_dir or self.output_dir)
-
+                viz(timestep=timestep, output_dir=output_dir, pm=pm)
 
     def _do(self, event: str, timestep, pm: Progress):
         if tf.is_tensor(timestep):
             timestep = timestep.numpy()
 
         for viz, cfg in zip(self.visualizations.values(), self.cfgs.values()):
-            if self.output_dir is not None:
-                output_dir = self.output_dir / viz.name
-            else:
-                output_dir = None
             if event in cfg["render_on"]:
                 with self._spinner(viz, pm):
-                    viz.render(timestep=timestep, output_dir=output_dir or self.output_dir)
+                    viz.render(timestep=timestep, output_dir=self.output_dir, pm=pm)
             if event in cfg["show_on"]:
                 # show the visualization
-                viz.show(output_dir=output_dir)
+                viz.show(output_dir=self.output_dir)
 
     def before_train_start(self, step, pm: Progress):
         self._do("start", timestep=step, pm=pm)

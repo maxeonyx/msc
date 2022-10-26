@@ -28,13 +28,14 @@ if typing.TYPE_CHECKING:
     import keras.api._v2.keras.metrics
     import keras.api._v2.keras.callbacks
     import keras.api._v2.keras.backend
-    from keras.api._v2.keras import Model, Input, layers
-    import keras.api._v2.keras.layers
+    from keras.api._v2.keras import Model, Input
+    import keras.api._v2.keras.layers as layers
     from keras.api._v2.keras.layers import Embedding, Dense
     from keras.api._v2.keras.backend import is_keras_tensor
     from keras.api._v2.keras import mixed_precision as mixed_precision
 
     import tensorflow_probability.python.distributions as tfd
+    import tensorflow_probability.python.layers as tfpl
 
     from tensorflow.python.data.ops.dataset_ops import DatasetV2 as Dataset
 else:
@@ -47,6 +48,7 @@ else:
     import tensorflow.types.experimental as tft
     from tensorflow.data import Dataset
     from tensorflow_probability import distributions as tfd
+    from tensorflow_probability import layers as tfpl
 
 from mx.export import export, exporter
 

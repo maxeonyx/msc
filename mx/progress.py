@@ -177,9 +177,9 @@ class Progress:
             else:
                 desc += " done."
                 state = "success"
-        except Exception as e:
+        except Exception:
             state = "error"
-            raise e
+            raise
         finally:
             if update in self.update_fns:
                 def close():
@@ -245,9 +245,9 @@ class Progress:
                 prog_bar.close()
             else:
                 state = "success"
-        except Exception as e:
+        except Exception:
             state = "error"
-            raise e
+            raise
         finally:
             if update in self.update_fns:
                 def close():
@@ -355,9 +355,9 @@ def create_progress_manager(
             yield manager
 
 
-        except Exception as e:
-            traceback.print_exc()
-            raise e
+        except Exception:
+            # traceback.print_exc()
+            raise
         finally:
             sys.stderr.flush()
             sys.stdout.flush()

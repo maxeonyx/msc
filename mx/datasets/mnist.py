@@ -5,6 +5,7 @@ import holoviews as hv
 from mx.prelude import *
 
 from mx.pipeline import MxDataset, Task
+from mx.progress import Progress, create_progress_manager
 from mx.tasks import VectorSequenceMSE
 from mx.tasks.vector_sequence_mse import RandomSequenceMSE
 from mx.utils import DSets
@@ -37,7 +38,7 @@ class MxMNIST(MxDataset):
         self.split_seed = split_seed
         "Change this to split different data into train/test/val sets"
 
-    def load(self, force_cache_reload=False):
+    def load(self, batch_size, test_batch_size, force_cache_reload: bool = False):
         """
         Load the dataset from disk.
         """
@@ -65,6 +66,8 @@ class MxMNIST(MxDataset):
             "idxs": u.multidim_indices([28, 28]),
         })
 
+        dsets = dsets.batch(batch_size, test_batch_size)
+
         return dsets
 
     def configure(self, task: Task):
@@ -73,7 +76,7 @@ class MxMNIST(MxDataset):
             task.recieve_dataset_config(task.ds_config_cls(
                 seq_dims=[28, 28],
                 n_input_dims=1, # grayscale
-                
+
             ))
             def adapt_in(x):
 
@@ -126,12 +129,11 @@ class MxMNIST(MxDataset):
             assert self.adapt_out is not None, "To visualize predictions, must call configure() before get_visualizations()"
 
         data = next(iter(
-            self.load(force_cache_reload=False)
+            self.load(viz_batch_size, viz_batch_size, force_cache_reload=False)
             .test
-            .batch(viz_batch_size)
         ))
 
-        return u.list_to_dict([
+        return u.list_to_box([
             MNISTImageViz(
                 data=data,
                 predict=(
@@ -178,7 +180,7 @@ class MNISTImageViz(HoloMapVisualization):
 
         self._task_predict_fn, self._adapt_in, self._adapt_out = predict
 
-    def _make_hmaps(self, timestep=None) -> list:
+    def _make_hmaps(self, timestep=None, pm: Progress=None) -> list:
 
         data = self._data
 
@@ -247,7 +249,7 @@ class MNISTImageViz(HoloMapVisualization):
                 "values": tf.zeros([784, 0, 1], dtype=u.dtype()),
                 "seq_idxs": ein.rearrange(u.multidim_indices([28, 28]), 'hw i -> hw 1 i'),
             }
-            pred_blind = task_predict_fn(empty_seq, output_len=1)
+            pred_blind = task_predict_fn(empty_seq, output_len=1, pm=pm)
             pred_blind = adapt_out({
                 "values": ein.rearrange(pred_blind["values"], '(h w) 1 c -> 1 (h w) c', h=28, w=28)
             })
@@ -301,7 +303,9 @@ class MNISTImageViz(HoloMapVisualization):
 if __name__ == '__main__':
     u.set_debug()
     mnist = MxMNIST()
-    data = next(iter(mnist.load().test.batch(10)))
+    batch_size = 10
+    data = next(iter(mnist.load(batch_size, batch_size).test))
     tp(data, "MxMNIST data format")
     viz = MNISTImageViz(data)
-    viz()
+    with create_progress_manager() as pm:
+        viz(pm=pm)

@@ -1,7 +1,5 @@
-from functools import reduce
-from mx.prelude import *
 
-_TEST_REPS = 3
+from mx.prelude import *
 
 @export
 def make_get_chunk(chunk_size: int, seed=None):
@@ -26,7 +24,7 @@ def make_get_chunk(chunk_size: int, seed=None):
     ...         [4, 5],
     ...         [5, 6],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     >>> x = tf.constant([[1], [2], [3], [4], [5], [6]])
@@ -38,7 +36,7 @@ def make_get_chunk(chunk_size: int, seed=None):
     ...         [[4], [5]],
     ...         [[5], [6]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     """
@@ -62,8 +60,6 @@ def make_get_chunk(chunk_size: int, seed=None):
         ]
 
         seqs = [ tf.ensure_shape(s, [chunk_size] + shape(s)[1:]) for s in seqs ]
-
-        ic(shape(seqs[0]))
 
         return seqs
 
@@ -95,7 +91,7 @@ def make_get_chunk_batched_ragged(chunk_size: int, seed=None):
     ...         [[4, 5]],
     ...         [[5, 6]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     >>> x = tf.RaggedTensor.from_row_lengths([1, 2, 3, 4, 5, 6], [2, 4])
@@ -105,7 +101,7 @@ def make_get_chunk_batched_ragged(chunk_size: int, seed=None):
     ...         [[1, 2], [4, 5]],
     ...         [[1, 2], [5, 6]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     >>> x = tf.constant([[1, 2], [3, 4], [5, 6]])
@@ -113,7 +109,7 @@ def make_get_chunk_batched_ragged(chunk_size: int, seed=None):
     ...     do_f_and_assert_any(get_chunk, [x], vals=tf.constant([
     ...         [[1, 2], [3, 4], [5, 6]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     """
@@ -136,25 +132,25 @@ def make_get_chunk_batched_ragged(chunk_size: int, seed=None):
 
         seq_len = tf.cast(seq_len, tf.int32)
         chunk_size_batch = tf.broadcast_to(chunk_size, [batch_size])
-        tf.print(seq_len),
-        tf.print(chunk_size_batch)
+        # dbg(seq_len, "get_chunk_batched_ragged - seq_len")
+        # dbg(chunk_size_batch, "get_chunk_batched_ragged - chunk_size_batch")
         # initialize a batched uniform categorical distribution
         # tf.random doesn't support batched distributions, so we
         # use tensorflow_probability.distributions (tfd) instead
 
         max_len = tf.reduce_max(seq_len)
         logit_table = tf.linalg.band_part(tf.ones([max_len, max_len]), -1, 0)
-        tf.print(logit_table)
+        # dbg(logit_table, "get_chunk_batched_ragged - logit_table")
 
         probability_table = logit_table / tf.reduce_sum(logit_table, axis=1, keepdims=True)
 
         max_indices = seq_len - chunk_size_batch
         max_indices_probs = tf.gather(probability_table, max_indices)
-        tf.print(max_indices_probs)
+        # dbg(max_indices_probs, "get_chunk_batched_ragged - max_indices_probs")
         dist = tfd.Categorical(probs=max_indices_probs)
 
         idxs = dist.sample(seed=seed)
-        tf.print(idxs)
+        # dbg(idxs, "get_chunk_batched_ragged - idxs")
         idxs = idxs[:, None] + tf.range(chunk_size)[None, :]
 
         # extract chunks from seqs
@@ -188,7 +184,7 @@ def make_get_random_slices_batched_ragged(n_slices, seed=None):
     ...         [[3, 1]],
     ...         [[3, 2]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     >>> all(
@@ -197,7 +193,7 @@ def make_get_random_slices_batched_ragged(n_slices, seed=None):
     ...         [[2, 2]],
     ...         [[3, 3]],
     ...     ]))
-    ...     for _ in range(_TEST_REPS)
+    ...     for _ in range(100)
     ... )
     True
     """
@@ -241,16 +237,11 @@ def make_get_random_slices_batched_ragged(n_slices, seed=None):
 
     return get_random_slices_batched_ragged
 
-
-
-
 def do_f_and_assert_any(f, *args, vals):
     actual = f(*args)
     reduce_all_axes = tf.range(tf.rank(vals))[1:]
     # reduce_any_axes = the rest
-    return tf.reduce_any(tf.reduce_all(tf.equal(*ic((actual, vals))), axis=reduce_all_axes))
-
-
+    return tf.reduce_any(tf.reduce_all(tf.equal(actual, vals), axis=reduce_all_axes))
 
 if __name__ == "__main__":
     import doctest

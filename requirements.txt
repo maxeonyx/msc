@@ -1,4 +1,4 @@
-holoviews[recommended]
+holoviews[all]
 enlighten
 wandb
 tensorflow

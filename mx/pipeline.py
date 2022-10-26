@@ -43,14 +43,12 @@ class MxDataset(abc.ABC):
     def configure(self, task: Task):
         pass
 
-    def adapt(self, dsets: DSets, batch_size, test_batch_size) -> DSets:
+    def adapt(self, dsets: DSets) -> DSets:
         """
         Adapt a dataset from raw format to task-specific task-input format
         """
 
         assert self.adapt_in is not None, "Must call dataset.configure(task) before dataset.adapt(ds)"
-
-        dsets = dsets.batch(batch_size, test_batch_size)
 
         dsets = dsets.map(self.adapt_in)
 
@@ -68,7 +66,7 @@ class MxDataset(abc.ABC):
         return dsets
 
     @abc.abstractmethod
-    def load(self, force_cache_reload: bool) -> DSets:
+    def load(self, batch_size, test_batch_size, force_cache_reload: bool=False) -> DSets:
         """
         Load the dataset and adapt for the configured task. Implementations
         should cache and snapshot the dataset to disk, unless this is a very
@@ -255,7 +253,7 @@ class MxEmbedding(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def make_embedder(self) -> Model:
+    def make_embedder(self) -> tuple[Model, dict]:
         pass
 
 
@@ -322,10 +320,7 @@ class Pipeline:
         #     data generator --> input data
         task.configure(embedding)
 
-        # configure:
-        #     input data --> latents
         embedding.configure(model)
-
         # configure:
         #     output latents --> logits/outputs/params
         #     logits/outputs/params --> loss
@@ -352,13 +347,13 @@ class Pipeline:
 
     def new_model(self, i: int = None) -> Model:
         "Create a new model instance, and save the model definition to disk."
-        embedder = self.embedding.make_embedder()
+        embedder, inputs = self.embedding.make_embedder()
         backbone = self.mx_model.make_model()
         final_layer = self.task.make_final_layer()
 
         model = Model(
-            inputs=embedder.inputs,
-            outputs=final_layer(backbone(embedder(embedder.inputs))),
+            inputs=inputs,
+            outputs=final_layer(backbone(embedder(inputs))),
             name=self.name,
         )
 
@@ -426,8 +421,8 @@ class Pipeline:
 
     def make_train_data(self, force_cache_reload: bool = False) -> tf.data.Dataset:
 
-        dsets = self.dataset.load(force_cache_reload=force_cache_reload)
-        dsets = self.dataset.adapt(dsets, self.batch_size, self.test_batch_size)
+        dsets = self.dataset.load(self.batch_size, self.test_batch_size, force_cache_reload=force_cache_reload)
+        dsets = self.dataset.adapt(dsets)
         dsets = self.task.process(dsets)
         dsets = self.task.adapt(dsets)
 

@@ -6,6 +6,11 @@ from mx import layers as mx_layers
 from mx.pipeline import MxModel, Task, Task_ModelConfig
 from mx.utils import dtype
 
+class MxLayer(layers.Layer):
+    """Just adds required `name` and `desc` to Layer"""
+    def __init__(self, name: str, desc: str, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.desc = desc
 
 @export
 class DecoderOnlyTransformer(MxModel):
@@ -25,6 +30,8 @@ class DecoderOnlyTransformer(MxModel):
         n_heads: int,
         n_hidden: int,
         dropout: float = 0,
+        use_batchnorm: bool = True,
+        use_layernorm: bool = True,
         name="deconly",
         desc=None,
     ) -> None:
@@ -41,6 +48,11 @@ class DecoderOnlyTransformer(MxModel):
         """Hidden size of the feedforward layers"""
         self.dropout = dropout
         """Dropout rate. 0 = no dropout. Defaults to 0."""
+        self.use_batchnorm = use_batchnorm
+        """Whether to use batch normalization"""
+        self.use_layernorm = use_layernorm
+        """Whether to use layer normalization"""
+
 
     def configure(self, task: Task):
 
@@ -56,38 +68,22 @@ class DecoderOnlyTransformer(MxModel):
         else:
             raise NotImplementedError(f"Model {type_name(self)} does not support Task {type_name(task)}. If using autoreload in IPython, try restarting the interpreter.")
 
-    def make_model(self) -> Model:
+    def compute_output_shape(self, input_shape):
+        return input_shape["context/embd"]
 
-        assert self.embd_cfg is not None, "Must call task.configure(model) before calling make_model()"
-
-        # initializer = keras.initializers.TruncatedNormal(stddev=1./sqrt(self.embd_cfg.n_embd))
-
-        # backbone = keras.Sequential([
-        #     nlpl.TransformerDecoder(
-        #         intermediate_dim=self.n_hidden,
-        #         num_heads=self.n_heads,
-        #         activation='gelu',
-        #         # kernel_initializer=initializer,
-        #     )
-        #     for _ in range(self.n_layers)
-        # ])
-
-        # def call(inputs):
-        #     return backbone(inputs["embd"])
-
-        # trying out removing the normalization layer
-
-        ls = [
+    def make_model(self):
+        n_embd = self.embd_cfg.n_embd
+        residual_blocks = [
             Box(
                 attn = layers.MultiHeadAttention(
                     num_heads=self.n_heads,
-                    key_dim=self.embd_cfg.n_embd,
+                    key_dim=n_embd,
                     dropout=self.dropout,
                     kernel_regularizer=None,
                     name=f"{self.name}/l{i}/attn",
                 ),
                 add_attn = mx_layers.learned_mix_add(
-                    self.embd_cfg.n_embd,
+                    n_embd,
                     name=f"{self.name}/l{i}/add_attn",
                 ),
                 ffn = keras.Sequential([
@@ -102,13 +98,13 @@ class DecoderOnlyTransformer(MxModel):
                         name=f"{self.name}/l{i}/ffn/dropout",
                     ),
                     Dense(
-                        self.embd_cfg.n_embd,
+                        n_embd,
                         kernel_regularizer=u.reg(),
                         name=f"{self.name}/l{i}/ffn/out",
                     ),
                 ]),
                 add_ffn = mx_layers.learned_mix_add(
-                    self.embd_cfg.n_embd,
+                    n_embd,
                     name=f"{self.name}/l{i}/add_ffn",
                 ),
                 layernorm = layers.LayerNormalization(
@@ -118,41 +114,37 @@ class DecoderOnlyTransformer(MxModel):
                     name=f"{self.name}/l{i}/batchnorm",
                 ),
                 add_layer = mx_layers.learned_mix_add(
-                    self.embd_cfg.n_embd,
+                    n_embd,
                     name=f"{self.name}/l{i}/add_layer",
                 ),
             )
             for i in range(self.n_layers)
         ]
 
-
         def call(inputs):
-            embd = inputs["embd"]
+            embd = inputs["context/embd"]
 
-            for i, l in enumerate(ls):
+            for b in residual_blocks:
                 x = embd
-                x = l.add_attn([x, l.attn(x, x, x, use_causal_mask=True)])
+                x = b.add_attn([x, b.attn(x, x, x, use_causal_mask=True)])
 
-                x = l.add_ffn([x, l.ffn(x)])
+                x = b.add_ffn([x, b.ffn(x)])
 
-                # x = l.batchnorm(x)
-                x = l.layernorm(x)
+                x = b.batchnorm(x)
+                x = b.layernorm(x)
 
-                embd = l.add_layer([embd, x])
+                embd = b.add_layer([embd, x])
 
             return embd
 
-
         inputs = u.input_dict(
-            Input([None, self.embd_cfg.n_embd], name="embd"),
+            Input([None, n_embd], dtype=u.dtype(), name="context/embd"),
         )
         return Model(
             inputs=inputs,
             outputs=call(inputs),
             name=self.name,
         )
-
-
 
 @export
 class Resnet(MxModel):
@@ -224,13 +216,13 @@ class Resnet(MxModel):
         ]
 
         def call(inputs):
-            x = inputs["embd"]
+            x = inputs["context/embd"]
             for l in backbone_layers:
                 x = l.add([x, l.norm(l.dense_out(l.dropout(l.dense_in(x))))])
             return x
 
         inputs = u.input_dict(
-            Input([None, self.embd_cfg.n_embd], name="embd"),
+            Input([None, self.embd_cfg.n_embd], name="context/embd"),
         )
         return Model(
             inputs=inputs,
@@ -282,10 +274,10 @@ class DebugMLP(MxModel):
         layer2 = Dense(self.embd_cfg.n_embd, activation='relu', kernel_regularizer=u.reg())
 
         inputs = u.input_dict(
-            Input([None, self.embd_cfg.n_embd], name="embd"),
+            Input([None, self.embd_cfg.n_embd], name="context/embd"),
         )
         return Model(
             inputs=inputs,
-            outputs=layer2(layer1(inputs["embd"])),
+            outputs=layer2(layer1(inputs["context/embd"])),
             name=self.name,
         )

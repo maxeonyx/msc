@@ -1,11 +1,11 @@
-from sqlite3 import adapt
-from mx.embeddings import vector_embeddings
-from mx.embeddings.vector_embeddings import DebugCodebook, DebugCodebookTriples, Multidim_TaskConfig, VectorCodebookMultidim
+from mx.embeddings import DebugCodebook, DebugCodebookTriples, Multidim_TaskConfig, VectorCodebookMultidim
+import mx.predict as pred
 from mx.prelude import *
+from mx.progress import Progress, create_progress_manager
 
-from mx.utils import DSets, dtype, inspect, is_debug
-from mx.tasks.utils import make_get_chunk, make_get_chunk_batched_ragged, make_get_random_slices_batched_ragged
-from mx.embeddings import AngleCodebook, VectorSinusoidalMultidim
+from mx.utils import DSets
+from mx.tasks.utils import make_get_chunk_batched_ragged, make_get_random_slices_batched_ragged
+from mx.embeddings import AngleCodebook
 from mx.pipeline import Task, MxEmbedding, Task_DatasetConfig
 
 
@@ -150,7 +150,6 @@ class VectorSequenceMSE(Task):
             val=val.repeat(self.n_test_val_repeats),
         )
 
-        # dset = dset.map(inspect("repeat"))
         if seq_len != self.chunk_size:
 
             get_chunk = make_get_chunk_batched_ragged(self.chunk_size)
@@ -268,7 +267,7 @@ class VectorSequenceMSE(Task):
             return out_var
 
         warned = False
-        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
+        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len, pm:Progress=None):
             nonlocal warned
 
             u.validate(inputs, "inputs", {
@@ -527,7 +526,7 @@ class RandomSequenceMSE(Task):
             return out_var
 
         warned = False
-        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
+        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len, pm:Progress=None):
             nonlocal warned
 
             u.validate(inputs, "inputs", {
@@ -580,15 +579,14 @@ class VectorSequenceAngleMSE(Task):
     predicts a categorical distribution over a vocabulary of vectors.
     """
 
-
     def __init__(
         self,
         chunk_size: int,
         pred_seed_len: int = 0,
         pred_output_len: int = None,
         n_test_val_repeats: int = 100,
-        name = "nextvec",
-        desc = "Next Vector Prediction (single sequence dim only)",
+        name = "anglevec",
+        desc = "Angle Vector Prediction (single sequence dim only)",
     ):
         super().__init__(
             name=name,
@@ -636,8 +634,8 @@ class VectorSequenceAngleMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "angles": x["inputs"]["input"],
-                        "seq_idxs": x["inputs"]["seq_idxs"],
+                        "context/values": x["inputs"]["values"],
+                        "context/inp_idxs": x["inputs"]["inp_idxs"],
                     }
                 }
             self.adapt_in = adapt_in
@@ -650,8 +648,8 @@ class VectorSequenceAngleMSE(Task):
         assert self.adapt_in is not None, "self.adaptor was not set by task.configure(embedding)"
 
         ds_spec = tft.DatasetSpec(element_spec={
-            "data": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-            "seq_idxs": tf.TensorSpec([None, None], tf.int32),
+            "angles": tf.RaggedTensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype(), ragged_rank=1),
+            "seq_idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
         })
 
         u.validate(dsets, "dsets", {
@@ -673,20 +671,18 @@ class VectorSequenceAngleMSE(Task):
             val=val.repeat(self.n_test_val_repeats),
         )
 
-        # dset = dset.map(inspect("repeat"))
-
         get_chunk = make_get_chunk_batched_ragged(self.chunk_size)
 
         def do_chunk(x):
 
-            data, seq_idxs = get_chunk([
-                x["data"],
+            angles, seq_idxs = get_chunk([
+                x["angles"],
                 x["seq_idxs"],
             ])
 
             return {
                 **x,
-                "data": data,
+                "angles": angles,
                 "seq_idxs": seq_idxs,
             }
 
@@ -695,11 +691,11 @@ class VectorSequenceAngleMSE(Task):
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "input": x["data"][:-1],
-                "seq_idxs": x["seq_idxs"][:-1],
-                "target_idxs": x["seq_idxs"],
+                "values": x["angles"][:, :-1],
+                "inp_idxs": x["seq_idxs"][:, :-1],
+                "tar_idxs": x["seq_idxs"],
             },
-            "targets": x["data"],
+            "targets": x["angles"],
             "extra": x["extra"],
         })
 
@@ -764,128 +760,71 @@ class VectorSequenceAngleMSE(Task):
         def unit_vector_to_angle(unit_vector):
             return tf.math.atan2(unit_vector[..., 0], unit_vector[..., 1])
 
-        @tf.function
-        def predict_fn(seed_inputs, idxs, out_var: tf.Variable):
-            batch_size = tf.shape(seed_inputs)[0]
-            seed_len = tf.shape(seed_inputs)[1]
+        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len, pm:Progress=None):
 
-            tf.assert_equal(tf.shape(idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
+            tp(inputs, "inputs")
 
-            out_var[:, :seed_len, :].assign(seed_inputs)
-
-            n = out_var.shape[1]
-            for i in tf.range(seed_len, n): # converted to tf.while_loop
-                inputs = {
-                    "angles": out_var[:, :i, :],
-                    "seq_idxs": idxs[:, :i],
-                }
-                outputs = model(inputs, training=False)
-                outputs = unit_vector_to_angle(outputs[:, -1, :, :])
-                out_var[:, i, :].assign(outputs)
-            return out_var
-
-        warned = False
-        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len):
-            """
-            Produce a bunch of stuff that can be visualized.
-
-            N = the number of sequences to sample, if sampling.
-
-
-            If the model output is a distribution, we get multiple samples rather than just one prediction,
-            and we also get to look at the entropy.
-
-            If the model supports querying over the entire sequence at once, we get previews of the mean,
-            entropy etc. as it samples.
-
-            A "Video" shows:
-                a. The "seed" inputs at each step
-                b. The predicted outputs at each step
-                c. An image of the sampling order
-
-                (If the model supports querying)
-                c. The mean of the remaining outputs at each step
-
-                (If the model output is a distribution)
-                d. The entropy of the remaining outputs at each step
-
-            #### What this function returns ####
-
-
-            1.  "Examples". Just the inputs repeated back.
-
-            (The remainder only if a model has been provided)
-
-            2.  A video of each of the examples being taken bit-by-bit. For models that support
-                querying, looking at frame 0 of this video gives us the model's "blind" prediction,
-                and the mean should show the mean/modal value of each position in the dataset.
-
-            (If the model supports querying)
-            3.  A video of each of the examples being taken bit-by-bit, in random order.
-
-            (If seed inputs are provided)
-            4.  "Seeded" predictions: Predict each output position given the previous output positions
-                starting with a batch of seed inputs.
-
-                a. One video of the mean/modal sequence
-
-                (If the model output is a distribution)
-                b. N videos of sampled sequences
-
-            5.  "Unseeded" predictions: Predict each output position given the previous output positions,
-                starting with only the begin token.
-
-                a. One video of the mean/modal sequence
-
-                (If the model output is a distribution)
-                b. N videos of sampled sequences
-
-            (If the model output is a distribution & supports querying)
-            5. "Dynamic order" predictions: Predict each output position given the previous output positions,
-                starting with only the begin token, but with the order of the output positions chosen based
-                on some statistic of the distribution.
-
-                a. Highest-entropy-first
-                    a. One video of the mean/modal sequence
-                    b. N videos of sampled sequences
-                b. Lowest-entropy-first
-                    a. One video of the mean/modal sequence
-                    b. N videos of sampled sequences
-
-            """
-            nonlocal warned
-
-            # new style validation using u.validate
+            # unrag
+            inputs = {
+                "angles": tf.gather(inputs["angles"], tf.range(output_len), axis=1),
+                "seq_idxs": tf.gather(inputs["seq_idxs"], tf.range(output_len), axis=1),
+            }
 
             u.validate(inputs, "inputs", {
-                "data": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None], tf.int32),
+                "angles": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "seq_idxs": tf.TensorSpec([None, None, 1], tf.int32),
             })
-            data = inputs["data"]
-            seq_idxs = inputs["seq_idxs"]
-            batch_size = shape(data)[0]
-            seq_len = shape(data)[1]
+
+            batch_size = shape(inputs["angles"])[0]
+            seq_len = shape(inputs["angles"])[1]
+
+            assert shape(inputs["seq_idxs"])[0] == batch_size, f"inputs['seq_idxs'] must have same batch size as inputs['angles'], but got inputs['seq_idxs'].shape[0] = {shape(inputs['seq_idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
 
             assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
             assert output_len > 0, f"output_len ({output_len}) must be > 0"
 
 
+            if seed_len > 0:
+                seed = inputs["angles"][:, :seed_len]
+            else:
+                seed = None
+
             if output_len > self.chunk_size and not warned:
                 print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.chunk_size}", file=sys.stderr)
                 warned = True
 
-            seed_input = data[:, :seed_len, :]
+            def output_fn(angles, dist):
+                angles = u.angle_wrap(angles)
+                angles = angles[..., None]
+                colors = u.colorize(angles, vmin=-pi, vmax=pi, cmap="twilight_shifted")
+                return ein.rearrange(
+                    colors,
+                    '... feat chan -> ... (feat chan)',
+                )
 
-            n_features = data.shape[2]
+            return pred.predict(
+                name="Predict angles",
+                desc="Predicting angle vectors...",
+                cfg=pred.PredictInputs(
+                    out_seq_shape=[seq_len],
+                    out_feat_shape=[self.ds_cfg.n_input_dims*3],
+                    model=model,
+                    model_supports_querying=False,
+                    model_outputs_distribution=False,
+                    sampling_order="fixed",
+                    input_data=seed,
+                    idxs=inputs["seq_idxs"],
+                ),
+                pm=pm,
+                data_out_fn=output_fn,
+                default_out_var_val=ein.repeat(
+                    pred.DEFAULT_BG_COLOR,
+                    'chan -> (feat chan)',
+                    feat=self.ds_cfg.n_input_dims,
+                ),
+                outp_to_inp_fn=unit_vector_to_angle,
+            )
 
-            out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features]))
-            predict_fn(seed_input, seq_idxs, out_var)
-            if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)).numpy():
-                raise ValueError(f"NaNs in output of predict_fn of {self.name}")
-
-            return {
-                "angles": out_var,
-            }
 
         return predict_wrapper
 
@@ -911,19 +850,6 @@ if __name__ == '__main__':
     data = data.batch(5, 5)
 
     cfgs = [
-        # Box(
-        #     name="anglechunks",
-        #     task=VectorSequenceAngleMSE(
-        #         chunk_size=13,
-        #     ),
-        #     task_ds_cfg=VectorSequenceAngleMSE.self.ds_config_cls(
-        #         n_input_dims=3,
-        #     ),
-        #     embd=AngleVectorSequence(
-        #         n_embd=10,
-        #         n_repeats=1,
-        #     ),
-        # ),
         Box(
             name="chunks",
             task=VectorSequenceMSE(
@@ -966,4 +892,93 @@ if __name__ == '__main__':
 
         d = d.train.map(lambda x: dbg(x, f"{name}: train datum"))
 
-        tf.print(f"@--- {name}: concrete data\n", next(iter(d)), f"--- \n{name}: concrete data")
+        print(f"Getting concrete data for task {task.name}...")
+        next(iter(d))
+        print(f"Done.")
+        print()
+        print()
+
+
+    n_input_dims = 102
+    seq_dims = [1000]
+    data = Dataset.from_tensor_slices({
+        "angles": tf.random.uniform([5000, *seq_dims, n_input_dims], dtype=tf.float32),
+        "labels": tf.random.uniform([5000], minval=0, maxval=13, dtype=tf.int32),
+    })
+    data = data.map(lambda x: {
+        "angles": x["angles"],
+        "labels": x["labels"],
+        "seq_idxs": u.multidim_indices(seq_dims),
+        "extra": None,
+    })
+    data = DSets(
+        train=data.take(4000),
+        val=data.skip(4000).take(500),
+        test=data.skip(4500),
+    )
+    data = data.batch(5, 5)
+    cfg = Box(
+        name="anglechunks",
+        task=VectorSequenceAngleMSE(
+            chunk_size=13,
+        ),
+        task_ds_cfg=Task_DatasetConfig(
+            n_input_dims=n_input_dims,
+        ),
+        embd=AngleCodebook(
+            n_embd=11,
+            n_repeats=12,
+        ),
+    )
+    task: VectorSequenceAngleMSE = cfg.task
+    embd = cfg.embd
+    name = cfg.name
+
+    data = dbg(data, f"{name}: data before task.process")
+
+    task.recieve_dataset_config(cfg.task_ds_cfg)
+    task.configure(embd)
+
+    d = dbg(task.process(data), f"{name}: data after task.process")
+
+    d = d.train.map(lambda x: dbg(x, f"{name}: train datum"))
+
+    print(f"Getting concrete data for task {task.name}...")
+    x = next(iter(d))
+    dbg(x, f"{name}: train datum")
+    print(f"Done.")
+    print()
+    print()
+
+    model_inputs = u.input_dict(
+        Input([None, n_input_dims], dtype=u.dtype(), name="context/values"),
+        Input([None, len(seq_dims)], dtype=tf.int32,  name="context/inp_idxs"),
+    )
+
+    def demo_angle_model(inputs):
+        v = inputs["context/values"]
+        batch_size = tf.shape(v)[0]
+        seq_len = tf.shape(v)[1]
+        n_feat = tf.shape(v)[2]
+
+        v = tf.concat([
+            tf.ones([batch_size, 1, n_feat], dtype=tf.float32),
+            v,
+        ], axis=1)
+        return tf.stack([
+            tf.sin(tf.reduce_mean(v, axis=1)[:, None, :] * 0.9),
+            tf.cos(tf.reduce_mean(v, axis=1)[:, None, :] * 1.1),
+        ], axis=-1)
+
+    model = Model(
+        inputs=model_inputs,
+        outputs=demo_angle_model(model_inputs),
+        name="test",
+    )
+
+    x = next(iter(data.test))
+
+    pf = task.make_predict_fn(model)
+
+    with create_progress_manager() as pm:
+        tp(pf(x, pm=pm), "predicted angles & etc.")
