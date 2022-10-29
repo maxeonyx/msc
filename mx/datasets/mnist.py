@@ -6,10 +6,9 @@ from mx.prelude import *
 
 from mx.pipeline import MxDataset, Task
 from mx.progress import Progress, create_progress_manager
-from mx.tasks import VectorSequenceMSE
-from mx.tasks.vector_sequence_mse import RandomSequenceMSE
+from mx.tasks import VectorSequenceMSE, RandomSequenceMSE
 from mx.utils import DSets
-from mx.visualizer import HoloMapVisualization, Visualization
+from mx.visualizer import Visualization
 
 @export
 class MxMNIST(MxDataset):
@@ -76,7 +75,6 @@ class MxMNIST(MxDataset):
             task.recieve_dataset_config(task.ds_config_cls(
                 seq_dims=[28, 28],
                 n_input_dims=1, # grayscale
-
             ))
             def adapt_in(x):
 
@@ -145,15 +143,14 @@ class MxMNIST(MxDataset):
         ])
 
 
-class MNISTImageViz(HoloMapVisualization):
+class MNISTImageViz(Visualization):
     """
     Produce a HoloMap to display predicted MNIST images.
     """
 
     def __init__(
         self,
-        data,
-        predict = (None, None, None),
+        model,
         name="mnist_images",
         desc="MNIST images",
         output_dir=None,
@@ -164,25 +161,11 @@ class MNISTImageViz(HoloMapVisualization):
             output_dir=output_dir,
         )
 
-        # validate data in "dataset" format (the output of MxMNIST.load)
-        u.validate(data, "data", {
-            "image": tf.TensorSpec(shape=(None, 28, 28, 1), dtype=tf.uint8),
-        })
-        self._data = data
+        self.model = None
 
-        if predict is not None:
-            # if this visualization will be predicting stuff, idxs need to be
-            # provided
-            u.validate(data, "data", {
-                "image": tf.TensorSpec(shape=(None, 28, 28, 1), dtype=tf.uint8),
-                "idxs": tf.TensorSpec(shape=(None, 784, 2), dtype=tf.int32),
-            })
+    def __call__(self, timestep=None, pm: Progress=None) -> list:
 
-        self._task_predict_fn, self._adapt_in, self._adapt_out = predict
-
-    def _make_hmaps(self, timestep=None, pm: Progress=None) -> list:
-
-        data = self._data
+        data = predict_mnist_data(self.model, from_scratch=True, random_order=False, pm=pm)
 
         def img(data, title):
             return hv.Image(data.numpy()).opts(
@@ -238,67 +221,98 @@ class MNISTImageViz(HoloMapVisualization):
             label="Examples"
         ))
 
-        if self._task_predict_fn is not None:
-            task_predict_fn = self._task_predict_fn
-            adapt_in = self._adapt_in
-            adapt_out = self._adapt_out
 
-            # predict blind. Make a batch of 784 predictions, one for each pixel
-            # in the image, each with a specific target idx.
-            empty_seq = {
-                "values": tf.zeros([784, 0, 1], dtype=u.dtype()),
-                "seq_idxs": ein.rearrange(u.multidim_indices([28, 28]), 'hw i -> hw 1 i'),
-            }
-            pred_blind = task_predict_fn(empty_seq, output_len=1, pm=pm)
-            pred_blind = adapt_out({
-                "values": ein.rearrange(pred_blind["values"], '(h w) 1 c -> 1 (h w) c', h=28, w=28)
-            })
 
-            if timestep is not None:
-                key_dims = [hv.Dimension(("timestep", "Timestep"), default=timestep)]
-                hmaps.append(
-                    hv.HoloMap(
-                        {
-                            key(None, timestep): img(pred_blind["image"][0], title(None, timestep))
-                        },
-                        kdims=key_dims,
-                        label="Predicted Image (blind)",
-                    )
-                )
-            else:
-                hmaps.append(
-                    img(pred_blind["image"][0], title(None, None))
-                )
-
-            pred = adapt_out(
-                task_predict_fn(
-                    inputs=adapt_in(data),
-                    seed_len=784//2,
-                    output_len=784,
-                )
-            )
-            u.stats(pred["image"])
-
-            key_dims = [
-                hv.Dimension(("batch", "Batch")),
-            ]
-            if timestep is not None:
-                key_dims.append(hv.Dimension(("timestep", "Timestep"), default=timestep))
-
-            hmaps.extend([
-                hv.GridSpace(
+        if timestep is not None:
+            key_dims = [hv.Dimension(("timestep", "Timestep"), default=timestep)]
+            hmaps.append(
+                hv.HoloMap(
                     {
-                        key(i_batch, timestep): img(pred_data[i_batch], title(i_batch, timestep))
-                        for i_batch in range(len(pred_data))
+                        key(None, timestep): img(pred_blind["image"][0], title(None, timestep))
                     },
                     kdims=key_dims,
-                    label=f"Predicted Images ({name})",
+                    label="Predicted Image (blind)",
                 )
-                for name, pred_data in pred.items()
-            ])
+            )
+        else:
+            hmaps.append(
+                img(pred_blind["image"][0], title(None, None))
+            )
 
+        pred = adapt_out(
+            task_predict_fn(
+                inputs=adapt_in(data),
+                seed_len=784//2,
+                output_len=784,
+            )
+        )
+        u.stats(pred["image"])
+
+        key_dims = [
+            hv.Dimension(("batch", "Batch")),
+        ]
+        if timestep is not None:
+            key_dims.append(hv.Dimension(("timestep", "Timestep"), default=timestep))
+
+        hmaps.extend([
+            hv.GridSpace(
+                {
+                    key(i_batch, timestep): img(pred_data[i_batch], title(i_batch, timestep))
+                    for i_batch in range(len(pred_data))
+                },
+                kdims=key_dims,
+                label=f"Predicted Images ({name})",
+            )
+            for name, pred_data in pred.items()
+        ])
+
+        if timestep is not None:
+            if self._fig is None:
+                self._fig = fig
+            else:
+                for existing_hmap, new_hmap in zip(self._fig, fig):
+                    existing_hmap.update(new_hmap)
+            fig = self._fig
 
         return hmaps
+
+
+def predict_mnist_data(model, from_scratch=False, random_order=False, ds: MxMNIST = None, pm: Progress=None) -> dict:
+
+    ds = ds or MxMNIST()
+
+    if from_scratch:
+        inputs = tf.zeros([1, 0, 1], dtype=u.dtype())
+        seed_len = 0
+    else:
+        inputs = next(iter(ds.load(10, 10).test))
+        if random_order:
+            seed_len = 25
+        else:
+            seed_len = 784//2
+
+    values = ein.rearrange(
+        inputs["image"],
+        'b h w c -> b (h w) c'
+    ),
+
+    if random_order:
+        idxs = tf.stack([
+            tf.random.shuffle(
+                u.multidim_indices([28, 28])
+            )
+            for _ in range(len(inputs["image"]))
+        ], axis=0)
+        values = tf.gather_nd(values, idxs, batch_dims=1)
+    else:
+        idxs = ein.repeat(
+            u.multidim_indices([28, 28]),
+            'h w -> b (h w) i',
+            b=len(inputs["image"])
+        )
+
+    tp(values, idxs)
+
 
 if __name__ == '__main__':
     u.set_debug()
@@ -306,6 +320,6 @@ if __name__ == '__main__':
     batch_size = 10
     data = next(iter(mnist.load(batch_size, batch_size).test))
     tp(data, "MxMNIST data format")
-    viz = MNISTImageViz(data)
+    viz = MNISTImageViz(model=None)
     with create_progress_manager() as pm:
         viz(pm=pm)

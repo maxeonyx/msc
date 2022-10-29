@@ -11,7 +11,7 @@ from typing import Callable
 import enlighten
 
 from mx.export import export
-from mx.run_name import get_run_name
+from mx.run_name import get_run_name, set_run_name
 
 ## Note: we don't import using mx.prelude or mx.utils because we want this file
 ## to be usable before tensorflow is imported.
@@ -96,11 +96,9 @@ class Progress:
     def __init__(
         self,
         manager: enlighten.Manager,
-        run_name: str,
         min_delta: float = 0.5 / 8,
     ):
         self.manager = manager
-        self.run_name = run_name
         self.min_delta = min_delta
         self.tasks: list[str] = []
         self.update_fns: list[Callable[[int], None]] = []
@@ -111,21 +109,13 @@ class Progress:
 
     def task_format(self):
 
-        task_str = " > ".join(self.tasks)
+        run_name = get_run_name()
 
-        if self.run_name is not None:
-            run_str = f"Run {self.run_name}"
+        if len(self.tasks) == 0:
+            return f" {run_name} "
         else:
-            run_str = ""
-
-        if len(task_str) > 0 and len(run_str) > 0:
-            return f" {run_str}: {task_str} "
-        elif len(task_str) > 0:
-            return f" {task_str} "
-        elif len(run_str) > 0:
-            return f" {run_str} "
-        else:
-            return ""
+            task_str = " > ".join(self.tasks)
+            return f" {run_name}: {task_str} "
 
     @contextmanager
     def enter_spinner(
@@ -317,16 +307,13 @@ class SubProgressManager:
 
 @export
 @contextmanager
-def create_progress_manager(
-    run_name: str | None = None,
-):
+def create_progress_manager():
     t = None
     update_title_bar = None
     with enlighten.get_manager() as e_manager:
         try:
             manager = Progress(
                 manager=e_manager,
-                run_name=run_name,
             )
 
             done = False
@@ -369,7 +356,8 @@ def create_progress_manager(
                 manager.update_fns_to_remove.append((update_title_bar, lambda: manager.title_bar.close()))
 
 if __name__ == '__main__':
-    with create_progress_manager("Test") as pm:
+    set_run_name("Test")
+    with create_progress_manager() as pm:
         with pm.enter_spinner("Loading", "Loading Data"):
             time.sleep(2)
         with pm.enter_training(3) as (pm2, prog_bar):
@@ -382,7 +370,6 @@ if __name__ == '__main__':
                 time.sleep(0.1)
 
 def init_with_progress():
-    run_name = get_run_name()
-    with create_progress_manager(run_name) as pm:
+    with create_progress_manager() as pm:
         with pm.enter_spinner("Init Tensorflow", "Initializing Tensorflow..."):
             import mx.prelude

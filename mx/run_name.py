@@ -1,4 +1,5 @@
 
+import datetime
 import os
 
 from mx.export import export
@@ -13,7 +14,8 @@ def get_run_name() -> str | None:
     try:
         return os.environ["RUN_NAME"]
     except KeyError:
-        return None
+        date = datetime.datetime.now().date().isoformat()
+        return f"interactive-{date}"
 
 @export
 def set_run_name(run_name) -> str:

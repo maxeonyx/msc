@@ -26,17 +26,18 @@ def codebook(n_tokens: int, embd_shape: Einshape, add_begin_token: bool = True, 
 
 @export
 class tokens(Enum):
-    BEGIN = 0
-    END   = 1
+    BEGIN_VAL = 0
+    BEGIN = 1
+    END   = 2
 
 @export
 def prepend_token(token: tokens, n_embd: int, name="prepend_token") -> Model:
 
     assert token in tokens, f"Unknown token {tokens!r}, must be one of {list(tokens.__members__)!r}"
 
-    initializer = tf.keras.initializers.TruncatedNormal(stddev=1/sqrt(n_embd))
+    initializer = lambda: tf.keras.initializers.TruncatedNormal(stddev=1/sqrt(n_embd))
 
-    token_embedding = layers.Embedding(len(tokens), n_embd, embeddings_initializer=initializer, name=f"{name}/begin_embd")
+    token_embedding = layers.Embedding(1, n_embd, embeddings_initializer=initializer(), name=f"{name}/begin_embd")
 
     tf_token = tf.constant(token.value, tf.int32)
 
@@ -55,6 +56,10 @@ def prepend_token(token: tokens, n_embd: int, name="prepend_token") -> Model:
     )
 
     return Model(inputs=inputs, outputs=call(inputs), name=name)
+
+
+
+
 
 @export
 def positional_embedding(n_embd, max_wavelength=10000, name="embd") -> Model:
@@ -95,38 +100,6 @@ def positional_embedding(n_embd, max_wavelength=10000, name="embd") -> Model:
 
     return Model(inputs=inputs, outputs=positional_encoding(inputs), name=name)
 
-@export
-def angle_embedding(num_repeats: int, input_shape: Einshape, embd_shape: Einshape, name="angle_embd") -> Model:
-    """
-    Embed angles as unit vectors. Create many copies of them rotated
-    evenly around one quarter of the unit circle.
-    """
-
-    assert embd_shape.f_product % 2 == 0, f"embd_dim must be divisible by 2 to use angle embedding, got embd_dim={embd_shape.f_product}"
-
-    angles_shape = input_shape.append_feature_dim("repeats", num_repeats).append_feature_dim("sincos", 2)
-
-    dense_out = mxl.featurewise_dense(in_dims=angles_shape, out_dims=embd_shape, name=f"{name}/out")
-
-    def angle_call(angles):
-        scale = (tau / 4.) * (1. / num_repeats) # only need to produce rotations up to tau/4, because the model can easily invert angles
-        offsets = tf.range(num_repeats, dtype=u.dtype()) * scale
-        # add "repeats" dim
-        angles = angles[..., None]
-        angles = angles + tf.broadcast_to(offsets, tf.broadcast_dynamic_shape(tf.shape(offsets), tf.shape(angles)))
-        # add "sincos" dim
-        angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
-        # flatten to "embd" dim
-        embd = dense_out(angles)
-
-        return embd
-
-    inputs = u.input_dict(
-        Input(shape=input_shape.s_f_shape, dtype=u.dtype(), name="angles"),
-    )
-
-    return Model(inputs=inputs, outputs=angle_call(**inputs), name=name)
-
 
 
 @export
@@ -137,6 +110,8 @@ class SeqEmbd_TaskConfig(Embedding_TaskConfig):
     Max length of the sequence to be embedded.
     Max value among seq_idxs.
     """
+
+    chunk_length: int
 
 @export
 class AngleCodebook(MxEmbedding):
@@ -197,16 +172,12 @@ class AngleCodebook(MxEmbedding):
 
             angles = tf.cast(angles, u.dtype())
 
-            scale = (tau / 4.) * (1. / self.n_repeats) # only need to produce rotations up to tau/4, because the model can easily invert angles
-            offsets = tf.cast(tf.range(self.n_repeats), dtype=u.dtype()) * scale
-            # add "repeats" dim
-            angles = angles[..., None]
-            angles = angles + tf.broadcast_to(offsets, tf.broadcast_dynamic_shape(tf.shape(offsets), tf.shape(angles)))
-            # add "sincos" dim
-            angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
-            angles = ein.rearrange(angles, "... seq feat rep sincos -> ... seq (feat rep sincos)")
-            # flatten to "embd" dim
-            angle_embd = dense_out(angles)
+            angle_embd = ein.repeat(
+                angles,
+                "... seq feat -> ... seq (feat rep)",
+                rep=self.n_repeats,
+            )
+            angle_embd /= tf.sqrt(tf.cast(shape(angle_embd)[-1], u.dtype()))
 
             ## make position embeddings
             pos_idxs = inputs["context/inp_idxs"]
@@ -216,12 +187,251 @@ class AngleCodebook(MxEmbedding):
 
         inputs = u.input_dict(
             Input([None, self.task_cfg.n_input_dims], dtype=u.dtype(), name="context/values"),
-            Input([None],                             dtype=tf.int32,  name="context/inp_idxs"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/inp_idxs"),
         )
         return Model(
             inputs=inputs,
             outputs=embed(inputs),
-            name="TransformerAngleVectorEmbedding",
+            name=self.name,
+        ), inputs
+
+
+@export
+class AngleCodebookMultidim(MxEmbedding):
+    """
+    Simple embedding for transformer regression over angles.
+
+    Embeds angles as unit vectors. Creates `n_repeats` copies of them, rotated
+    evenly around one quarter of the unit circle.
+
+    Embeds positions with a codebook.
+    """
+
+    def __init__(
+        self,
+        n_embd: int,
+        n_repeats: int,
+        name="angleembd",
+        desc="Angles: `n_repeats` rotations -> linear layer. Positions: Abs position codebook.",
+    ) -> None:
+        super().__init__(
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
+        )
+        self.n_repeats = n_repeats
+        "Number of additional rotations of each angle to be added to the embedding."
+
+        self.task_config_type: Type[CodebookMultidim_TaskConfig] = CodebookMultidim_TaskConfig
+        self.task_cfg: CodebookMultidim_TaskConfig | None = None
+
+    def configure(self, model: MxModel):
+        if isinstance(model, DecoderOnlyTransformer):
+            model.recieve_embd_config(model.embd_cfg_type(
+                n_embd=self.n_embd,
+            ))
+        else:
+            raise NotImplementedError(f"Embedding {type_name(self)} does not support Model {type_name(model)}. If using autoreload in IPython, try restarting the interpreter.")
+
+    def make_embedder(self) -> Model:
+        "Creats the keras model for the embedding."
+
+        assert self.n_embd % 2 == 0, f"n_embd must be divisible by 2 to use angle embedding, got n_embd={self.n_embd}"
+        assert self.task_cfg is not None, "Must call task.configure(embedding) before embedding.make_embedder()."
+
+        pos_embedder = layers.Embedding(self.task_cfg.sequence_length, self.n_embd, name="pos_embedder")
+        dense_out = layers.Dense(self.n_embd, name="embd")
+
+
+        n_seq_dims = len(self.task_cfg.seq_dims)
+
+        initializer = keras.initializers.TruncatedNormal(stddev=1./sqrt(self.n_embd))
+
+        # embed using index within current window
+        win_pos_embedder = layers.Embedding(self.task_cfg.seq_len, self.n_embd, name=f"win_pos_embd", embeddings_initializer=initializer)
+
+        n_total = prod(self.task_cfg.seq_dims)
+
+        abs_pos_embedder = layers.Embedding(n_total, self.n_embd, name=f"abs_pos_embd", embeddings_initializer=initializer)
+
+
+        import mx.layers as mxl
+        prepend_begin_token = prepend_token(
+            token=tokens.BEGIN,
+            n_embd=self.n_embd,
+        )
+
+        def embed(inputs):
+
+            ## make angle embeddings
+            angles = inputs["context/values"]
+
+            angles = tf.cast(angles, u.dtype())
+
+            angle_embd = ein.repeat(
+                angles,
+                "... seq feat -> ... seq (feat rep)",
+                rep=self.n_repeats,
+            )
+            angle_embd /= tf.sqrt(tf.cast(shape(angle_embd)[-1], u.dtype()))
+
+            ## make position embeddings
+            pos_idxs = inputs["context/inp_idxs"]
+            pos_embd = pos_embedder(pos_idxs)
+
+            return prepend_begin_token(angle_embd + pos_embd)
+
+        inputs = u.input_dict(
+            Input([None, self.task_cfg.n_input_dims], dtype=u.dtype(), name="context/values"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/inp_idxs"),
+        )
+        return Model(
+            inputs=inputs,
+            outputs=embed(inputs),
+            name=self.name,
+        ), inputs
+
+def make_angle_embedder(n_inp, n_embd, n_repeats, name="angle_embd"):
+
+    prepend_begin_val = prepend_token(token=tokens.BEGIN, n_embd=n_inp*2, name=f"{name}/prepend_begin_val")
+
+    scale = (tau / 4.) * (1. / n_repeats) # only need to produce rotations up to tau/4, because the model can easily invert angles
+    offsets = tf.cast(tf.range(n_repeats), dtype=u.dtype()) * scale
+
+    dense_in = layers.Dense(n_embd, name=f"{name}/dense")
+
+    def embed_angles(angles):
+
+        angles = tf.cast(angles, u.dtype())
+        angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
+        angles = ein.rearrange(
+            angles,
+            "... feat sincos -> ... (feat sincos)",
+        )
+
+        angle_passthrough = prepend_begin_val(angles)
+
+        angles = ein.repeat(
+            angles,
+            "... -> ... rep",
+            rep=n_repeats,
+        ) + offsets
+
+        angles = ein.rearrange(
+            angles,
+            "... feat rep -> ... (feat rep)",
+        )
+
+        # flatten to "embd" dim
+        angle_embd = dense_in(angles)
+
+        angle_embd /= tf.sqrt(tf.cast(angles.shape[-1]//2, u.dtype()))
+
+        return angle_passthrough, angle_embd
+
+    return embed_angles
+
+
+@export
+class AngleCodebookTriples(MxEmbedding):
+    """
+    Simple embedding for transformer regression over angles.
+
+    Embeds angles as unit vectors. Creates `n_repeats` copies of them, rotated
+    evenly around one quarter of the unit circle.
+
+    Embeds positions with a codebook.
+    """
+
+    def __init__(
+        self,
+        n_embd: int,
+        n_repeats: int,
+        name="congletrip",
+        desc="Angles: `n_repeats` rotations -> linear layer. Positions: Abs position codebook.",
+    ) -> None:
+        super().__init__(
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
+        )
+        self.n_repeats = n_repeats
+        "Number of additional rotations of each angle to be added to the embedding."
+
+        self.task_config_type: Type[SeqEmbd_TaskConfig] = SeqEmbd_TaskConfig
+        self.task_cfg: SeqEmbd_TaskConfig | None = None
+
+    def configure(self, model: MxModel):
+        if isinstance(model, DecoderOnlyTransformer):
+            model.recieve_embd_config(model.embd_cfg_type(
+                n_embd=self.n_embd,
+            ))
+        else:
+            raise NotImplementedError(f"Embedding {type_name(self)} does not support Model {type_name(model)}. If using autoreload in IPython, try restarting the interpreter.")
+
+    def make_embedder(self) -> Model:
+        "Creats the keras model for the embedding."
+
+        assert self.n_embd % 2 == 0, f"n_embd must be divisible by 2 to use angle embedding, got n_embd={self.n_embd}"
+        assert self.task_cfg is not None, "Must call task.configure(embedding) before embedding.make_embedder()."
+
+        initializer = lambda: tf.keras.initializers.TruncatedNormal(stddev=1/sqrt(self.n_embd))
+
+        inp_pos_embedder = layers.Embedding(self.task_cfg.sequence_length, self.n_embd, embeddings_initializer=initializer(), name="inp_pos_embedder")
+        tar_pos_embedder = layers.Embedding(self.task_cfg.sequence_length, self.n_embd, embeddings_initializer=initializer(), name="tar_pos_embedder")
+
+        # embed using index within current window
+        win_inp_pos_embedder = layers.Embedding(self.task_cfg.chunk_length, self.n_embd, embeddings_initializer=initializer(), name=f"win_inp_pos_embedder")
+        win_tar_pos_embedder = layers.Embedding(self.task_cfg.chunk_length, self.n_embd, embeddings_initializer=initializer(), name=f"win_tar_pos_embedder")
+
+        angle_embedder = make_angle_embedder(n_inp=self.task_cfg.n_input_dims, n_embd=self.n_embd, n_repeats=self.n_repeats)
+
+        prepend_begin_token = prepend_token(
+            token=tokens.BEGIN,
+            n_embd=self.n_embd,
+            name="prepend_begin_token",
+        )
+        def embed(inputs):
+
+            ## make angle embeddings
+            angles = inputs["context/values"]
+
+            angle_passthrough, angle_embd = angle_embedder(angles)
+
+            window_positions = tf.tile(
+                tf.range(shape(inputs["context/tar_idxs"])[1])[None],
+                [shape(inputs["context/tar_idxs"])[0], 1],
+            )
+            win_inp_pos_embd = win_inp_pos_embedder(window_positions[:, :-1])
+            win_tar_pos_embd = win_tar_pos_embedder(window_positions)
+
+            ## make position embeddings
+            inp_pos_idxs = inputs["context/inp_idxs"][:, :, 0]
+            tp(inp_pos_idxs, "inp_pos_idxs")
+            inp_pos_embd = inp_pos_embedder(inp_pos_idxs)
+
+            tar_pos_idxs = inputs["context/tar_idxs"][:, :, 0]
+            tar_pos_embd = tar_pos_embedder(tar_pos_idxs)
+            tp(tar_pos_idxs, "tar_pos_idxs")
+
+            embd = win_tar_pos_embd + tar_pos_embd + prepend_begin_token(angle_embd + inp_pos_embd + win_inp_pos_embd)
+
+            # scale back to unit length
+            embd /= tf.sqrt(tf.cast(5, u.dtype()))
+
+
+            return angle_passthrough, embd
+
+
+        inputs = u.input_dict(
+            Input([None, self.task_cfg.n_input_dims], dtype=u.dtype(), name="context/values"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/inp_idxs"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/tar_idxs"),
+        )
+        return Model(
+            inputs=inputs,
+            outputs=embed(inputs),
+            name=self.name,
         ), inputs
 
 
@@ -271,7 +481,6 @@ class AngleSinusoidal(MxEmbedding):
         pos_embedder = positional_embedding(self.n_embd)
         dense_out = layers.Dense(self.n_embd, name="embd")
 
-        import mx.layers as mxl
         prepend_begin_token = prepend_token(
             token=tokens.BEGIN,
             n_embd=self.n_embd,
@@ -284,22 +493,24 @@ class AngleSinusoidal(MxEmbedding):
 
             angles = tf.cast(angles, u.dtype())
 
-            scale = (tau / 4.) * (1. / self.n_repeats) # only need to produce rotations up to tau/4, because the model can easily invert angles
-            offsets = tf.cast(tf.range(self.n_repeats), dtype=u.dtype()) * scale
-            # add "repeats" dim
-            angles = angles[..., None]
-            angles = angles + tf.broadcast_to(offsets, tf.broadcast_dynamic_shape(tf.shape(offsets), tf.shape(angles)))
-            # add "sincos" dim
-            angles = tf.stack([tf.sin(angles), tf.cos(angles)], axis=-1)
-            angles = ein.rearrange(angles, "... seq feat rep sincos -> ... seq (feat rep sincos)")
-            # flatten to "embd" dim
-            angle_embd = dense_out(angles)
+            angle_embd = ein.repeat(
+                angles,
+                "... seq feat -> ... seq (feat rep)",
+                rep=self.n_repeats,
+            )
+            angle_embd /= tf.sqrt(tf.cast(shape(angle_embd)[-1], u.dtype()))
 
             ## make position embeddings
             pos_idxs = inputs["context/inp_idxs"]
             pos_embd = pos_embedder(pos_idxs)
 
-            return prepend_begin_token(angle_embd + pos_embd)
+            pos_embd /= tf.sqrt(tf.cast(shape(pos_embd)[-1]//2, u.dtype()))
+
+            embd = prepend_begin_token(angle_embd + pos_embd)
+
+            embd /= tf.sqrt(tf.cast(2, u.dtype()))
+
+            return embd
 
         inputs = u.input_dict(
             Input([None, self.task_cfg.n_input_dims], dtype=u.dtype(), name="context/values"),
@@ -308,12 +519,109 @@ class AngleSinusoidal(MxEmbedding):
         return Model(
             inputs=inputs,
             outputs=embed(inputs),
-            name="TransformerAngleVectorEmbedding",
+            name=self.name,
         ), inputs
+
+
+
+@export
+class AngleSinusoidalTriples(MxEmbedding):
+    """
+    Simple embedding for transformer regression over angles.
+
+    Embeds angles as unit vectors. Creates `n_repeats` copies of them, rotated
+    evenly around one quarter of the unit circle.
+
+    Embeds positions with a sinudoidal positional encoding.
+    """
+
+    def __init__(
+        self,
+        n_embd: int,
+        n_repeats: int,
+        name="singletrip",
+        desc="Angles: `n_repeats` rotations -> linear layer. Positions: sinudoidal positional encoding.",
+    ) -> None:
+        super().__init__(
+            n_embd=n_embd,
+            name=name,
+            desc=desc,
+        )
+        self.n_repeats = n_repeats
+        "Number of additional rotations of each angle to be added to the embedding."
+
+        self.task_config_type: Type[SeqEmbd_TaskConfig] = SeqEmbd_TaskConfig
+        self.task_cfg: SeqEmbd_TaskConfig | None = None
+
+    def configure(self, model: MxModel):
+        if isinstance(model, DecoderOnlyTransformer):
+            model.recieve_embd_config(model.embd_cfg_type(
+                n_embd=self.n_embd,
+            ))
+        else:
+            raise NotImplementedError(f"Embedding {type_name(self)} does not support Model {type_name(model)}. If using autoreload in IPython, try restarting the interpreter.")
+
+    def make_embedder(self) -> Model:
+        "Creats the keras model for the embedding."
+
+        assert self.n_embd % 2 == 0, f"n_embd must be divisible by 2 to use angle embedding, got n_embd={self.n_embd}"
+        assert self.task_cfg is not None, "Must call task.configure(embedding) before embedding.make_embedder()."
+
+        pos_embedder = positional_embedding(self.n_embd, name="pos_embd")
+
+        angle_embedder = make_angle_embedder(n_inp=self.task_cfg.n_input_dims, n_embd=self.n_embd, n_repeats=self.n_repeats)
+
+        prepend_begin_embd = prepend_token(
+            token=tokens.BEGIN,
+            n_embd=self.n_embd,
+            name="prepend_begin_embd",
+        )
+
+        def embed(inputs):
+
+            ## make angle embeddings
+            angles = inputs["context/values"]
+
+            angle_passthrough, angle_embd = angle_embedder(angles)
+
+            # # flatten to "embd" dim
+            # angle_embd = dense_out(angles)
+
+            ## make position embeddings
+            inp_pos_idxs = inputs["context/inp_idxs"][:, :, 0]
+            tp(inp_pos_idxs, "inp_pos_idxs")
+            inp_pos_embd = pos_embedder(inp_pos_idxs)
+            inp_pos_embd /= tf.sqrt(tf.cast(shape(inp_pos_embd)[-1], u.dtype())) # normalize
+
+            tar_pos_idxs = inputs["context/tar_idxs"][:, :, 0]
+            tar_pos_embd = pos_embedder(tar_pos_idxs)
+            tar_pos_embd /= tf.sqrt(tf.cast(shape(tar_pos_embd)[-1], u.dtype())) # normalize to same scale as angle_embd
+            tp(tar_pos_idxs, "tar_pos_idxs")
+
+            embd = tar_pos_embd + prepend_begin_embd(angle_embd + inp_pos_embd)
+
+            # scale back to unit length
+            embd /= tf.sqrt(tf.cast(3, u.dtype()))
+
+            return angle_passthrough, embd
+
+
+        inputs = u.input_dict(
+            Input([None, self.task_cfg.n_input_dims], dtype=u.dtype(), name="context/values"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/inp_idxs"),
+            Input([None, 1],                          dtype=tf.int32,  name="context/tar_idxs"),
+        )
+        return Model(
+            inputs=inputs,
+            outputs=embed(inputs),
+            name=self.name,
+        ), inputs
+
+
 
 @export
 @dataclass
-class VectorCodebookMultidim_TaskConfig(Embedding_TaskConfig):
+class CodebookMultidim_TaskConfig(Embedding_TaskConfig):
     seq_len: int
     """
     Max length of the flattened embedding sequence.
@@ -350,8 +658,8 @@ class VectorCodebookMultidim(MxEmbedding):
             desc=desc,
         )
 
-        self.task_config_type: Type[VectorCodebookMultidim_TaskConfig] = VectorCodebookMultidim_TaskConfig
-        self.task_cfg: VectorCodebookMultidim_TaskConfig = None
+        self.task_config_type: Type[CodebookMultidim_TaskConfig] = CodebookMultidim_TaskConfig
+        self.task_cfg: CodebookMultidim_TaskConfig = None
 
     def configure(self, model: MxModel):
 
@@ -431,6 +739,8 @@ class Multidim_TaskConfig(Embedding_TaskConfig):
     """
     Max value among seq_idxs for the respective dimensions.
     """
+
+    chunk_length: int
 
 
 @export
@@ -697,6 +1007,7 @@ if __name__ == "__main__":
     embedding.receive_task_config(embedding.task_config_type(
         n_input_dims=6,
         sequence_length=10,
+        chunk_length=10,
     ))
 
     dbg(data, "data")

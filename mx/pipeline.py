@@ -4,11 +4,11 @@ import abc
 from dataclasses import dataclass
 from datetime import datetime
 import re
-from typing import Callable, Literal, Type
+from typing import Callable, Type
 
 from mx.prelude import *
 from mx.utils import DSets
-from mx.visualizer import StatefulVisualization, Visualization, Visualizer, VizCfg
+from mx.visualizer import Visualization, Visualizer, VizCfg
 
 @export
 class MxDataset(abc.ABC):
@@ -73,10 +73,6 @@ class MxDataset(abc.ABC):
         small dataset, or there is some other reason not to. This can be done
         using the `snapshot_cache_split` function.
         """
-        pass
-
-    @abc.abstractmethod
-    def get_visualizations(self, viz_batch_size, task_specific_predict_fn, run_name) -> dict[str, Visualization]:
         pass
 
     def _snapshot_and_split(self, d: tf.data.Dataset, buffer_size=None) -> DSets:
@@ -150,6 +146,8 @@ class Task(abc.ABC):
         self,
         name: str,
         desc: str,
+        is_distribution: bool,
+        is_querying: bool,
     ):
         self.name = name
         "Unique, machine-readable identifier"
@@ -162,6 +160,12 @@ class Task(abc.ABC):
 
         self.model_config_type: Type[Task_ModelConfig] = Task_ModelConfig
         "Required model-specific config"
+
+        self.is_distribution = is_distribution
+        "Whether this task is a distribution task"
+
+        self.is_querying = is_querying
+        "Whether this task is a querying task"
 
         ## Configured by self.recieve_dataset_config(cfg) ##
         self.ds_cfg = None
@@ -351,13 +355,29 @@ class Pipeline:
         backbone = self.mx_model.make_model()
         final_layer = self.task.make_final_layer()
 
+        if u.regtype == 'bvh':
+            vals, embd = embedder(inputs)
+            embd = backbone(embd)
+            outvals = final_layer(embd)
+
+            # outs = vals + outvals
+            outs = outvals
+            outs = ein.rearrange(
+                outs,
+                "... (feat sincos) -> ... feat sincos",
+                sincos=2,
+            )
+        else:
+            outs = final_layer(backbone(embedder(inputs)))
+
         model = Model(
             inputs=inputs,
-            outputs=final_layer(backbone(embedder(inputs))),
-            name=self.name,
+            outputs=outs,
+            name=self.model_name(i),
         )
 
         model.save(self.output_dir() / model.name)
+        model.was_loaded = False
 
         return model
 
@@ -375,6 +395,8 @@ class Pipeline:
             run_dir = f"dev-{time}"
         elif run_name is None:
             run_dir = f"interactive-{time}"
+        elif run_name == "blessed":
+            run_dir = run_name
         else:
             run_dir = f"{date}-{run_name}"
 
@@ -388,18 +410,25 @@ class Pipeline:
         self._output_dir = output_dir
         return output_dir
 
-    def make_or_load_model(self, force_new=False) -> Model:
+    def make_or_load_model(self, force_new=False, force_not_new=False) -> Model:
         "Create a new model, or load the existing one if it exists. Model definitions are saved on creation."
 
         assert self.n_models == 1, "Can't make_or_load_model() when n_models > 1. Use make_or_load_models() instead."
 
         if not force_new:
             try:
-                return keras.models.load_model(self.output_dir() / self.model_name())
+                model = keras.models.load_model(self.output_dir() / self.model_name(), compile=False)
+                model.was_loaded = True
             except OSError:
-                pass
+                if force_not_new:
+                    raise
+                model = self.new_model()
+        else:
+            model = self.new_model()
 
-        return self.new_model()
+        model._name = self.model_name()
+
+        return model
 
     def make_or_load_models(self, force_new=False):
         "Yield models. Load, or create new models. Model definitions are saved on creation."
@@ -407,12 +436,16 @@ class Pipeline:
         assert self.n_models > 1, "Can't make_or_load_models() when n_models == 1. Use make_or_load_model() instead."
 
         if not force_new:
-            try:
-                for i in range(self.n_models):
-                    yield keras.models.load_model(self.output_dir() / self.model_name(i))
-                return
-            except OSError:
-                pass
+            for i in range(self.n_models):
+                try:
+                    model = keras.models.load_model(self.output_dir() / self.model_name(i))
+                    checkpointer = tf.train.Checkpoint(model)
+                    checkpointer.restore(self.output_dir() / self.model_name(i) / "checkpoint")
+                    model._name = self.model_name(i)
+                    model.was_loaded = True
+                    yield model
+                except OSError:
+                    pass
         for i in range(self.n_models):
             yield self.new_model(i)
 
@@ -426,15 +459,21 @@ class Pipeline:
         dsets = self.task.process(dsets)
         dsets = self.task.adapt(dsets)
 
-        d = dsets.train
-
-        d = (
-            d
+        d_train = dsets.train
+        d_train = (
+            d_train
             .take(self.n_steps)
             .enumerate()
             .map(lambda i, x: (i, (x["inputs"], x["targets"])))
         )
+        d_train = d_train.prefetch(100)
 
-        d = d.prefetch(100)
+        d_val = dsets.val
+        d_val = (
+            d_val
+            .enumerate()
+            .map(lambda i, x: (i, (x["inputs"], x["targets"])))
+        )
+        d_val = d_val.prefetch(100)
 
-        return d
+        return d_train, d_val

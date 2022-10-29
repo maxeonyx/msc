@@ -290,7 +290,7 @@ def np_dataset_parallel_lists(force=False, convert_deg_to_rad=True, columns=None
     return filenames, angles, n_frames
 
 @export
-def write_bvh_files(data, name, column_map, output_dir=None, convert_rad_to_deg=True):
+def write_bvh_files(data, name, column_map=COL_ALL_JOINTS, output_dir=None, convert_rad_to_deg=True):
     """
     Write a new pair of animation files (left and right hands) from a single data array.
     """
@@ -343,11 +343,12 @@ def write_bvh_files(data, name, column_map, output_dir=None, convert_rad_to_deg=
                     nums[column_map[col]] = data[i, col]
 
                 print(' '.join(str(n) for n in nums), file=out_file)
-
-    left_filename = os.path.join(output_dir, name + '.left.generated.bvh')
+    name = Path(name)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    left_filename = Path(output_dir) / name.with_suffix('.left.generated.bvh')
     write_file(left_hand, left_filename, data[:, 0])
     if data.shape[1] == 2:
-        right_filename = os.path.join(output_dir, name + '.right.generated.bvh')
+        right_filename = Path(output_dir) / name.with_suffix('.right.generated.bvh')
         write_file(right_hand, right_filename, data[:, 1])
 
 

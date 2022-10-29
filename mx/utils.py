@@ -24,7 +24,16 @@ SomeFnT = TypeVar("SomeFnT", bound=Callable)
 def tf_function(f: SomeFnT, *args, **kwargs) -> SomeFnT:
     return tf.function(f, *args, **kwargs)
 
-
+def list_previous_runs():
+    """
+    Returns a list of all the runs that have been run so far.
+    """
+    out_dir = Path("_saved_models")
+    for pipeline in out_dir.iterdir():
+        yield Box(
+            name=pipeline.name,
+            desc="",
+        )
 
 # rgb_warned = False
 # @export
@@ -149,9 +158,43 @@ def dtype() -> tft.DType:
     policy = keras.mixed_precision.global_policy()
     return policy.compute_dtype
 
+bvhreg = None
+@export
+def getbvhreg():
+    global bvhreg
+    if bvhreg is None:
+        bvhreg = tf.keras.regularizers.l1_l2(l1=0.00001, l2=0.0001)
+    return bvhreg
+
+mnistreg = None
+@export
+def getmnistreg():
+    global mnistreg
+    if mnistreg is None:
+        mnistreg = tf.keras.regularizers.l1_l2(l1=0.0001, l2=0.001)
+    return mnistreg
+
+regtype = 'bvh'
+@export
+def setregtype(regt):
+    global regtype
+    if regtype == 'bvh':
+        regtype = regt
+    elif regtype == 'mnist':
+        regtype = regt
+    else:
+        raise ValueError(f"Invalid regtype, got regtype={regtype!r}")
+
 @export
 def reg():
-    return tf.keras.regularizers.l1_l2(l1=0.0001, l2=0.001)
+    global regtype
+    if regtype == 'bvh':
+        return getbvhreg()
+    elif regtype == 'mnist':
+        return getmnistreg()
+    else:
+        raise ValueError(f"Invalid regtype, got regtype={regtype!r}")
+
 
 @export
 @contextmanager
@@ -238,6 +281,41 @@ def validate(x, var_name, spec):
     except ValidateError as e:
         # hide the stack trace for ValidateError
         raise ValidateError(str(e)) from None
+
+@export
+def show(uri, desc=None):
+    import webbrowser
+    desc = f": {desc}" if desc else ""
+    print(f"""
+╭───────────────────────────────────╼
+│ Open visualization{desc}
+│
+│     {uri}
+│
+╰───────────────────────────────────╼
+""")
+    webbrowser.open(uri)
+
+
+@export
+def expsteps(n, base=1.5):
+    """
+    return exponentially spaced steps up to n, always including n-1
+
+    >>> list(expsteps(10))
+    [0, 1, 2, 4, 8, 9]
+    >>> list(expsteps(10, base=2))
+    [0, 1, 3, 7, 9]
+    >>> list(expsteps(1000, base=2))
+    [0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 999]
+    """
+    i = 0
+    t = 0
+    while t < n-1:
+        yield int(t)
+        t += base**i
+        i += 1
+    yield n-1
 
 @export
 def funky_punky(n_0, n_max, n_total, base=2):
@@ -961,6 +1039,12 @@ def angle_wrap(angles):
     return angles
 
 
+def unit_vector_to_angle(unit_vector):
+    """
+    Convert unit vector to angle in radians
+    """
+    return tf.math.atan2(unit_vector[..., 0], unit_vector[..., 1])
+
 def circular_mean(angles, axis=0):
     # compute the circular mean of the data for this example+track
     # rotate the data so that the circular mean is 0
@@ -987,9 +1071,9 @@ def recluster(angles, circular_means=None, frame_axis=0):
 def unrecluster(angles, circular_means, n_batch_dims=0):
     # assuming the mean is currently 0, rotate the data so the mean is
     # back to the original given by `circular_means`
-    circular_means = tf.expand_dims(circular_means, axis=0) # add frame axis
-    for _ in range(n_batch_dims):
-        circular_means = tf.expand_dims(circular_means, axis=0) # add batch_dims
+    # circular_means = tf.expand_dims(circular_means, axis=0) # add frame axis
+    # for _ in range(n_batch_dims):
+    #     circular_means = tf.expand_dims(circular_means, axis=0) # add batch_dims
     angles = angles + circular_means
     angles = angle_wrap(angles)
 
@@ -1057,9 +1141,9 @@ def tf_repr(x, indent=_default_indent, depth=0, prefix=""):
         str_x = tf.constant("●None")
     elif x is None:
         str_x = tf.constant("None")
-    elif not tf.is_tensor(x):
+    elif not tf.is_tensor(x) and not isinstance(x, np.ndarray):
         str_x = tf.constant(repr(x), tf.string)
-    elif x.shape.rank == 0:
+    elif len(x.shape) == 0:
         if x.dtype == tf.string:
             str_x = tf.strings.join(["●\"", x, "\""])
         else:
@@ -1166,8 +1250,7 @@ def tf_print(s: SomeT, tag: str = None, output_stream=sys.stdout) -> SomeT:
         tag = "--- @ " + tag + "\n"
         tail = "\n---"
         depth = 1
-    if tf.is_tensor(s) and is_keras_tensor(s):
-        s = s.type_spec
+
     val = tf.strings.join([tag, tf_repr(s, depth=depth), tail])
     if tf.executing_eagerly():
         print(val.numpy().decode('utf-8'), flush=True)
@@ -1189,10 +1272,13 @@ def dbg(s: SomeT, tag: str, once_only=True) -> SomeT:
         if once_only and tag not in _dbg_statements:
             _dbg_statements[tag] = True
 
+    def nullop():
+        pass
+
     tf.cond(
         debug,
         log,
-        None,
+        nullop,
     )
 
     return s
