@@ -478,6 +478,16 @@ def write_targeted_experiment(output_dir, model=None, data=None, pm=None):
         assert model is not None
         data = predict_bvh_data(model, targeted=True, pm=pm)
 
+    # add 90 frames of static position at the end of the animation
+    data = tf.concat([
+        data,
+        ein.repeat(
+            data[:, -1], # final frame
+            'seed h j d -> seed t h j d',
+            t=90, # 90 frames
+        ),
+    ], axis=1)
+
     n_seeds = data.mean_raw_anims.shape[0]
 
     for i in range(n_seeds):

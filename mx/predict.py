@@ -66,6 +66,8 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from os import PathLike
+import threading
+import time
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
@@ -226,7 +228,7 @@ def predict_core(
             n_future_steps = (n_steps+1)-(i_step+1)
             # scatter this input into the output at all future steps
             scatter_idxs = u.multidim_indices_range(
-                tf.range(i_step+1, n_steps+1),
+                tf.range(i+1, n_steps+1),
                 (0, n_seed_inps),
                 (0, n_sample_fns),
                 (0, n_output_fns),
@@ -263,11 +265,23 @@ def predict_core(
 
             # flatten into batch_size before model, then unflatten after
 
+            if 'context/values' in model.input_shape:
+                context = {
+                    "context/values": ein.rearrange(
+                        vals_var[:, :, :i, :],
+                        'seed sample seq ... -> (seed sample) seq ...',
+                    ),
+                }
+            elif 'context/tokens' in model.input_shape:
+                context = {
+                    "context/tokens": ein.rearrange(
+                        vals_var[:, :, :i],
+                        'seed sample seq -> (seed sample) seq',
+                    ),
+                }
+
             inputs = {
-                "context/values": ein.rearrange(
-                    vals_var[:, :, :i, :],
-                    'seed sample seq ... -> (seed sample) seq ...',
-                ),
+                **context,
                 "context/inp_idxs": ein.rearrange(
                     idxs_var[:, :, :i, :],
                     'seed sample seq idx -> (seed sample) seq idx',
@@ -489,7 +503,10 @@ def predict(
         model = cfg.model
         # dbg(model.input_shape, "model.input_shape")
         # dbg(model.name, "model name")
-        n_feature_dims = model.input_shape["context/values"][-1]
+        if 'context/values' in model.input_shape:
+            n_feature_dims = model.input_shape["context/values"][-1]
+        elif 'context/tokens' in model.input_shape:
+            n_feature_dims = 0
 
         if is_seeded and has_seed_data:
             start_at = seed_data_len
@@ -582,24 +599,48 @@ def predict(
             pm = stack.enter_context(create_progress_manager())
 
         if pm is not None:
-            stack.enter_context(pm.enter_progbar(total=n_steps, name=name, desc=desc, delete_on_success=True))
+            sub_pm, progbar = stack.enter_context(pm.enter_progbar(total=n_steps, name=name, desc=desc, delete_on_success=True))
 
         step_var = tf.Variable(0, dtype=tf.int32, trainable=False, name="step_var")
         break_var = tf.Variable(False, dtype=tf.bool, trainable=False, name="break_var")
+        exc = None
+        def run_predict_in_thread():
+            nonlocal exc
+            try:
+                predict_core(
+                    model=model,
+                    start_at=start_at,
+                    i_step=step_var,
+                    break_var=break_var,
+                    viz_var=viz_var,
+                    vals_var=vals_var,
+                    idxs_var=idxs_var,
+                    sample_fns=sample_fns if is_distribution else ([outp_to_inp_fn] if outp_to_inp_fn is not None else [lambda x: x]),
+                    viz_fns=viz_fns,
+                    sampling_order=cfg.sampling_order if is_dynamic else "fixed",
+                    query_all=False,
+                )
+            except Exception as e:
+                exc = e
+                raise
 
-        predict_core(
-            model=model,
-            start_at=start_at,
-            i_step=step_var,
-            break_var=break_var,
-            viz_var=viz_var,
-            vals_var=vals_var,
-            idxs_var=idxs_var,
-            sample_fns=sample_fns if is_distribution else ([outp_to_inp_fn] if outp_to_inp_fn is not None else [lambda x: x]),
-            viz_fns=viz_fns,
-            sampling_order=cfg.sampling_order if is_dynamic else "fixed",
-            query_all=False,
-        )
+        thread = threading.Thread(target=run_predict_in_thread)
+
+        thread.start()
+        try:
+            while thread.is_alive():
+                if pm is not None:
+                    progbar.count = step_var.value().numpy()
+                    progbar.refresh()
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            break_var.assign(True)
+            thread.join()
+            raise
+        finally:
+            thread.join()
+            if exc is not None:
+                raise exc
 
     ######### make image of input data #########
     bg_img = ein.repeat(

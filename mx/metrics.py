@@ -168,5 +168,5 @@ class InstantaneousMetric(MxMetric):
 
 def wrap_loss_fn_for_metrics(loss_fn):
     def wrapped_loss_fn(inputs):
-        return loss_fn([inputs["targets"], inputs["outputs"]])
+        return loss_fn(inputs["targets"], inputs["outputs"])
     return wrapped_loss_fn

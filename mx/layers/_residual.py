@@ -1,5 +1,4 @@
 from mx.prelude import *
-from ._layer_utils import MxLayer
 from mx.utils import Einshape
 
 
@@ -46,9 +45,7 @@ def learned_mix_add(n_embd, name="mix"):
 # with "Noise Gating"
 
 
-
-
-def residual(embd_shape: Einshape, n_layers: int=None, make_layer: Callable[[int], MxLayer]=None, layers: list[MxLayer]=None, normalization='scale', dropout=0.1, name="residual") -> Model:
+def residual(embd_shape: Einshape, n_layers: int=None, make_layer: Callable[[int], u.MxLayer]=None, layers: list[u.MxLayer]=None, normalization='scale', dropout=0.1, name="residual") -> Model:
 
     making_layers = n_layers is not None and make_layer is not None
     using_layers = layers is not None

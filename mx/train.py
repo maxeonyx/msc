@@ -36,7 +36,7 @@ def default_make_train_step(
     def train_step(inputs, targets) -> TrainStepReturn:
         with tf.GradientTape() as tape:
             outputs = model(inputs)
-            loss = loss_fn([targets, outputs])
+            loss = loss_fn(targets, outputs)
             loss += tf.cast(sum(model.losses), u.dtype())
         grads = tape.gradient(loss, model.trainable_weights)
         optimizer.apply_gradients(zip(grads, model.trainable_weights))
@@ -56,7 +56,7 @@ def default_make_val_step(
     @tf.function
     def val_step(inputs, targets) -> TrainStepReturn:
         outputs = model(inputs, training=False)
-        loss = loss_fn([targets, outputs])
+        loss = loss_fn(targets, outputs)
         loss += tf.cast(sum(model.losses), u.dtype())
         return outputs, loss
 
@@ -293,6 +293,10 @@ def make_train_loop(
         loss=loss_fn,
         jit_compile=True,
     )
+    i, (inp, tar) = next(iter(data))
+    model(inp)  # build the model
+    if not model.was_loaded:
+        model.save(output_dir / model.name)
 
     # The following variables are immutable but are initialized
     # on the first call to train_loop. The boolean flags are
@@ -545,7 +549,7 @@ def make_train_loop(
                             train_loop.best_val_weights = model.get_weights()
 
                             with sub_pm.enter_spinner("Checkpoint", "Checkpointing weights...", delete_on_success=True):
-                                save_weights(model)
+                                save_weights()
 
 
                         for _, m in metrics["epoch_metrics"].items():

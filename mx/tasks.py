@@ -1,4 +1,4 @@
-from mx.embeddings import DebugCodebook, DebugCodebookTriples, Multidim_TaskConfig, SeqEmbd_TaskConfig, VectorCodebookMultidim
+from mx.embeddings import DebugCodebook, DebugCodebookCodebookTriples, DebugCodebookTriples, Multidim_TaskConfig, SeqEmbd_TaskConfig, VectorCodebookMultidim
 import mx.predict as pred
 from mx.prelude import *
 from mx.progress import Progress, create_progress_manager
@@ -7,6 +7,165 @@ from mx.utils import DSets
 from mx.taskutils import make_get_chunk_batched_ragged, make_get_random_slices_batched_ragged
 from mx.embeddings import AngleCodebook
 from mx.pipeline import Task, MxEmbedding, Task_DatasetConfig
+
+@u.tf_scope
+def mean_squared_angular_error(targets, predictions, target_type='angle', prediction_type='unit_vector'):
+    """
+    Angular mean-squared-error loss. Returns the component-wise squared angular error, ie. the square
+    between the targets and predictio.
+
+    >>> print(angular_mse(tf.constant(pi), tf.constant(pi)).numpy(), prediction_type='angle')
+    0.0
+    >>> print(angular_mse(tf.constant(pi), tf.constant(0.)).numpy(), prediction_type='angle')
+
+    """
+
+    if target_type == 'angle':
+        target_sin = tf.sin(targets)
+        target_cos = tf.cos(targets)
+    elif target_type == 'unit_vector':
+        target_sin = targets[..., 0]
+        target_cos = targets[..., 1]
+
+    if prediction_type == 'angle':
+        prediction_sin = tf.sin(predictions)
+        prediction_cos = tf.cos(predictions)
+    elif prediction_type == 'unit_vector':
+        prediction_sin = predictions[..., 0]
+        prediction_cos = predictions[..., 1]
+
+    return tf.reduce_mean(tf.square(target_sin - prediction_sin) + tf.square(target_cos - prediction_cos))
+
+@export
+def msae(targets, predictions, target_type='angle', prediction_type='unit_vector'):
+    return mean_squared_angular_error(targets, predictions, target_type=target_type, prediction_type=prediction_type)
+
+
+@export
+class MultidimSeq(u.MxLayer):
+    """
+    Flatten multi-dimensional data and add indices
+    """
+    def __init__(
+        self,
+        seq_shape: list[int],
+        name="multiseq",
+        desc=None,
+    ):
+        if desc is None:
+            desc = f"Flatten sequence dims"
+        super().__init__(name=name, desc=desc)
+        self.seq_shape = seq_shape
+        self.n_seq_dims = len(seq_shape)
+        self.seq_len = prod(seq_shape)
+
+    def build(self, input_shape):
+
+        assert 'vals' in input_shape, f"Input must have a 'vals' key"
+        assert 'idxs' in input_shape, f"Input must have an 'idxs' key"
+
+        self.feature_shape = input_shape.shape[1 + self.n_seq_dims:]
+
+        u.validate(input_shape, "inputs", {
+            "vals": tf.TensorSpec(shape=[None, *self.seq_shape, self.feature_shape], dtype=tf.float32),
+            "idxs": tf.TensorSpec(shape=[None, *self.seq_shape, self.n_seq_dims], dtype=tf.int32),
+        })
+
+    def compute_output_signature(self, input_signature):
+        self.build(input_signature)
+        return {
+            "vals": tf.TensorSpec(shape=[None, self.seq_len, *self.feature_shape], dtype=tf.float32),
+            "idxs": tf.TensorSpec(shape=[None, self.seq_len, self.n_seq_dims], dtype=tf.int32),
+        }
+
+    @tf.function
+    @u.tf_scope
+    def call(self, inputs):
+
+        seq_dim_names = [f"seq_{i}" for i in range(len(self.seq_shape))]
+        seq_ein_spec = f" ".join(seq_dim_names)
+        seq_dims = {
+            dim_name: dim_size
+            for dim_name, dim_size in zip(seq_dim_names, self.seq_shape)
+        }
+
+        inputs = {
+            'vals': ein.rearrange(
+                inputs['vals'],
+                f'batch {seq_ein_spec} ... -> batch ({seq_ein_spec}) ...',
+                **seq_dims,
+            ),
+            'idxs': ein.rearrange(
+                inputs['idxs'],
+                f'batch {seq_ein_spec} i -> batch ({seq_ein_spec}) i',
+                **seq_dims,
+            ),
+        }
+
+        return inputs
+
+@export
+class Pairs(u.MxLayer):
+    """
+    Into model context/query format
+    """
+
+    def __init__(
+        self,
+        name="pairs",
+        desc=None,
+    ):
+        if desc is None:
+            desc = f"Val / Idxs pairs"
+        super().__init__(name=name, desc=desc)
+
+    @tf.function
+    @u.tf_scope
+    def call(self, inputs):
+
+        assert 'vals' in inputs
+        assert 'idxs' in inputs
+
+        inputs = {
+            'ctx/inp/vals': inputs['vals'][:, :-1],
+            'ctx/inp/idxs': inputs['idxs'][:, :-1],
+        }
+
+        return inputs
+
+
+@export
+class Triples(u.MxLayer):
+    """
+    Into model context/query format
+    - context/vals
+    - context/inp_idxs
+    - context/tar_idxs
+    """
+
+    def __init__(
+        self,
+        name="pairs",
+        desc=None,
+    ):
+        if desc is None:
+            desc = f"Val / Inp Index / Tar Index triples"
+        super().__init__(name=name, desc=desc)
+
+    @tf.function
+    @u.tf_scope
+    def call(self, inputs):
+
+        assert 'vals' in inputs
+        assert 'idxs' in inputs
+
+        inputs = {
+            'context/vals': inputs['vals'][:, :-1],
+            'context/inp_idxs': inputs['idxs'][:, :-1],
+            'context/tar_idxs': inputs['idxs'][:, :],
+        }
+
+        return inputs
 
 
 @export
@@ -27,8 +186,6 @@ class VectorSequenceMSE(Task):
 
     Mean-squared-error loss.
     """
-
-
     def __init__(
         self,
         chunk_size: int,
@@ -93,8 +250,8 @@ class VectorSequenceMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "values": x["inputs"]["values"],
-                        "seq_idxs": x["inputs"]["seq_idxs"],
+                        "vals": x["inputs"]["vals"],
+                        "idxs": x["inputs"]["idxs"],
                     }
                 }
             self.adapt_in = adapt_in
@@ -107,8 +264,8 @@ class VectorSequenceMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "values": x["inputs"]["values"],
-                        "seq_idxs": x["inputs"]["seq_idxs"],
+                        "vals": x["inputs"]["vals"],
+                        "idxs": x["inputs"]["idxs"],
                     }
                 }
             self.adapt_in = adapt_in
@@ -122,22 +279,22 @@ class VectorSequenceMSE(Task):
 
         u.validate(dsets, "dsets", {
             "train": tft.DatasetSpec({
-                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
                 # "extra": tft.NoneTensorSpec(),
             }),
             "val": tft.DatasetSpec({
-                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
                 # "extra": tft.NoneTensorSpec(),
             }),
             "test": tft.DatasetSpec({
-                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
                 # "extra": {} # optional keys here
             }),
         })
-        seq_len = dsets.train.element_spec["values"].shape[1]
+        seq_len = dsets.train.element_spec["vals"].shape[1]
 
         # repeat data in order to take many random chunks from each sequence
         train, test, val = dsets.destructure()
@@ -158,15 +315,15 @@ class VectorSequenceMSE(Task):
 
             def do_chunk(x):
 
-                data, seq_idxs = get_chunk([
-                    x["values"],
-                    x["seq_idxs"],
+                data, idxs = get_chunk([
+                    x["vals"],
+                    x["idxs"],
                 ])
 
                 return {
                     **x,
-                    "values": data,
-                    "seq_idxs": seq_idxs,
+                    "vals": data,
+                    "idxs": idxs,
                 }
 
             # chunk
@@ -176,17 +333,17 @@ class VectorSequenceMSE(Task):
 
         dsets = dsets.map(lambda x: {
             **x,
-            "values": tf.ensure_shape(x["values"], [None, self.chunk_size, self.ds_cfg.n_input_dims]),
-            "seq_idxs": tf.ensure_shape(x["seq_idxs"], [None, self.chunk_size, len(self.ds_cfg.seq_dims)]),
+            "vals": tf.ensure_shape(x["vals"], [None, self.chunk_size, self.ds_cfg.n_input_dims]),
+            "idxs": tf.ensure_shape(x["idxs"], [None, self.chunk_size, len(self.ds_cfg.seq_dims)]),
         })
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["values"][:, :-1, :],
-                "seq_idxs": x["seq_idxs"][:, :-1, :],
-                "target_idxs": x["seq_idxs"],
+                "vals": x["vals"][:, :-1, :],
+                "idxs": x["idxs"][:, :-1, :],
+                "target_idxs": x["idxs"],
             },
-            "targets": x["values"],
+            "targets": x["vals"],
             "extra": x["extra"],
         })
 
@@ -230,17 +387,11 @@ class VectorSequenceMSE(Task):
 
         def loss_fn(targets, inputs):
 
-            outputs = inputs["values"]
+            outputs = inputs["vals"]
 
             return tf.reduce_mean(tf.square(targets - outputs))
 
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims], name="values"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=loss_fn(*inputs), name="loss_fn")
+        return loss_fn
 
     def make_predict_fn(self, model):
         """
@@ -250,19 +401,19 @@ class VectorSequenceMSE(Task):
         assert self.adapt_in is not None, "Must call task.configure(embedding) first"
 
         @tf.function
-        def predict_fn(seed_inputs, seq_idxs, out_var: tf.Variable):
+        def predict_fn(seed_inputs, idxs, out_var: tf.Variable):
             batch_size = tf.shape(seed_inputs)[0]
             seed_len = tf.shape(seed_inputs)[1]
 
-            tf.assert_equal(tf.shape(seq_idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
+            tf.assert_equal(tf.shape(idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
 
             out_var[:, :seed_len, :].assign(seed_inputs)
 
             n = out_var.shape[1]
             for i in tf.range(seed_len, n): # converted to tf.while_loop
                 inputs = {
-                    "values": out_var[:, :i],
-                    "seq_idxs": seq_idxs[:, :i],
+                    "vals": out_var[:, :i],
+                    "idxs": idxs[:, :i],
                 }
                 outputs = model(inputs, training=False)
                 out_var[:, i, :].assign(outputs[:, -1, :])
@@ -273,11 +424,11 @@ class VectorSequenceMSE(Task):
             nonlocal warned
 
             u.validate(inputs, "inputs", {
-                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
             })
-            data = inputs["values"]
-            seq_idxs = inputs["seq_idxs"]
+            data = inputs["vals"]
+            idxs = inputs["idxs"]
             batch_size = shape(data)[0]
             seq_len = shape(data)[1]
             n_features = shape(data)[2]
@@ -294,14 +445,284 @@ class VectorSequenceMSE(Task):
             seed_input = data[:, :seed_len, :]
 
             out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features], u.dtype()))
-            predict_fn(seed_input, seq_idxs, out_var)
+            predict_fn(seed_input, idxs, out_var)
             if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)):
                 tf.print(f"WARNING: NaNs in outputs of {self.name}.")
             return {
-                "values": out_var,
+                "vals": out_var,
             }
 
         return predict_wrapper
+
+@export
+@dataclass
+class CategoricalTask_DatasetConfig(MultidimTask_DatasetConfig):
+    codebook: list[tf.Tensor]
+    """Codebook for categorical variables. Data will be converted to indices into this codebook."""
+
+    distance_fn = None
+    """Distance function to use for discretizing data. Defaults to euclidean distance."""
+
+@export
+@dataclass
+class RandomTokens(Task):
+    """
+    Takes a sequence of vectors and their N-dimensional indices, discretizes them
+    into tokens. Takes `n_slices` unique tokens at random from the sequence dimension,
+    and yields an infinite stream of chunks.
+
+    Categorical Cross-entropy loss.
+    """
+
+    def __init__(
+        self,
+        n_slices: int,
+        pred_seed_len: int = 0,
+        pred_output_len: int = None,
+        n_test_val_repeats: int = 100,
+        name = "randtoken",
+        desc = "Random Tokens (Categorical loss)",
+    ):
+        super().__init__(
+            name=name,
+            desc=desc,
+            is_distribution=False,
+            is_querying=True,
+        )
+
+        self.n_slices: int = n_slices
+        "Length of chunks (sequence length)"
+
+        self.n_test_val_repeats: int = n_test_val_repeats
+        """
+        Number of slices to take out of each example to make validation and testing data.
+        In training, it's infinite and the number depends on the number of training steps
+        and batch size.
+        """
+
+        self.pred_seed_len: int = pred_seed_len
+        """
+        Default amount of seed data to use when predicting output sequences.
+        """
+
+        self.pred_output_len: int = n_slices if pred_output_len is None else pred_output_len
+        """
+        Default length of predicted sequences.
+        """
+
+        ## set by dataset.configure(task) ##
+        self.ds_config_cls: Type[CategoricalTask_DatasetConfig] = CategoricalTask_DatasetConfig
+        "Required dataset-specific config"
+
+        self.ds_cfg: CategoricalTask_DatasetConfig = None
+
+        # self.model_config_type: Type[Task.ModelSpecificConfig] = Task.ModelSpecificConfig
+        # "Required model-specific config"
+
+        assert self.pred_seed_len < self.pred_output_len, f"pred_seed_len must be less than pred_output_len. Got pred_seed_len={self.pred_seed_len} and pred_output_len={self.pred_output_len}"
+
+
+    def configure(self, embedding: MxEmbedding):
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+
+        ### Set embedding down_cfg ###
+        if isinstance(embedding, DebugCodebookCodebookTriples):
+            embedding.receive_task_config(embedding.task_config_type(
+                n_tokens=len(self.ds_cfg.codebook),
+                seq_dims=self.ds_cfg.seq_dims,
+                chunk_length=self.n_slices,
+            ))
+            def adapt_in(x):
+                return {
+                    **x,
+                    "inputs": {
+                        "context/tokens": x["inputs"]["tokens"],
+                        "context/inp_idxs": x["inputs"]["inp_idxs"],
+                        "context/tar_idxs": x["inputs"]["tar_idxs"],
+                    }
+                }
+            self.adapt_in = adapt_in
+        else:
+            raise NotImplementedError(f"Task {type_name(self)} does not support Embedding {type_name(embedding)}. If using autoreload in IPython, try restarting the interpreter.")
+
+    def process(self, dsets: DSets) -> DSets:
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+        assert self.adapt_in is not None, "Must call task.configure(embedding) first"
+
+        ds_spec = tft.DatasetSpec(element_spec={
+            "tokens": tf.TensorSpec([None, None], u.dtype()),
+            "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+            # "extra": tft.NoneTensorSpec(),
+        })
+
+        u.validate(dsets, "dsets", {
+            "train": ds_spec,
+            "val": ds_spec,
+            "test": ds_spec,
+        })
+
+        # repeat data in order to take many random chunks from each sequence
+        train, test, val = dsets.destructure()
+        n_train = train.cardinality().numpy()
+        dsets = DSets(
+            # repeat training data infinitely. Shuffle before repeat ensures
+            # uniform distribution of sequences in each batch
+            train=train.shuffle(n_train).repeat(),
+            # Take n_repeats random chunks from each example. don't shuffle,
+            # because we want the test/val runs to be repeatable.
+            test=test.repeat(self.n_test_val_repeats),
+            val=val.repeat(self.n_test_val_repeats),
+        )
+
+        get_slices = make_get_random_slices_batched_ragged(self.n_slices)
+
+        def do_get_slices(x):
+
+            data, idxs = get_slices([
+                x["tokens"],
+                x["idxs"],
+            ])
+
+            return {
+                **x,
+                "tokens": data,
+                "idxs": idxs,
+            }
+
+        # chunk
+        dsets = dsets.map(do_get_slices)
+
+        dsets = dsets.map(lambda x: {
+            **x,
+            "tokens": tf.ensure_shape(x["tokens"], [None, self.n_slices]),
+            "idxs": tf.ensure_shape(x["idxs"], [None, self.n_slices, len(self.ds_cfg.seq_dims)]),
+        })
+
+        dsets = dsets.map(lambda x: {
+            "inputs": {
+                "tokens": x["tokens"][:, :-1],
+                "inp_idxs": x["idxs"][:, :-1, :],
+                "tar_idxs": x["idxs"],
+            },
+            "targets": x["tokens"],
+            "extra": x["extra"],
+        })
+
+        return dsets
+
+    def make_final_layer(self) -> tf.keras.layers.Layer:
+
+        assert self.ds_cfg is not None, "Must call dataset.configure(task) first"
+        assert self.model_cfg is not None, "Must call task.configure(embedding) first"
+
+        inputs = u.input_dict(
+            Input([None, self.model_cfg.n_output_embd], name="embd"),
+        )
+
+        dense = tf.keras.layers.Dense(len(self.ds_cfg.codebook), name="dense")
+
+        def call(inputs):
+            embd = inputs["embd"]
+            logits = dense(embd)
+            tf.cond(
+                tf.logical_and(u.debug, tf.reduce_any(tf.math.is_nan(logits))),
+                lambda: tf.print(f"WARNING: NaNs in outputs of {self.name}."),
+                lambda: tf.print(f"WARNING: No NaNs in outputs of {self.name}."),
+            )
+            return logits
+
+        return Model(
+            inputs=inputs,
+            outputs=call(inputs),
+            name="outputs",
+        )
+
+    def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
+        "Categorical negative log-likelihood loss function"
+
+        def loss_fn(targets, inputs):
+
+            dist = self.output_fn(inputs)
+
+            return -tf.reduce_mean(dist.log_prob(targets))
+
+        return loss_fn
+
+    def output_fn(self, outputs: tf.Tensor) -> tf.Tensor:
+        "Convert model outputs to final predictions"
+
+        return tfd.Categorical(logits=outputs)
+
+    def make_predict_fn(self, model):
+        """
+        Build a function to predict the next vector in the sequence, starting with optional seed data.
+        """
+
+        assert self.adapt_in is not None, "Must call task.configure(embedding) first"
+
+        # @tf.function
+        def predict_fn(seed_inputs, idxs, out_var: tf.Variable):
+            batch_size = tf.shape(seed_inputs)[0]
+            seed_len = tf.shape(seed_inputs)[1]
+
+            tf.assert_equal(tf.shape(idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
+
+            if seed_len > 0:
+                out_var[:, :seed_len, :].assign(seed_inputs)
+
+            n = out_var.shape[1]
+            for i in tf.range(seed_len, n): # converted to tf.while_loop
+                inputs = {
+                    "vals": out_var[:, :i],
+                    "inp_idxs": idxs[:, :i],
+                    "tar_idxs": idxs[:, :i+1],
+                }
+                outputs = model(inputs, training=False)
+                out_var[:, i, :].assign(outputs[:, -1, :])
+            return out_var
+
+        warned = False
+        def predict_wrapper(inputs, seed_len = self.pred_seed_len, output_len = self.pred_output_len, pm:Progress=None):
+            nonlocal warned
+
+            u.validate(inputs, "inputs", {
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+            })
+            data = inputs["vals"]
+            idxs = inputs["idxs"]
+            batch_size = shape(data)[0]
+            seq_len = shape(data)[1]
+            n_features = shape(data)[2]
+
+            assert seed_len <= seq_len,   f"seed_len must be less than or equal to the sequence length. Got {seed_len} and {seq_len}"
+            assert output_len > 0,        f"output_len must be greater than 0. Got {output_len}"
+            assert seed_len < output_len, f"seed_len must be less than output_len. Got {seed_len} and {output_len}"
+
+
+            if output_len > self.n_slices and not warned:
+                print(f"WARNING: pred_output_len should be less than or equal to chunk_size. This is because the model has not been trained on longer sequences. Got pred_output_len={output_len} and chunk_size={self.n_slices}", file=sys.stderr)
+                warned = True
+
+            seed_input = data[:, :seed_len, :]
+
+            out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features], u.dtype()))
+
+            dbg(seed_input, "seed_input")
+            dbg(idxs, "idxs")
+            dbg(out_var, "out_var")
+
+            predict_fn(seed_input, idxs, out_var)
+            if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)):
+                tf.print(f"WARNING: NaNs in outputs of {self.name}.")
+            return {
+                "vals": out_var,
+            }
+
+        return predict_wrapper
+
 
 
 
@@ -380,7 +801,7 @@ class RandomSequenceMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "values": x["inputs"]["values"],
+                        "vals": x["inputs"]["vals"],
                         "inp_idxs": x["inputs"]["inp_idxs"],
                         "tar_idxs": x["inputs"]["tar_idxs"],
                     }
@@ -395,8 +816,8 @@ class RandomSequenceMSE(Task):
         assert self.adapt_in is not None, "Must call task.configure(embedding) first"
 
         ds_spec = tft.DatasetSpec(element_spec={
-            "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-            "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+            "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+            "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
             # "extra": tft.NoneTensorSpec(),
         })
 
@@ -405,7 +826,7 @@ class RandomSequenceMSE(Task):
             "val": ds_spec,
             "test": ds_spec,
         })
-        seq_len = dsets.train.element_spec["values"].shape[1]
+        seq_len = dsets.train.element_spec["vals"].shape[1]
 
         # repeat data in order to take many random chunks from each sequence
         train, test, val = dsets.destructure()
@@ -424,15 +845,15 @@ class RandomSequenceMSE(Task):
 
         def do_get_slices(x):
 
-            data, seq_idxs = get_slices([
-                x["values"],
-                x["seq_idxs"],
+            data, idxs = get_slices([
+                x["vals"],
+                x["idxs"],
             ])
 
             return {
                 **x,
-                "values": data,
-                "seq_idxs": seq_idxs,
+                "vals": data,
+                "idxs": idxs,
             }
 
         # chunk
@@ -440,17 +861,17 @@ class RandomSequenceMSE(Task):
 
         dsets = dsets.map(lambda x: {
             **x,
-            "values": tf.ensure_shape(x["values"], [None, self.n_slices, self.ds_cfg.n_input_dims]),
-            "seq_idxs": tf.ensure_shape(x["seq_idxs"], [None, self.n_slices, len(self.ds_cfg.seq_dims)]),
+            "vals": tf.ensure_shape(x["vals"], [None, self.n_slices, self.ds_cfg.n_input_dims]),
+            "idxs": tf.ensure_shape(x["idxs"], [None, self.n_slices, len(self.ds_cfg.seq_dims)]),
         })
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["values"][:, :-1, :],
-                "inp_idxs": x["seq_idxs"][:, :-1, :],
-                "tar_idxs": x["seq_idxs"],
+                "vals": x["vals"][:, :-1, :],
+                "inp_idxs": x["idxs"][:, :-1, :],
+                "tar_idxs": x["idxs"],
             },
-            "targets": x["values"],
+            "targets": x["vals"],
             "extra": x["extra"],
         })
 
@@ -490,17 +911,11 @@ class RandomSequenceMSE(Task):
 
         def loss_fn(targets, inputs):
 
-            outputs = inputs["values"]
+            outputs = inputs["vals"]
 
             return tf.reduce_mean(tf.square(targets - outputs))
 
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims], name="values"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=loss_fn(*inputs), name="loss_fn")
+        return loss_fn
 
     def make_predict_fn(self, model):
         """
@@ -510,11 +925,11 @@ class RandomSequenceMSE(Task):
         assert self.adapt_in is not None, "Must call task.configure(embedding) first"
 
         # @tf.function
-        def predict_fn(seed_inputs, seq_idxs, out_var: tf.Variable):
+        def predict_fn(seed_inputs, idxs, out_var: tf.Variable):
             batch_size = tf.shape(seed_inputs)[0]
             seed_len = tf.shape(seed_inputs)[1]
 
-            tf.assert_equal(tf.shape(seq_idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
+            tf.assert_equal(tf.shape(idxs)[0], batch_size, f"idxs must have the same batch size as seed_inputs.")
 
             if seed_len > 0:
                 out_var[:, :seed_len, :].assign(seed_inputs)
@@ -522,9 +937,9 @@ class RandomSequenceMSE(Task):
             n = out_var.shape[1]
             for i in tf.range(seed_len, n): # converted to tf.while_loop
                 inputs = {
-                    "values": out_var[:, :i],
-                    "inp_idxs": seq_idxs[:, :i],
-                    "tar_idxs": seq_idxs[:, :i+1],
+                    "vals": out_var[:, :i],
+                    "inp_idxs": idxs[:, :i],
+                    "tar_idxs": idxs[:, :i+1],
                 }
                 outputs = model(inputs, training=False)
                 out_var[:, i, :].assign(outputs[:, -1, :])
@@ -535,11 +950,11 @@ class RandomSequenceMSE(Task):
             nonlocal warned
 
             u.validate(inputs, "inputs", {
-                "values": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
+                "vals": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
+                "idxs": tf.TensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32),
             })
-            data = inputs["values"]
-            seq_idxs = inputs["seq_idxs"]
+            data = inputs["vals"]
+            idxs = inputs["idxs"]
             batch_size = shape(data)[0]
             seq_len = shape(data)[1]
             n_features = shape(data)[2]
@@ -558,17 +973,19 @@ class RandomSequenceMSE(Task):
             out_var = tf.Variable(tf.zeros([batch_size, output_len, n_features], u.dtype()))
 
             dbg(seed_input, "seed_input")
-            dbg(seq_idxs, "seq_idxs")
+            dbg(idxs, "idxs")
             dbg(out_var, "out_var")
 
-            predict_fn(seed_input, seq_idxs, out_var)
+            predict_fn(seed_input, idxs, out_var)
             if u.is_debug() and tf.reduce_any(tf.math.is_nan(out_var)):
                 tf.print(f"WARNING: NaNs in outputs of {self.name}.")
             return {
-                "values": out_var,
+                "vals": out_var,
             }
 
         return predict_wrapper
+
+
 
 
 
@@ -641,7 +1058,7 @@ class ForwardAngleAMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "context/values": x["inputs"]["values"],
+                        "context/vals": x["inputs"]["vals"],
                         "context/inp_idxs": x["inputs"]["inp_idxs"],
                     }
                 }
@@ -656,7 +1073,7 @@ class ForwardAngleAMSE(Task):
 
         ds_spec = tft.DatasetSpec(element_spec={
             "angles": tf.RaggedTensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype(), ragged_rank=1),
-            "seq_idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
+            "idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
         })
 
         u.validate(dsets, "dsets", {
@@ -682,15 +1099,15 @@ class ForwardAngleAMSE(Task):
 
         def do_chunk(x):
 
-            angles, seq_idxs = get_chunk([
+            angles, idxs = get_chunk([
                 x["angles"],
-                x["seq_idxs"],
+                x["idxs"],
             ])
 
             return {
                 **x,
                 "angles": angles,
-                "seq_idxs": seq_idxs,
+                "idxs": idxs,
             }
 
         # chunk
@@ -698,9 +1115,9 @@ class ForwardAngleAMSE(Task):
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["angles"][:, :-1],
-                "inp_idxs": x["seq_idxs"][:, :-1],
-                "tar_idxs": x["seq_idxs"],
+                "vals": x["angles"][:, :-1],
+                "inp_idxs": x["idxs"][:, :-1],
+                "tar_idxs": x["idxs"],
             },
             "targets": x["angles"],
             "extra": x["extra"],
@@ -736,25 +1153,7 @@ class ForwardAngleAMSE(Task):
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Angular mean-squared-error loss."
 
-        @u.tf_scope
-        def angular_mse_loss(targets, outputs):
-            "Angular mean-squared-error loss."
-
-            angles = outputs["angles"]
-
-            target_sin = tf.sin(targets)
-            target_cos = tf.cos(targets)
-            output_sin = tf.sin(angles)
-            output_cos = tf.cos(angles)
-            return tf.reduce_mean(tf.square(target_sin - output_sin) + tf.square(target_cos - output_cos))
-
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims], name="angles"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=angular_mse_loss(*inputs), name="loss_fn")
+        return mean_squared_angular_error
 
     def make_predict_fn(self, model):
         """
@@ -773,18 +1172,18 @@ class ForwardAngleAMSE(Task):
             # unrag
             inputs = {
                 "angles": tf.gather(inputs["angles"], tf.range(output_len), axis=1),
-                "seq_idxs": tf.gather(inputs["seq_idxs"], tf.range(output_len), axis=1),
+                "idxs": tf.gather(inputs["idxs"], tf.range(output_len), axis=1),
             }
 
             u.validate(inputs, "inputs", {
                 "angles": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, 1], tf.int32),
+                "idxs": tf.TensorSpec([None, None, 1], tf.int32),
             })
 
             batch_size = shape(inputs["angles"])[0]
             seq_len = shape(inputs["angles"])[1]
 
-            assert shape(inputs["seq_idxs"])[0] == batch_size, f"inputs['seq_idxs'] must have same batch size as inputs['angles'], but got inputs['seq_idxs'].shape[0] = {shape(inputs['seq_idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
+            assert shape(inputs["idxs"])[0] == batch_size, f"inputs['idxs'] must have same batch size as inputs['angles'], but got inputs['idxs'].shape[0] = {shape(inputs['idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
 
             assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
             assert output_len > 0, f"output_len ({output_len}) must be > 0"
@@ -819,7 +1218,7 @@ class ForwardAngleAMSE(Task):
                     model_outputs_distribution=False,
                     sampling_order="fixed",
                     seed_data=seed,
-                    idxs=inputs["seq_idxs"],
+                    idxs=inputs["idxs"],
                 ),
                 pm=pm,
                 viz_out_fn=output_fn,
@@ -905,7 +1304,7 @@ class TargetedAngleAMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "context/values": x["inputs"]["values"],
+                        "context/vals": x["inputs"]["vals"],
                         "context/inp_idxs": x["inputs"]["inp_idxs"],
                         "context/tar_idxs": x["inputs"]["tar_idxs"],
                     }
@@ -921,7 +1320,7 @@ class TargetedAngleAMSE(Task):
 
         ds_spec = tft.DatasetSpec(element_spec={
             "angles": tf.RaggedTensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype(), ragged_rank=1),
-            "seq_idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
+            "idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
         })
 
         u.validate(dsets, "dsets", {
@@ -947,15 +1346,15 @@ class TargetedAngleAMSE(Task):
 
         def do_chunk(x):
 
-            angles, seq_idxs = get_chunk([
+            angles, idxs = get_chunk([
                 x["angles"],
-                x["seq_idxs"],
+                x["idxs"],
             ])
 
             return {
                 **x,
                 "angles": angles,
-                "seq_idxs": seq_idxs,
+                "idxs": idxs,
             }
 
         # chunk
@@ -968,17 +1367,17 @@ class TargetedAngleAMSE(Task):
                 x["angles"][:, -1:],
                 x["angles"][:, :-1],
             ], axis=1),
-            "seq_idxs": tf.concat([
-                x["seq_idxs"][:, -1:],
-                x["seq_idxs"][:, :-1],
+            "idxs": tf.concat([
+                x["idxs"][:, -1:],
+                x["idxs"][:, :-1],
             ], axis=1),
         })
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["angles"][:, :-1],
-                "inp_idxs": x["seq_idxs"][:, :-1],
-                "tar_idxs": x["seq_idxs"],
+                "vals": x["angles"][:, :-1],
+                "inp_idxs": x["idxs"][:, :-1],
+                "tar_idxs": x["idxs"],
             },
             "targets": x["angles"],
             "extra": x["extra"],
@@ -1014,25 +1413,8 @@ class TargetedAngleAMSE(Task):
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Angular mean-squared-error loss."
 
-        @u.tf_scope
-        def angular_mse_loss(targets, outputs):
-            "Angular mean-squared-error loss."
 
-            unit_vectors = outputs["unit_vectors"]
-
-            target_sin = tf.sin(targets)
-            target_cos = tf.cos(targets)
-            pred_sin = unit_vectors[..., 0]
-            pred_cos = unit_vectors[..., 1]
-            return tf.reduce_mean(tf.square(target_sin - pred_sin) + tf.square(target_cos - pred_cos))
-
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims, 2], name="unit_vectors"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=angular_mse_loss(*inputs), name="loss_fn")
+        return mean_squared_angular_error
 
     def make_predict_fn(self, model):
         """
@@ -1051,18 +1433,18 @@ class TargetedAngleAMSE(Task):
             # unrag
             inputs = {
                 "angles": tf.gather(inputs["angles"], tf.range(output_len), axis=1),
-                "seq_idxs": tf.gather(inputs["seq_idxs"], tf.range(output_len), axis=1),
+                "idxs": tf.gather(inputs["idxs"], tf.range(output_len), axis=1),
             }
 
             u.validate(inputs, "inputs", {
                 "angles": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, 1], tf.int32),
+                "idxs": tf.TensorSpec([None, None, 1], tf.int32),
             })
 
             batch_size = shape(inputs["angles"])[0]
             seq_len = shape(inputs["angles"])[1]
 
-            assert shape(inputs["seq_idxs"])[0] == batch_size, f"inputs['seq_idxs'] must have same batch size as inputs['angles'], but got inputs['seq_idxs'].shape[0] = {shape(inputs['seq_idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
+            assert shape(inputs["idxs"])[0] == batch_size, f"inputs['idxs'] must have same batch size as inputs['angles'], but got inputs['idxs'].shape[0] = {shape(inputs['idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
 
             assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
             assert output_len > 0, f"output_len ({output_len}) must be > 0"
@@ -1097,7 +1479,7 @@ class TargetedAngleAMSE(Task):
                     model_outputs_distribution=False,
                     sampling_order="fixed",
                     seed_data=seed,
-                    idxs=inputs["seq_idxs"],
+                    idxs=inputs["idxs"],
                 ),
                 pm=pm,
                 viz_out_fn=output_fn,
@@ -1190,7 +1572,7 @@ class ForwardSuperflatAngleAMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "context/values": x["inputs"]["values"],
+                        "context/vals": x["inputs"]["vals"],
                         "context/inp_idxs": x["inputs"]["inp_idxs"],
                     }
                 }
@@ -1205,7 +1587,7 @@ class ForwardSuperflatAngleAMSE(Task):
 
         ds_spec = tft.DatasetSpec(element_spec={
             "angles": tf.RaggedTensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype(), ragged_rank=1),
-            "seq_idxs": tf.RaggedTensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32, ragged_rank=1),
+            "idxs": tf.RaggedTensorSpec([None, None, len(self.ds_cfg.seq_dims)], tf.int32, ragged_rank=1),
         })
 
         u.validate(dsets, "dsets", {
@@ -1231,15 +1613,15 @@ class ForwardSuperflatAngleAMSE(Task):
 
         def do_slice(x):
 
-            angles, seq_idxs = get_slices([
+            angles, idxs = get_slices([
                 x["angles"],
-                x["seq_idxs"],
+                x["idxs"],
             ])
 
             return {
                 **x,
                 "angles": angles,
-                "seq_idxs": seq_idxs,
+                "idxs": idxs,
             }
 
         # chunk
@@ -1247,9 +1629,9 @@ class ForwardSuperflatAngleAMSE(Task):
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["angles"][:, :-1],
-                "inp_idxs": x["seq_idxs"][:, :-1],
-                "tar_idxs": x["seq_idxs"],
+                "vals": x["angles"][:, :-1],
+                "inp_idxs": x["idxs"][:, :-1],
+                "tar_idxs": x["idxs"],
             },
             "targets": x["angles"],
             "extra": x["extra"],
@@ -1285,25 +1667,7 @@ class ForwardSuperflatAngleAMSE(Task):
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Angular mean-squared-error loss."
 
-        @u.tf_scope
-        def angular_mse_loss(targets, outputs):
-            "Angular mean-squared-error loss."
-
-            angles = outputs["angles"]
-
-            target_sin = tf.sin(targets)
-            target_cos = tf.cos(targets)
-            pred_sin = tf.sin(angles)
-            pred_cos = tf.cos(angles)
-            return tf.reduce_mean(tf.square(target_sin - pred_sin) + tf.square(target_cos - pred_cos))
-
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims], name="angles"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=angular_mse_loss(*inputs), name="loss_fn")
+        return mean_squared_angular_error
 
     def make_predict_fn(self, model):
         """
@@ -1322,18 +1686,18 @@ class ForwardSuperflatAngleAMSE(Task):
             # unrag
             inputs = {
                 "angles": tf.gather(inputs["angles"], tf.range(output_len), axis=1),
-                "seq_idxs": tf.gather(inputs["seq_idxs"], tf.range(output_len), axis=1),
+                "idxs": tf.gather(inputs["idxs"], tf.range(output_len), axis=1),
             }
 
             u.validate(inputs, "inputs", {
                 "angles": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, 1], tf.int32),
+                "idxs": tf.TensorSpec([None, None, 1], tf.int32),
             })
 
             batch_size = shape(inputs["angles"])[0]
             seq_len = shape(inputs["angles"])[1]
 
-            assert shape(inputs["seq_idxs"])[0] == batch_size, f"inputs['seq_idxs'] must have same batch size as inputs['angles'], but got inputs['seq_idxs'].shape[0] = {shape(inputs['seq_idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
+            assert shape(inputs["idxs"])[0] == batch_size, f"inputs['idxs'] must have same batch size as inputs['angles'], but got inputs['idxs'].shape[0] = {shape(inputs['idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
 
             assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
             assert output_len > 0, f"output_len ({output_len}) must be > 0"
@@ -1368,7 +1732,7 @@ class ForwardSuperflatAngleAMSE(Task):
                     model_outputs_distribution=False,
                     sampling_order="fixed",
                     seed_data=seed,
-                    idxs=inputs["seq_idxs"],
+                    idxs=inputs["idxs"],
                 ),
                 pm=pm,
                 viz_out_fn=output_fn,
@@ -1457,7 +1821,7 @@ class RandomAngleAMSE(Task):
                 return {
                     **x,
                     "inputs": {
-                        "context/values": x["inputs"]["values"],
+                        "context/vals": x["inputs"]["vals"],
                         "context/inp_idxs": x["inputs"]["inp_idxs"],
                         "context/tar_idxs": x["inputs"]["tar_idxs"],
                     }
@@ -1473,7 +1837,7 @@ class RandomAngleAMSE(Task):
 
         ds_spec = tft.DatasetSpec(element_spec={
             "angles": tf.RaggedTensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype(), ragged_rank=1),
-            "seq_idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
+            "idxs": tf.RaggedTensorSpec([None, None, 1], tf.int32, ragged_rank=1),
         })
 
         u.validate(dsets, "dsets", {
@@ -1499,15 +1863,15 @@ class RandomAngleAMSE(Task):
 
         def do_get_slices(x):
 
-            angles, seq_idxs = get_slices([
+            angles, idxs = get_slices([
                 x["angles"],
-                x["seq_idxs"],
+                x["idxs"],
             ])
 
             return {
                 **x,
                 "angles": angles,
-                "seq_idxs": seq_idxs,
+                "idxs": idxs,
             }
 
         # chunk
@@ -1515,9 +1879,9 @@ class RandomAngleAMSE(Task):
 
         dsets = dsets.map(lambda x: {
             "inputs": {
-                "values": x["angles"][:, :-1],
-                "inp_idxs": x["seq_idxs"][:, :-1],
-                "tar_idxs": x["seq_idxs"],
+                "vals": x["angles"][:, :-1],
+                "inp_idxs": x["idxs"][:, :-1],
+                "tar_idxs": x["idxs"],
             },
             "targets": x["angles"],
             "extra": x["extra"],
@@ -1553,25 +1917,7 @@ class RandomAngleAMSE(Task):
     def make_loss_fn(self) -> Callable[[tf.Tensor, tf.Tensor], tf.Tensor]:
         "Angular mean-squared-error loss."
 
-        @u.tf_scope
-        def angular_mse_loss(targets, outputs):
-            "Angular mean-squared-error loss."
-
-            unit_vectors = outputs["unit_vectors"]
-
-            target_sin = tf.sin(targets)
-            target_cos = tf.cos(targets)
-            pred_sin = unit_vectors[..., 0]
-            pred_cos = unit_vectors[..., 1]
-            return tf.reduce_mean(tf.square(target_sin - pred_sin) + tf.square(target_cos - pred_cos))
-
-        inputs = (
-            Input([None, self.ds_cfg.n_input_dims], name="targets"),
-            u.input_dict(
-                Input([None, self.ds_cfg.n_input_dims, 2], name="unit_vectors"),
-            ),
-        )
-        return Model(inputs=inputs, outputs=angular_mse_loss(*inputs), name="loss_fn")
+        return mean_squared_angular_error
 
     def make_predict_fn(self, model):
         """
@@ -1590,18 +1936,18 @@ class RandomAngleAMSE(Task):
             # unrag
             inputs = {
                 "angles": tf.gather(inputs["angles"], tf.range(output_len), axis=1),
-                "seq_idxs": tf.gather(inputs["seq_idxs"], tf.range(output_len), axis=1),
+                "idxs": tf.gather(inputs["idxs"], tf.range(output_len), axis=1),
             }
 
             u.validate(inputs, "inputs", {
                 "angles": tf.TensorSpec([None, None, self.ds_cfg.n_input_dims], u.dtype()),
-                "seq_idxs": tf.TensorSpec([None, None, 1], tf.int32),
+                "idxs": tf.TensorSpec([None, None, 1], tf.int32),
             })
 
             batch_size = shape(inputs["angles"])[0]
             seq_len = shape(inputs["angles"])[1]
 
-            assert shape(inputs["seq_idxs"])[0] == batch_size, f"inputs['seq_idxs'] must have same batch size as inputs['angles'], but got inputs['seq_idxs'].shape[0] = {shape(inputs['seq_idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
+            assert shape(inputs["idxs"])[0] == batch_size, f"inputs['idxs'] must have same batch size as inputs['angles'], but got inputs['idxs'].shape[0] = {shape(inputs['idxs'])[0]} and inputs['angles'].shape[0] = {batch_size}"
 
             assert seed_len <= seq_len, f"seed_len ({seed_len}) must be <= seq_len ({seq_len})"
             assert output_len > 0, f"output_len ({output_len}) must be > 0"
@@ -1636,7 +1982,7 @@ class RandomAngleAMSE(Task):
                     model_outputs_distribution=False,
                     sampling_order="fixed",
                     seed_data=seed,
-                    idxs=inputs["seq_idxs"],
+                    idxs=inputs["idxs"],
                 ),
                 pm=pm,
                 viz_out_fn=output_fn,
@@ -1660,13 +2006,13 @@ if __name__ == '__main__':
     u.set_debug()
 
     data = Dataset.from_tensor_slices({
-        "values": tf.random.uniform([5000, 100, 100, 3], dtype=tf.float32),
+        "vals": tf.random.uniform([5000, 100, 100, 3], dtype=tf.float32),
         "labels": tf.random.uniform([5000], minval=0, maxval=13, dtype=tf.int32),
     })
     data = data.map(lambda x: {
-        "values": ein.rearrange(x["values"], "h w c -> (h w) c"),
+        "vals": ein.rearrange(x["vals"], "h w c -> (h w) c"),
         "labels": x["labels"],
-        "seq_idxs": u.multidim_indices([100, 100]),
+        "idxs": u.multidim_indices([100, 100]),
         "extra": None,
     })
     data = DSets(
@@ -1735,7 +2081,7 @@ if __name__ == '__main__':
     data = data.map(lambda x: {
         "angles": x["angles"],
         "labels": x["labels"],
-        "seq_idxs": u.multidim_indices(seq_dims),
+        "idxs": u.multidim_indices(seq_dims),
         "extra": None,
     })
     data = DSets(
@@ -1778,12 +2124,12 @@ if __name__ == '__main__':
     print()
 
     model_inputs = u.input_dict(
-        Input([None, n_input_dims], dtype=u.dtype(), name="context/values"),
+        Input([None, n_input_dims], dtype=u.dtype(), name="context/vals"),
         Input([None, len(seq_dims)], dtype=tf.int32,  name="context/inp_idxs"),
     )
 
     def demo_angle_model(inputs):
-        v = inputs["context/values"]
+        v = inputs["context/vals"]
         batch_size = tf.shape(v)[0]
         seq_len = tf.shape(v)[1]
         n_feat = tf.shape(v)[2]

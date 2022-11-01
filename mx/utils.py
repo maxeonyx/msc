@@ -606,7 +606,7 @@ class DSets(Box):
         )
 
 @export
-def tf_scope(func):
+def tf_scope(func=None, name=None):
     """
     Decorator to automatically enter the module name scope.
 
@@ -616,36 +616,97 @@ def tf_scope(func):
     -   Any `name` argument passed to the wrapped function
     -   The function name (otherwise)
 
+    >>> class Foo:
+    ...     @tf_scope
+    ...     def __call__(self, x):
+    ...         print(tf.get_current_name_scope())
+    >>> Foo()(1) # __call__ method gets the class name
+    Foo
+    >>> class Foo(tf.Module): # tf.Module gives implicit `name` as the class name in lowercase
+    ...     @tf_scope
+    ...     def __init__(self, name=None):
+    ...         super().__init__(name=name)
+    ...         print(tf.get_current_name_scope())
+    ...     @tf_scope
+    ...     def __call__(self, x):
+    ...         print(tf.get_current_name_scope())
+    ...     @tf_scope
+    ...     def call(self, x):
+    ...         print(tf.get_current_name_scope()) # `call` method the same for keras models
+    >>> f = Foo()
+    Foo_init
+    >>> f(1) # __call__ method on modules get the module .name attribute
+    foo
+    >>> f.call(1)
+    foo
+    >>> Foo(name="bar")(1) # `name` argument overrides the module .name attribute
+    bar_init
+    bar
+    >>> @tf_scope
+    ... def foo():
+    ...     print(tf.get_current_name_scope())
+    >>> foo() # regular functions get the function name
+    foo
+    >>> @tf_scope(name="bar")
+    ... def foo():
+    ...     print(tf.get_current_name_scope())
+    >>> foo() # `name` argument overrides the function name
+    bar
+    >>> @tf_scope
+    ... def foo(name=None):
+    ...     print(tf.get_current_name_scope())
+    >>> foo(name="thingy") # any `name` argument at runtime overrides the function name
+    thingy
     """
 
-    is_init = func.__name__ == "__init__"
-    is_call = func.__name__ == "__call__"
+    def decorator(func):
 
-    fn_name = func.__name__
+        fn_name = name or func.__name__
+        is_init = fn_name == "__init__"
+        is_call = fn_name == "__call__" or fn_name == "call"
 
-    @functools.wraps(func)
-    def func_with_name_scope(*args, **kwargs):
-        is_module = len(args) > 0 and isinstance(args[0], tf.Module)
+        @functools.wraps(func)
+        def func_with_name_scope(*args, **kwargs):
+            is_module = len(args) > 0 and isinstance(args[0], tf.Module)
 
-        if is_module and is_init:
-            # init happens before the tf.Module instance has a _name attribute
+            is_method = is_module or is_init or is_call # any other methods on non-modules get the function name
+
+            # support any `name` argument at runtime
             if 'name' in kwargs and kwargs['name'] is not None:
-                name_prefix = kwargs['name']
+                name_arg = kwargs['name']
             else:
-                name_prefix = camel_to_snake(type(args[0]).__name__)
+                name_arg = None
 
-            scope_name = name_prefix + "_init"
-        elif is_module and not is_call:
-            scope_name = args[0].name + "_" + fn_name
-        elif is_module and is_call:
-            scope_name = args[0].name
-        else:
-            scope_name = fn_name
+            if is_init:
+                type_name = name_arg or type(args[0]).__name__
+            elif is_module:
+                type_name = args[0].name
+            elif is_method:
+                type_name = type(args[0]).__name__
+            else:
+                type_name = ""
 
-        with tf.name_scope(scope_name):
-            return func(*args, **kwargs)
+            if is_init:
+                scope_name = type_name + "_init"
+            elif is_call:
+                # call functions simply get the type_name, unless a name_arg is passed
+                scope_name = type_name + ("_" + name_arg if name_arg is not None else "")
+            elif is_method:
+                scope_name = type_name + "_" + (name_arg or fn_name)
+            else:
+                scope_name = (name_arg or fn_name)
 
-    return tf_decorator.make_decorator(func, func_with_name_scope)
+            with tf.name_scope(scope_name):
+                return func(*args, **kwargs)
+
+        decorated_fn = tf_decorator.make_decorator(func, func_with_name_scope)
+
+        return decorated_fn
+
+    if func is not None:
+        return decorator(func)
+
+    return decorator
 
 @export
 class Einshape:
@@ -683,7 +744,6 @@ class Einshape:
         """Feature dimensions."""
         assert len(self._f) == 1, f"Einshape.f can only be used if there is exactly one feature dimension. Got {self.f_dict}."
         return self._f.values()[0]
-
 
     @property
     def b_dict(self) -> dict[str, int | None]:
@@ -903,6 +963,103 @@ class Einshape:
             sequence_dims = self._s,
             feature_dims = self._f,
         )
+
+
+@export
+class MxLayer(layers.Layer):
+    def __init__(self, name, desc, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.desc = desc
+
+
+@export
+def make_causal_mask(m: int, n: int = None) -> tuple[tf.Tensor, tf.Tensor]:
+    """
+    Mask the upper half of the dot product matrix in self attention.
+    This prevents flow of information from future tokens to current token.
+    1's in the lower triangle, counting from the lower right corner.
+
+    If n is None, return a square mask of shape (1, m, m)
+    Otherwise, returns a mask with shape (1, m, n)
+
+    >>> mask, scales = make_causal_mask(3)
+    >>> print(mask.numpy())
+    [[[1. 0. 0.]
+      [1. 1. 0.]
+      [1. 1. 1.]]]
+
+    >>> mask, scales = make_causal_mask(3, 4)
+    >>> print(mask.numpy())
+    [[[1. 0. 0. 0.]
+      [1. 1. 0. 0.]
+      [1. 1. 1. 0.]]]
+    >>> mask, scales = make_causal_mask(4, 3)
+    >>> print(mask.numpy())
+    [[[1. 0. 0.]
+      [1. 1. 0.]
+      [1. 1. 1.]
+      [1. 1. 1.]]]
+    """
+    if n is None:
+        n = m
+
+    mask = tf.linalg.band_part(tf.ones([1, m, n]), -1, 0)
+    scales = 1./tf.sqrt(tf.reduce_sum(mask, axis=-1))
+    return mask, scales
+
+
+@export
+@tf_scope
+def dist(x, y):
+    """
+    Compute the euclidean distance between two tensors,
+    treating the last dimension as the feature dimension.
+
+    >>> x = tf.constant([1, 2])
+    >>> y = tf.constant([2, 2])
+    >>> dist(x, y).numpy()
+    1.0
+    >>> x = tf.constant([[0, 0], [1, 1]])
+    >>> y = tf.constant([[1, 1], [2, 2]])
+    >>> dist(x, y).numpy()
+    array([1.4142135, 1.4142135], dtype=float32)
+    """
+    x = tf.cast(tf.convert_to_tensor(x), dtype=dtype())
+    y = tf.cast(tf.convert_to_tensor(y), dtype=dtype())
+    return tf.norm(x - y, axis=-1)
+
+
+
+@export
+@tf_scope
+def arc_dist(x, y):
+    """
+    Compute the component-wise arc distance between two tensors of angles.
+
+    Returns a tensor of angles with the same shape as the inputs. The
+    returned angles are in the range [0, pi].
+
+    >>> x = tf.constant(pi)
+    >>> y = tf.constant(0.)
+    >>> arc_dist(x, y).numpy()
+    3.1415927
+    >>> x = tf.constant([pi, 0.])
+    >>> y = tf.constant([0., pi])
+    >>> arc_dist(x, y).numpy()
+    array([3.1415927, 3.1415927], dtype=float32)
+    >>> x = tf.constant(pi/2)
+    >>> y = tf.constant(-pi)
+    >>> arc_dist(x, y).numpy()
+    1.5707964
+    >>> x = tf.constant(0)
+    >>> y = tf.constant(0)
+    >>> arc_dist(x, y).numpy()
+    0.0
+    """
+    x = tf.cast(tf.convert_to_tensor(x), dtype=dtype())
+    y = tf.cast(tf.convert_to_tensor(y), dtype=dtype())
+    return tf.abs(tf.atan2(tf.sin(x - y), tf.cos(x - y)))
+
 
 @export
 @tf_scope

@@ -39,6 +39,7 @@ if typing.TYPE_CHECKING:
     import tensorflow_probability.python.layers as tfpl
 
     from tensorflow.python.data.ops.dataset_ops import DatasetV2 as Dataset
+    from tensorflow.python.ops.linalg.linalg import norm as norm
 else:
     from tensorflow import keras
     import tensorflow.keras.mixed_precision
@@ -50,6 +51,7 @@ else:
     from tensorflow.data import Dataset
     from tensorflow_probability import distributions as tfd
     from tensorflow_probability import layers as tfpl
+    from tensorflow.linalg import norm as norm
 
 from mx.export import export, exporter
 

@@ -217,10 +217,19 @@ class Task(abc.ABC):
     def make_predict_fn(self, model) -> Callable:
         pass
 
+
 @dataclass
 class Embedding_TaskConfig:
+    pass
+
+@dataclass
+class FloatEmbedding_TaskConfig(Embedding_TaskConfig):
     n_input_dims: int
     "Size of the input vector (recieved from the task)."
+@dataclass
+class DiscreteEmbedding_TaskConfig(Embedding_TaskConfig):
+    n_tokens: int
+    "Number of distinct tokens in the codebook."
 
 @export
 class MxEmbedding(abc.ABC):
@@ -243,10 +252,7 @@ class MxEmbedding(abc.ABC):
         self.n_embd = n_embd
         "Number of embedding dimensions"
 
-        self.task_config_type: Type[Embedding_TaskConfig] = Embedding_TaskConfig
-
-        ## set by self.recieve_task_config(cfg) ##
-        self.task_cfg: Embedding_TaskConfig = None
+        self.task_cfg_type: Type[Embedding_TaskConfig] = Embedding_TaskConfig
 
     def receive_task_config(self, cfg: Embedding_TaskConfig):
         assert isinstance(cfg, self.task_config_type), f"Expected {self.task_config_type}, got {type_name(cfg)}"
@@ -376,7 +382,7 @@ class Pipeline:
             name=self.model_name(i),
         )
 
-        model.save(self.output_dir() / model.name)
+        # model.save(self.output_dir() / model.name)
         model.was_loaded = False
 
         return model

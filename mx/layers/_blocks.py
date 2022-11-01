@@ -1,6 +1,5 @@
 from mx.prelude import *
 from mx.utils import Einshape
-from ._layer_utils import make_causal_mask
 
 def featurewise_dense(in_dims: Einshape, out_dims: Einshape, regularizer=None, name="mix") -> Model:
     """
@@ -104,9 +103,9 @@ def mha(embd_shape: Einshape, n_heads: int, kv_embd_shape: Einshape = None, norm
 
         if causal_mask:
             if type == "self_attn":
-                mask, mask_scales = make_causal_mask(embd_shape.s_product)
+                mask, mask_scales = u.make_causal_mask(embd_shape.s_product)
             else: # cross_attn
-                mask, mask_scales = make_causal_mask(embd_shape.s_product, kv_embd_shape.s_product)
+                mask, mask_scales = u.make_causal_mask(embd_shape.s_product, kv_embd_shape.s_product)
 
         if normalization_type == "softmax":
 
