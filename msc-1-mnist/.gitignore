@@ -1,0 +1,6 @@
+.ipynb
+.ipynb_checkpoints
+wandb
+models
+env
+**/__pycache__
