@@ -1,0 +1,18 @@
+__pycache__/
+cached_dataset
+_env/
+.ipynb_checkpoints/
+wandb/
+*.blend1
+
+# artifacts
+_renders/*
+_anims/*
+_models/*
+_cache/*
+_runs/*
+_logs/*
+
+!**/.gitkeep
+
+**/*.ignore*
