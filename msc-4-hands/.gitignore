@@ -1,0 +1,8 @@
+__pycache__/
+cached_dataset
+env/
+.ipynb_checkpoints/
+wandb/
+models/
+*.blend1
+renders/
