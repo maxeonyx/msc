@@ -1,5 +1,6 @@
 {
     "python.analysis.typeCheckingMode": "off",
     "files.autoSave": "afterDelay",
-    "files.autoSaveDelay": 100
+    "files.autoSaveDelay": 100,
+    "python.defaultInterpreterPath": "/essd/mlenv/bin/python"
 }

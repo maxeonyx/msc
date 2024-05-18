@@ -1,0 +1,15 @@
+holoviews[all]
+enlighten
+wandb
+tensorflow
+tensorflow_probability
+tensorflow_datasets
+keras-nlp
+python-box
+randomname
+einops
+nvsmi
+tensorboard_plugin_profile
+icecream
+datasets
+transformers

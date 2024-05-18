@@ -1,0 +1,24 @@
+__pycache__/
+cached_dataset
+_env/
+.ipynb_checkpoints/
+wandb/
+
+
+**/*weights-step*
+
+# artifacts
+_models/*
+_cache/*
+_runs/*
+_bvh_plots/*
+_logs/*
+_output/*
+_outputs/*
+#!_outputs/blessed
+
+renders/
+
+!**/.gitkeep
+
+**/*.ignore*
